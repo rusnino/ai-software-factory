@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from sqlalchemy import Column
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSON
 from sqlmodel import Field, SQLModel
 
 from governance_controller.constants import TaskState
@@ -22,7 +22,7 @@ class Task(SQLModel, table=True):
     project_id: str
     task_contract_json: dict = Field(
         default_factory=dict,
-        sa_column=Column("task_contract_json", JSONB()),
+        sa_column=Column("task_contract_json", JSON()),
     )
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime | None = Field(default=None)
