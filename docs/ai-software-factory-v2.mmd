@@ -1,0 +1,108 @@
+flowchart TB
+    Human["Human<br/>(Product Owner / Tech Lead / Reviewer)"]
+
+    subgraph INTAKE["Intake layer"]
+        IntakeAdapter["Intake Adapter<br/>(Telegram / Email / Slack / API / Voice)"]
+        IdeaIngestion["Idea Ingestion Service<br/>- normalize input<br/>- classify: existing / new / needs-triage<br/>- create Plane Draft"]
+        IntakeAdapter --> IdeaIngestion
+    end
+
+    subgraph PLANE["Human project layer (SSOT projection for humans)"]
+        Plane["Plane CE<br/>Self-hosted Project Management<br/>Kanban / Epics / Tasks / States / Dependencies"]
+    end
+
+    subgraph GOVERNANCE["Governance layer (AUTHORITATIVE)"]
+        Controller["Governance Controller<br/>Python + FastAPI + Pydantic + SQLAlchemy + PostgreSQL"]
+        ApprovalEndpoint["POST /approvals<br/>(single authoritative entry point)<br/>source: plane | telegram | dashboard | cli"]
+        StateMachine["State Machine<br/>PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED"]
+        PolicyEngine["Policy Engine<br/>Task Contract + Project Profile + Completion Contract"]
+        ApprovalStore["Approval Store<br/>durable approval records + audit log"]
+        Controller --- ApprovalEndpoint
+        Controller --- StateMachine
+        Controller --- PolicyEngine
+        Controller --- ApprovalStore
+    end
+
+    subgraph META["Meta Orchestration (WHAT?)"]
+        MetaOrch["Meta Orchestrator<br/>OpenCode in architect/planner role + BMAD + OpenSpec"]
+    end
+
+    subgraph RUNTIME["Runtime task layer"]
+        OpenTasks["opentasks daemon<br/>runtime task graph / claiming / dependencies"]
+    end
+
+    subgraph MACRO["Execution orchestration (WHO / WHEN?)"]
+        MacroAgent["macro-agent<br/>(Alex Ngai, MIT)"]
+        Teams["Teams / Topology<br/>YamlDrivenTopology"]
+        AgentManager["AgentManager + acp-factory"]
+        GitCascade["git-cascade<br/>worktrees / streams / merge / rebase"]
+        AgentInbox["agent-inbox<br/>messaging"]
+        MacroAgent --> Teams
+        Teams --> AgentManager
+        Teams --> OpenTasks
+        Teams --> GitCascade
+        OpenTasks --> AgentInbox
+    end
+
+    subgraph BRIDGE["Event Bridge"]
+        EventBridge["macro-agent Event Bridge<br/>(Node/TS microservice)<br/>subscribes workspaceManager.onEvent<br/>retries + idempotency"]
+    end
+
+    subgraph HARNESSES["Agent harnesses (HOW?)"]
+        OpenCode["OpenCode<br/>primary worker harness"]
+        ClaudeCode["Claude Code<br/>subscription planner/architect"]
+        CodexCLI["Codex CLI<br/>subscription reviewer"]
+        Aider["Aider<br/>open-source fallback worker"]
+    end
+
+    subgraph SKILL_ISO["Skills / Isolation"]
+        Skills["Skills / Superpowers / Domain Rules"]
+        Isolation["Isolation<br/>git worktree → Docker → Firecracker/Kata"]
+    end
+
+    subgraph GITCI["Git + CI"]
+        Git["Git Repository<br/>PR / branches / commits"]
+        CI["CI<br/>Woodpecker / Gitea Actions / GitHub Actions"]
+        Verification["Verification<br/>tests / lint / type check / secret scan"]
+        Git --> CI
+        CI --> Verification
+    end
+
+    Human -->|quick ideas / feedback| IntakeAdapter
+    Human -->|create / edit / review / approve-request| Plane
+    Human -->|approve execution| ApprovalEndpoint
+
+    IdeaIngestion -->|create Draft / Epic / Proposal| Plane
+
+    Plane <-->|read project state / drafts| MetaOrch
+    MetaOrch -->|create Epic + Task DAG| Plane
+
+    Plane -->|webhooks: task/relation/status changes| Controller
+    Controller -->|sync execution state Controller wins| Plane
+    Controller -->|sync content fields Plane wins if Proposed or lower| Plane
+
+    Controller -->|materialize approved subgraph| OpenTasks
+    Controller -->|start / status / cancel| MacroAgent
+
+    MacroAgent -->|workspace events| EventBridge
+    EventBridge -->|idempotent state updates| Controller
+    Controller -->|fallback polling / timeout checks| MacroAgent
+
+    AgentManager --> OpenCode
+    AgentManager -.->|optional| ClaudeCode
+    AgentManager -.->|optional| CodexCLI
+    AgentManager -.->|optional| Aider
+
+    OpenCode --> Skills
+    ClaudeCode -.-> Skills
+    CodexCLI -.-> Skills
+    Aider -.-> Skills
+
+    OpenCode --> Isolation
+    ClaudeCode -.-> Isolation
+    CodexCLI -.-> Isolation
+    Aider -.-> Isolation
+
+    Isolation -->|commit / PR| Git
+    Verification -->|PASS / FAIL| Controller
+    Controller -->|HUMAN_REVIEW → merge → DONE| Human

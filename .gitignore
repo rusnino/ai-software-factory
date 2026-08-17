@@ -1,0 +1,134 @@
+# =============================================================================
+# Industry best-practice .gitignore for Python + Node + DevOps project
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Operating system files
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Editors and IDEs
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+.cover
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.dmypy.json
+*.log
+
+# -----------------------------------------------------------------------------
+# Node / JavaScript
+# -----------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# -----------------------------------------------------------------------------
+# Rust
+# -----------------------------------------------------------------------------
+target/
+Cargo.lock
+
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+
+# -----------------------------------------------------------------------------
+# Docker / Infrastructure
+# -----------------------------------------------------------------------------
+.dockerignore
+docker-compose.override.yml
+*.env.local
+*.env.*.local
+.secrets
+
+# -----------------------------------------------------------------------------
+# Terraform / Pulumi
+# -----------------------------------------------------------------------------
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.pulumi/
+
+# -----------------------------------------------------------------------------
+# Temporary / scratch files
+# -----------------------------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# -----------------------------------------------------------------------------
+# Project-specific: generated archives, handoff archives, local notes
+# -----------------------------------------------------------------------------
+# Generated spec package (rebuild from specs/ when needed)
+AI_Software_Factory_Specs.zip
+
+# Handoff zip archives from earlier design iterations
+*.codex-handoff.zip
+*.handoff.zip
+
