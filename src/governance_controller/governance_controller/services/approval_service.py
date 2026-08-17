@@ -1,7 +1,6 @@
 """Approval service with embedded policy enforcement."""
 
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,13 +10,9 @@ from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
 from governance_controller.services.state_machine import StateMachine
-
-
-def _noop_audit(event: str, details: dict[str, Any]) -> None:
-    """Temporary no-op audit helper; replaced by AuditService in Task 6."""
-
 
 _APPROVAL_TARGET_STATES: dict[ApprovalType, TaskState] = {
     ApprovalType.PLAN: TaskState.PLAN_APPROVED,
@@ -33,7 +28,6 @@ class ApprovalService:
         self,
         db: AsyncSession,
         policy_engine: type[PolicyEngine] | None = None,
-        audit: Any = None,
     ) -> None:
         """Initialize the service.
 
@@ -41,12 +35,9 @@ class ApprovalService:
             db: The SQLAlchemy async session to use.
             policy_engine: PolicyEngine class to use for evaluation. Defaults to
                 the embedded PolicyEngine.
-            audit: Audit service or helper to call for audit events. Defaults to
-                a no-op helper until Task 6 wires the real AuditService.
         """
         self.db = db
         self.policy_engine = policy_engine or PolicyEngine
-        self.audit = audit or _noop_audit
 
     async def approve(
         self,
@@ -83,12 +74,14 @@ class ApprovalService:
             contract, profile, approval_type
         )
         if not policy_result.allowed:
-            self.audit(
-                "approval_rejected",
-                {
-                    "task_id": task.id,
+            await AuditService.log(
+                db=self.db,
+                event_type="approval_rejected",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
                     "approval_type": approval_type.value,
-                    "actor": actor,
                     "violations": policy_result.violations,
                 },
             )
@@ -106,20 +99,38 @@ class ApprovalService:
             )
         )
         if existing is not None:
-            self.audit(
-                "approval_idempotent",
-                {
-                    "task_id": task.id,
+            await AuditService.log(
+                db=self.db,
+                event_type="approval_idempotent",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
                     "approval_type": approval_type.value,
-                    "actor": actor,
+                    "previous_state": task.state.value,
+                    "new_state": task.state.value,
                 },
             )
             return task
 
         # 3. Determine target state and advance state machine.
+        previous_state = task.state
         target_state = _APPROVAL_TARGET_STATES[approval_type]
         StateMachine.transition(task, target_state)
         task.updated_at = datetime.now(UTC)
+
+        await AuditService.log(
+            db=self.db,
+            event_type="state_change",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            payload={
+                "previous_state": previous_state.value,
+                "new_state": target_state.value,
+                "approval_type": approval_type.value,
+            },
+        )
 
         # 4. Record approval.
         approval = Approval(
@@ -133,13 +144,16 @@ class ApprovalService:
         self.db.add(approval)
         await self.db.flush()
 
-        self.audit(
-            "approval_recorded",
-            {
-                "task_id": task.id,
+        await AuditService.log(
+            db=self.db,
+            event_type="approval",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            payload={
                 "approval_type": approval_type.value,
-                "actor": actor,
-                "target_state": target_state.value,
+                "previous_state": previous_state.value,
+                "new_state": target_state.value,
             },
         )
 
