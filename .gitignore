@@ -132,3 +132,4 @@ AI_Software_Factory_Specs.zip
 *.codex-handoff.zip
 *.handoff.zip
 
+.worktrees
