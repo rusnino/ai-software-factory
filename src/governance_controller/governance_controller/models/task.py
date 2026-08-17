@@ -1,0 +1,28 @@
+"""Task SQLModel entity."""
+
+from datetime import UTC, datetime
+
+from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlmodel import Field, SQLModel
+
+from governance_controller.constants import TaskState
+
+
+def utc_now() -> datetime:
+    """Return the current UTC datetime."""
+    return datetime.now(UTC)
+
+
+class Task(SQLModel, table=True):
+    """A unit of work governed by the Governance Controller state machine."""
+
+    id: str = Field(primary_key=True)
+    state: TaskState = Field(default=TaskState.PROPOSED)
+    project_id: str
+    task_contract_json: dict = Field(
+        default_factory=dict,
+        sa_column=Column("task_contract_json", JSONB()),
+    )
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime | None = Field(default=None)
