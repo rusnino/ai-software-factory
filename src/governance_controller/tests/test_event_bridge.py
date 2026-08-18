@@ -41,6 +41,9 @@ class TestEventBridgeMapping:
         assert _EVENT_TO_STATE["worktree:allocated"] == TaskState.RUNNING
         assert _EVENT_TO_STATE["landing:started"] == TaskState.RUNNING
         assert _EVENT_TO_STATE["landing:completed"] == TaskState.AGENT_REVIEW
+        assert _EVENT_TO_STATE["stream:committed"] == TaskState.RUNNING
+        assert _EVENT_TO_STATE["mergeQueue:added"] == TaskState.RUNNING
+        assert _EVENT_TO_STATE["mergeQueue:ready"] == TaskState.RUNNING
         assert _EVENT_TO_STATE["conflict:created"] == TaskState.BLOCKED
         assert _EVENT_TO_STATE["conflict:resolved"] == TaskState.RUNNING
         assert _EVENT_TO_STATE["stream:abandoned"] == TaskState.FAILED
@@ -98,6 +101,84 @@ class TestEventBridgeTransitions:
         entries = rows.scalars().all()
         assert len(entries) == 1
         assert entries[0].event_type == "macro_agent_conflict:created"
+
+    async def test_stream_committed_transitions_ready_to_running(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-stream-committed",
+            project_id="proj-1",
+            state=TaskState.READY,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("stream:committed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.RUNNING
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].event_type == "macro_agent_stream:committed"
+        assert "transition_error" not in entries[0].payload
+
+    async def test_merge_queue_added_transitions_ready_to_running(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-merge-queue-added",
+            project_id="proj-1",
+            state=TaskState.READY,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("mergeQueue:added", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.RUNNING
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].event_type == "macro_agent_mergeQueue:added"
+        assert "transition_error" not in entries[0].payload
+
+    async def test_merge_queue_ready_transitions_ready_to_running(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-merge-queue-ready",
+            project_id="proj-1",
+            state=TaskState.READY,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("mergeQueue:ready", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.RUNNING
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].event_type == "macro_agent_mergeQueue:ready"
+        assert "transition_error" not in entries[0].payload
 
     async def test_unknown_event_is_logged_but_state_unchanged(
         self,
