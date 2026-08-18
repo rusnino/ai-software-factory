@@ -2,77 +2,71 @@
 
 ## Current State
 
-Design package is complete and committed. The architecture is defined:
+Phase 1 Governance Controller is **complete and fully tested** in `src/governance_controller/`.
 
-- Governance Controller as authoritative Python/FastAPI service.
-- Plane CE as human-facing projection.
-- macro-agent as execution orchestration layer.
-- OpenCode as primary harness, with optional Claude Code / Codex / Aider.
-- Event Bridge for workspace events.
-- opentasks for runtime task graph.
+Implemented components:
 
-## Immediate Next Step: Phase 1 Governance Controller
+- FastAPI application with `POST /tasks`, `POST /approvals`, `GET /health`, `GET /tasks/{id}`, `GET /executions/{id}` (stub), and audit-log endpoint.
+- SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`.
+- Deterministic state machine covering `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
+- Embedded Policy Engine validating task contracts, project profiles, harness allowlist, and approval chain.
+- Append-only `AuditService` wired into approvals and state transitions.
+- `ApprovalService` as the single convergence point for all approvals.
+- Plane Adapter interface + in-memory stub.
+- Harness Provider Registry with OpenCode and Claude Code metadata.
+- macro-agent executor abstraction (`MacroAgentClient`, `MacroAgentExecutor`) and `Execution` model.
+- Automatic execution trigger after `EXECUTION` approval, with `READY → RUNNING` transition.
+- opentasks materialization stub with DAG validation.
+- In-process macro-agent Event Bridge translating workspace events into Controller state updates.
+- Dockerfile and Docker Compose for local API + PostgreSQL.
+- CLI (`approve`) and Telegram adapter stubs converging on `POST /approvals`.
+- Verification stub, permission stub, and git-cascade landing stub.
+- End-to-end Phase 1 smoke test.
 
-Priority: build the minimal Governance Controller that can accept an approval, enforce policy, and transition state.
+Test coverage: **116 passed**, ruff clean, 1 pre-existing Pydantic `class-based config` deprecation warning.
 
-### Tasks
+## Immediate Next Step: Phase 2
 
-1. **Scaffold repository**
-   - Create `src/governance_controller/` Python project.
-   - Use `uv` for dependency management.
-   - Structure: `app/`, `models/`, `services/`, `api/`, `config/`, `tests/`.
+Priority: integrate with real external systems and harden execution orchestration.
 
-2. **Database models (SQLModel)**
-   - `Task`
-   - `Execution`
-   - `Approval`
-   - `ProjectProfile`
-   - `AuditLog`
+### Candidate Tasks
 
-3. **State machine**
-   - Implement `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
-   - Forbid invalid transitions.
+1. **Real Plane CE sync**
+   - Implement HTTP Plane Adapter using Plane REST API.
+   - Bidirectional task state sync (read state/comments, write state/comments).
+   - Webhook receiver for Plane → Controller events.
 
-4. **Single approval endpoint**
-   - `POST /approvals` with idempotency.
-   - Support `approval_type`: plan, execution, merge.
-   - Validate Task Contract and Project Profile before recording approval.
+2. **Real macro-agent integration**
+   - Replace `MacroAgentClient` HTTP stub with actual macro-agent `/runs` API.
+   - Poll/collect execution results.
+   - Handle conflict recovery events.
 
-5. **Policy Engine (embedded Python for Phase 1)**
-   - Task Contract completeness.
-   - Project Profile constraints.
-   - Harness allowlist.
-   - Approval chain correctness.
+3. **Durable execution**
+   - Evaluate Temporal or Celery for retry/collect workflows.
+   - Persist runtime task graph from opentasks materializer.
 
-6. **Audit log**
-   - Append-only log of approvals, state changes, policy checks.
+4. **Policy Engine backend**
+   - Integrate Open Policy Agent (OPA) as optional policy backend.
 
-7. **Plane adapter stub**
-   - Define interface.
-   - Provide in-memory/test-only implementation.
-   - Real Plane integration is Phase 2.
+5. **Advanced isolation**
+   - Docker-based agent sandbox.
+   - Evaluate Firecracker / Kata for Phase 3.
 
-8. **Tests**
-   - Unit tests for state machine.
-   - Unit tests for approval endpoint idempotency.
-   - Unit tests for Policy Engine.
+6. **Security hardening**
+   - Wire `PermissionService` into `ApprovalService`/API.
+   - Authentication/authorization middleware.
+   - Secret injection via environment or vault, never in prompts/YAML.
 
 ## Blockers to Watch
 
-- macro-agent API stability.
+- macro-agent API stability and `/runs` contract.
 - OpenCode ACP compatibility with macro-agent MCP tools.
-
-## Deferred to Phase 2
-
-- Plane CE deployment and bidirectional sync.
-- Meta Orchestrator integration.
-- Intake Adapter.
-- Open Policy Agent (OPA) as Policy Engine backend.
-- Advanced isolation (Docker / Firecracker).
+- Plane CE self-hosted availability and API rate limits.
 
 ## Deferred to Phase 3+
 
-- Temporal for durable execution workflows.
-- Full harness matrix (Claude Code, Codex, Aider).
+- Full harness matrix (Claude Code, Codex, Aider) with runtime selection.
+- Meta Orchestrator integration.
+- Intake Adapter (non-Plane task ingestion).
 - Semantic Reviewer.
-- Production hardening.
+- Production hardening (metrics, tracing, HA).
