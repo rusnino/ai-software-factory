@@ -2,27 +2,27 @@
 
 ## Current State
 
-**Phase 1 is complete.** All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
-`reviews/REVIEW-004-full-codebase-review.md` (and its predecessors) are now `CLOSED` in
-`reviews/GAPS.md`.
+**Phase 1 is not done.** `reviews/REVIEW-005-round3-gap-verification.md` found that 2 of the 6 claimed
+`HIGH` fixes above don't actually work, reopening `GAP-023` and `GAP-024` (plus downgrading `GAP-031`/
+`GAP-032` and opening a new test-coverage gap, `GAP-043`):
 
-Key fixes since REVIEW-004:
+- `GAP-022` (CRITICAL) genuinely fixed — `get_db()` commit/rollback proven correct by direct reproduction
+  against real session semantics (not just the test suite, which still can't exercise this path — `GAP-043`).
+- `GAP-023` (HIGH) **not actually fixed** — the "optimistic version guard" is dead code: `AsyncSessionLocal`'s
+  `expire_on_commit=False` plus a missing `populate_existing=True`/`session.refresh()` means the re-fetch
+  under lock returns the *same cached object* already held by the caller, so the version-mismatch branch can
+  never fire. `.with_for_update()` is also a silent no-op on SQLite. Concurrent approvals can still
+  double-trigger `MacroAgentExecutor.start()`.
+- `GAP-024` (HIGH) **partially fixed** — `PolicyEngine` now genuinely validates `CompletionContract.command`
+  content (catches a contract that lies about `destructive_shell`). But `TaskContract.verification.commands`
+  — the exact field this gap named — is wired into `VerificationService` with **zero** `PolicyEngine`
+  validation, a live, untested bypass to the same class of unmitigated shell execution.
+- `GAP-025`, `GAP-026`, `GAP-020`, `GAP-028`, `GAP-029`, `GAP-030`, `GAP-033`, `GAP-034`, `GAP-038`, `GAP-040`
+  are genuinely closed, confirmed by live reproduction/test runs, not just commit messages.
 
-- `GAP-022` (CRITICAL): `get_db()` now commits per-request DB sessions on success and rolls back on
-  exception, so writes survive against real PostgreSQL.
-- `GAP-023` (HIGH): `ApprovalService` locks the `Task` row with `SELECT ... FOR UPDATE` and uses an
-  optimistic `version` guard to prevent concurrent approvals from double-triggering macro-agent runs.
-- `GAP-024` (HIGH): `PolicyEngine` validates `CompletionContract.command` against a shell-allowlist and
-  the contract's own `destructive_shell`/`uses_docker_socket` flags; `TaskContract.verification` is now
-  wired into `VerificationService`.
-- `GAP-025` (HIGH): `TelegramAdapter` validates the `X-Telegram-Bot-Api-Secret-Token` header and derives
-  `actor` from the sender's username/id.
-- `GAP-026` (HIGH): `EventBridge` deduplicates events keyed on
-  `(task_id, event_type, event_timestamp, event_id)` per SPEC-05 §5.4.
-- `GAP-020` (HIGH), `GAP-021`, `GAP-028`–`GAP-034`, `GAP-038`, `GAP-040` are also closed — see
-  `reviews/GAPS.md` for the full ledger.
-
-Test status: **142 passed**, `ruff` clean, `mypy --strict` clean.
+Test status: **142 passed**, `ruff` clean, `mypy --strict` clean — all independently confirmed accurate, but
+**not sufficient evidence of correctness for GAP-023/024** specifically (see REVIEW-005 for why: the tests
+covering both pass for reasons unrelated to the mechanisms they claim to validate).
 
 Implemented components:
 
