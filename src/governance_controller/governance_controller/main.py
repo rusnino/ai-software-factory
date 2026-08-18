@@ -33,6 +33,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(events_api.EventBodySizeLimitMiddleware)
+
 app.include_router(health_api.router)
 app.include_router(tasks_api.router)
 app.include_router(approvals_api.router)

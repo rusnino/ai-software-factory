@@ -167,6 +167,16 @@ async def test_post_event_rejects_missing_type(
     assert response.status_code == 422
 
 
+async def test_post_event_rejects_oversized_body(
+    async_client: AsyncClient,
+) -> None:
+    oversized = {"type": "x", "payload": {"x": "y" * (70 * 1024)}}
+
+    response = await async_client.post("/events", json=oversized)
+
+    assert response.status_code == 413
+
+
 async def test_post_event_invalid_transition_returns_204_and_logs_error(
     async_client: AsyncClient,
     client_db_session: AsyncSession,

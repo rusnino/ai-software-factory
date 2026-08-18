@@ -1,15 +1,35 @@
 """HTTP endpoint for macro-agent workspace events."""
 
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from governance_controller.adapters.macro_agent.event_bridge import EventBridge
 from governance_controller.db import get_db
 
 router = APIRouter(prefix="/events", tags=["events"])
+
+MAX_BODY_SIZE_BYTES = 64 * 1024
+
+
+class EventBodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject POST /events requests whose Content-Length exceeds the limit."""
+
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        if request.method == "POST" and request.url.path.rstrip("/") == "/events":
+            content_length = request.headers.get("content-length")
+            if content_length is not None and int(content_length) > MAX_BODY_SIZE_BYTES:
+                return Response(
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    content=b"Payload Too Large",
+                )
+        return await call_next(request)
 
 
 class EventIn(BaseModel):
