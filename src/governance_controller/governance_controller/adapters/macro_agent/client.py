@@ -13,28 +13,32 @@ class MacroAgentClient:
 
     async def start(self, payload: dict) -> dict:
         """Start a new macro-agent run."""
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             response = await client.post(f"{self.base_url}/runs", json=payload)
             response.raise_for_status()
             return response.json()
 
     async def status(self, run_id: str) -> dict:
         """Query macro-agent run status."""
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             response = await client.get(f"{self.base_url}/runs/{run_id}")
             response.raise_for_status()
             return response.json()
 
     async def cancel(self, run_id: str) -> dict:
         """Cancel a macro-agent run."""
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             response = await client.post(f"{self.base_url}/runs/{run_id}/cancel")
             response.raise_for_status()
             return response.json()
 
     async def collect(self, run_id: str) -> dict:
         """Collect macro-agent run results."""
-        async with httpx.AsyncClient() as client:
+        async with self._client() as client:
             response = await client.get(f"{self.base_url}/runs/{run_id}/collect")
             response.raise_for_status()
             return response.json()
+
+    def _client(self) -> httpx.AsyncClient:
+        """Return a configured httpx client with explicit timeouts."""
+        return httpx.AsyncClient(timeout=settings.macro_agent_timeout_seconds)
