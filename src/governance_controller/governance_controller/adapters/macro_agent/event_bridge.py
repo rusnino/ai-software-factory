@@ -124,10 +124,16 @@ class EventBridge:
 
         transition_error: str | None = None
         if target_state is not None and task.state != target_state:
-            try:
-                StateMachine.transition(task, target_state)
-            except ValueError as exc:
-                transition_error = str(exc)
+            if not await StateMachine.atomic_transition(db, task, target_state):
+                transition_error = (
+                    "Concurrent modification detected: "
+                    "task state changed during event handling"
+                )
+            # Re-load the task so the in-memory object reflects the latest DB
+            # state (either our own update or a concurrent one).
+            task = await db.get(Task, task_id)
+            if task is None:
+                return
 
         # Phase 1: landing:completed triggers automated verification that gates
         # AGENT_REVIEW -> HUMAN_REVIEW. This is a stub-grade integration until
