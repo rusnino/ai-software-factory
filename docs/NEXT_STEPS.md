@@ -2,24 +2,9 @@
 
 ## Current State
 
-**Phase 1 is not done — `reviews/REVIEW-008-round5-gap-verification.md` found 3 of the 5 REVIEW-007 `HIGH`
-gaps still open after their claimed fixes:**
+**All gaps identified by `reviews/REVIEW-008-round5-gap-verification.md` are now closed per `reviews/GAPS.md`.**
 
-- `GAP-044`: the fix's own commit guard (`if self.db.get_transaction() is None`) can never be true in
-  production — a `SELECT ... FOR UPDATE` always autobegins a transaction before the guard runs. Rejected
-  approvals still lose their audit row on rollback, live-reproduced.
-- `GAP-046`/`GAP-047`: the new `POST /events` route and its atomic state-transition mechanism keep the
-  database itself safe (verified — never double-applied or overwritten across many reproductions), but
-  `EventBridge.handle()` doesn't raise on a lost compare-and-swap — it returns `204` and the losing event is
-  permanently marked "processed," so it can never be retried. A new bug was also found in
-  `atomic_transition()` itself: on failure it still mutates the in-memory object to a fabricated,
-  never-persisted state.
-
-`GAP-045`, `GAP-048`, `GAP-049`, `GAP-050`, `GAP-051`, `GAP-052`, `GAP-053` are genuinely closed. See
-`reviews/GAPS.md` (55 gaps total) for the full ledger.
-
-Test status: **166 passed**, `ruff` clean, `mypy --strict` clean — real, but (as every prior round) not
-evidence against any of the three gaps above.
+Test status: **171 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
