@@ -10,6 +10,13 @@ from governance_controller.adapters.macro_agent.event_bridge import (
 from governance_controller.constants import TaskState
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
+from governance_controller.schemas import (
+    Check,
+    CompletionContract,
+    ForbiddenPathCheck,
+    ScopeCheck,
+)
+from governance_controller.schemas.task_contract import TaskContract
 
 
 def _make_event(
@@ -255,3 +262,63 @@ class TestEventBridgeTransitions:
         assert len(entries) == 1
         assert entries[0].event_type == "macro_agent_landing:completed"
         assert "transition_error" in entries[0].payload
+
+    async def test_landing_completed_failing_completion_contract_moves_to_failed(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-failing-contract",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            task_contract_json=TaskContract(
+                task_id="task-failing-contract",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Exercise failure path through EventBridge",
+                acceptance=["Task ends in FAILED when required check fails"],
+                completion_contract=CompletionContract(
+                    task_id="task-failing-contract",
+                    required=[
+                        Check(
+                            type="always_fail",
+                            command="exit 1",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("landing:completed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.FAILED
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert any(
+            e.event_type == "verification_failed"
+            for e in entries
+        )
+        verification_failed = next(
+            e for e in entries if e.event_type == "verification_failed"
+        )
+        assert verification_failed.actor == "system"
+        assert verification_failed.source == "verification_service"
+        checks = {
+            c["name"]: c
+            for c in verification_failed.payload["checks"]
+        }
+        assert checks["required:always_fail"]["status"] == "failed"
