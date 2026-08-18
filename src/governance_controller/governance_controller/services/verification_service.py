@@ -249,6 +249,9 @@ class VerificationService:
                     "verification_report": report,
                 },
             )
+            # Commit so the audit row survives rollback when the exception
+            # propagates out of get_db().
+            await db.commit()
             raise ValueError(
                 "Concurrent modification detected: "
                 "task state changed during verification"
