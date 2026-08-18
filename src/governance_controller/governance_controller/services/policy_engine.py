@@ -35,6 +35,7 @@ from governance_controller.constants import ApprovalType
 from governance_controller.harness import registry
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.utils.paths import normalize_path
 
 
 @dataclass
@@ -92,18 +93,18 @@ _FORBIDDEN_COMMAND_PATTERNS: list[re.Pattern[str]] = [
 
 
 def _normalize_path(path: str) -> str:
-    """Return a path with trailing slashes removed for prefix comparison."""
-    return path.rstrip("/")
+    """Return a normalized path for prefix comparison."""
+    return normalize_path(path)
 
 
 def _is_inside(path: str, forbidden: str) -> bool:
     """Return True if *path* is exactly *forbidden* or lives underneath it."""
-    path = _normalize_path(path)
-    forbidden = _normalize_path(forbidden)
-    if path == forbidden:
+    normalized_path = _normalize_path(path)
+    normalized_forbidden = _normalize_path(forbidden)
+    if normalized_path == normalized_forbidden:
         return True
-    prefix = forbidden + "/"
-    return path.startswith(prefix)
+    prefix = normalized_forbidden + "/"
+    return normalized_path.startswith(prefix)
 
 
 def _forbidden_path_conflicts(

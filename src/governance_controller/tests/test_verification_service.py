@@ -138,6 +138,53 @@ async def test_forbidden_path_prefix_match_fails() -> None:
     assert "~/.ssh/id_rsa" in forbidden["detail"]
 
 
+async def test_traversal_forbidden_path_is_rejected() -> None:
+    contract = TaskContract(
+        task_id="task-021",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Bypass forbidden path check with traversal",
+        acceptance=["It is caught"],
+        inputs=["src/../../srv/production/secrets.env"],
+        forbidden_paths=["/srv/production"],
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    assert forbidden["status"] == "failed"
+    assert "src/../../srv/production/secrets.env" in forbidden["detail"]
+
+
+async def test_traversal_scope_conflict_is_rejected() -> None:
+    contract = TaskContract(
+        task_id="task-022",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Bypass scope check with traversal",
+        acceptance=["It is caught"],
+        inputs=["src/../../srv/production/secrets.env"],
+        completion_contract=CompletionContract(
+            task_id="task-022",
+            required=[],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(
+                description="Only touch controller code",
+                allowed_paths=["src/"],
+                forbidden_paths=["src/../../srv/production"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    scope_check = next(c for c in result["checks"] if c["name"] == "scope")
+    assert scope_check["status"] == "failed"
+    assert "src/../../srv/production/secrets.env" in scope_check["detail"]
+
+
 async def test_completion_contract_scope_conflict_fails() -> None:
     contract = TaskContract(
         task_id="task-004",
