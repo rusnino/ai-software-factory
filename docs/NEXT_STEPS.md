@@ -2,30 +2,31 @@
 
 ## Current State
 
-**The `CRITICAL`/`HIGH` gate is open: REVIEW-019 found `GAP-077`'s fix has three independent problems, plus two new, unrelated HIGH findings.**
+**The `CRITICAL`/`HIGH` gate is open on one narrow, well-understood residual: everything else REVIEW-019 found is now genuinely closed.**
 
-`GAP-077` (retry-before-`FAILED`, SPEC-09 §9.6): a fix (`ee80cd6`) got the core retry math right (boundary condition, CAS safety, policy-capped `max_retries`) but:
-1. Wired the new `FAILED -> RUNNING` transition into `StateMachine`'s *global* transition table instead of scoping it to the verification-retry call site — `EventBridge.handle()`'s generic event validation shares that table, so 6 of its 9 macro-agent event types can silently resurrect *any* terminally-`FAILED` task, with no attempt bound, no distinguishing audit trail, no human alert.
-2. Replaying the same `landing:completed` event burns a retry attempt with no real new macro-agent execution (the processed-event dedup key isn't recorded on the retry path).
-3. (`GAP-085`, the most severe) **the "retry" never actually retries**: `verify_and_advance()`'s retry branch never calls `MacroAgentExecutor.start()` — confirmed the only call site in the whole codebase is inside the approval flow, unreachable once a task leaves it. A "retried" task is flipped to `RUNNING` and permanently orphaned there — no execution ever restarts, no event will ever arrive to move it further, and no API route can recover it. This is worse than the pre-fix behavior (straight to `FAILED`, at least terminal and actionable).
+`GAP-077`/`GAP-085` (retry-before-`FAILED`, SPEC-09 §9.6) had three bugs across two fix attempts. `f62c5ba` genuinely fixed two of them, independently live-verified in REVIEW-020:
+- `GAP-085` (was the most severe): the retry now genuinely restarts execution — `_start_retry_execution()` creates a real `Execution` row and calls `executor.start()`, confirmed by a full round trip through `EventBridge.handle()` and an exact `max_retries` boundary check.
+- Global transition-table scope: `FAILED -> RUNNING` is no longer in `StateMachine`'s shared table at all; a dedicated `atomic_transition_from_failed_to_running()` is its only call site — confirmed all 6 previously-dangerous event types are now correctly rejected against a `FAILED` task, no resurrection.
+- No `GAP-080`-class regression: the retry's new DB writes commit before the live `executor.start()` call (probe returns in 0.02s against real Postgres), and the CAS is safe under a forced two-session race.
 
-Two new, unrelated HIGH findings from this round's fresh sweep:
-- `GAP-086`: the `GAP-062`/`073` body-size-limit middleware's drain loop spins forever (100% CPU, no response ever sent) if a client disconnects mid-stream after exceeding the cap, instead of finishing the body — live-reproduced, a real DoS via any of `/tasks`/`/approvals`/`/events`.
-- `GAP-087`: `POST /approvals`'s fallback idempotency key (used whenever no `Idempotency-Key` header is sent — the normal case) joins `task_id`/`actor` with `"|"` with no escaping; two unrelated tasks/actors can collide on this delimiter and produce an identical key, causing one approval to be silently dropped (reported to the caller as `"approved": true`) while the real target task never advances — live-reproduced.
+**Still open, blocking the gate**: `GAP-077` itself, narrowed to its one remaining bug — event replay. `EventBridge`'s early-return still skips recording the processed-event dedup key on a retry, so replaying the identical `landing:completed` event re-enters the retry path. This is now **worse than originally reported**: before `GAP-085`'s fix this only double-incremented a counter with no real effect; now it causes a genuine **second live macro-agent execution** for one event. Fix direction: record the dedup key for the retry path too.
 
-Closed gaps, all independently re-verified by live reproduction against real PostgreSQL (not just diff review):
+Closed gaps, all independently re-verified by live reproduction (not just diff review):
 - `GAP-078` (CRITICAL): `DateTime(timezone=True)` on all datetime columns.
 - `GAP-079` (HIGH): dialect-aware profile upsert.
 - `GAP-074` (HIGH): `TaskContract.forbidden_paths` enforced.
 - `GAP-073` (MEDIUM): body-size limit on all write endpoints.
-- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call — verified with a real lock-timing measurement, not just a "commit was called" unit-test check.
-- `GAP-082` (LOW): orphaned `get_by_id_for_update()` removed (confirmed absent repo-wide).
-- `GAP-083` (LOW): DB pool settings now configurable, confirmed genuinely wired by inspecting the instantiated engine's pool.
-- `GAP-084` (MEDIUM): the 6 `test_db.py` tests that bypassed `GC_TEST_DATABASE_URL` now genuinely route through the shared dual-DB fixtures — confirmed by a bad-credentials run making exactly those 6 (and no others) fail with a real `asyncpg` auth error.
+- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call.
+- `GAP-085` (HIGH): retry genuinely restarts execution.
+- `GAP-086` (HIGH): the body-size-limit middleware's drain loop no longer spins forever on client disconnect — confirmed via before/after reproduction (reverted code spun >1M `receive()` calls in 3s; current code returns promptly).
+- `GAP-087` (HIGH): the approvals fallback idempotency key is now a `sha256` hash, not a raw delimiter-joined string — confirmed the original cross-task collision no longer occurs, through the real ASGI app and DB.
+- `GAP-082`/`GAP-083` (LOW): orphaned dead code removed; DB pool settings configurable and genuinely wired.
+- `GAP-084` (MEDIUM): dual-DB test coverage bypass fixed, confirmed genuine.
+- `GAP-090` (MEDIUM): SPEC-09 §9.6's "alert human" now has a real, tested audit-log marker (`alert_human` event) — honestly scoped as not a real outbound notification (that remains Phase 2 work, see candidate task 11).
 
-Still open, blocking the gate: `GAP-077`, `GAP-085`, `GAP-086`, `GAP-087` (all HIGH). Also open (non-blocking): `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet), `GAP-090` (MEDIUM — SPEC-09 §9.6's "alert human" step is entirely unimplemented, not just the macro-agent-feedback half), `GAP-091` (MEDIUM — DB pool-size/log-level settings accept invalid values silently, e.g. a negative pool size silently becomes unbounded).
+Still open (non-blocking): `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet); `GAP-091` (MEDIUM, reopened — the `GAP-083` pool-setting validation fix missed `pool_size=0`, which reproduces the same unbounded-pool bug as a negative value, and never added a validator for `pool_timeout` at all); `GAP-092` (LOW — a recurring hygiene issue where the coding agent's ledger edits cite commit hashes that aren't actually reachable from `main`, now happened twice).
 
-Test status: **202 passed**, genuinely dual-DB now (`GAP-084` closed the last coverage bypass), `ruff` clean, `mypy --strict` clean. Passing tests do not cover `GAP-077`'s two regressions above — neither would be caught by the checked-in suite.
+Test status: **209 passed**, `ruff` clean, `mypy --strict` clean. `GAP-077`'s remaining event-replay bug has no test coverage.
 
 Implemented components:
 
