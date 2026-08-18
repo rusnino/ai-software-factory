@@ -2,13 +2,34 @@ from contextlib import asynccontextmanager
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import DateTime, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 
 import governance_controller.db as db_module
 from governance_controller.db import get_db
+from governance_controller.models.approval import Approval
+from governance_controller.models.audit_log import AuditLog
+from governance_controller.models.execution import Execution
+from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
+
+_TIME_COLUMNS = {
+    Task: {"created_at", "updated_at"},
+    Approval: {"timestamp"},
+    AuditLog: {"timestamp"},
+    Execution: {"started_at", "ended_at"},
+    ProcessedEvent: {"event_timestamp", "processed_at"},
+}
+
+
+@pytest.mark.parametrize(
+    "model, columns", [(m, _TIME_COLUMNS[m]) for m in _TIME_COLUMNS]
+)
+def test_datetime_columns_use_timezone(model, columns):
+    for col_name in columns:
+        col = model.__table__.columns[col_name]
+        assert isinstance(col.type, DateTime) and col.type.timezone is True
 
 
 @pytest.mark.asyncio
