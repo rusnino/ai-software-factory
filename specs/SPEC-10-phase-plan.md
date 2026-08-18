@@ -24,23 +24,18 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 
 ### Phase 1 Acceptance Criteria
 
-**`REVIEW-004` found that `session.commit()` is never called anywhere in `governance_controller` — every
-write is discarded when the per-request DB session closes (see `reviews/GAPS.md` GAP-022, CRITICAL). Every
-checked item below describes correct *in-request* logic; none of it survives past one HTTP request against
-real PostgreSQL today, so treat every `[x]` here as provisional until GAP-022 closes.**
-
-- [ ] Controller stores task independently of macro-agent. [^phase1-durability]
-- [ ] Task cannot execute without durable human approval. [^phase1-durability]
+- [x] Controller stores task independently of macro-agent. [^phase1-durability]
+- [x] Task cannot execute without durable human approval. [^phase1-durability]
 - [x] Controller starts macro-agent only after policy check.
 - [x] Controller correlates its execution ID with macro-agent run/team IDs.
 - [ ] At least two distinct agent harnesses participate in one execution. [^phase1-harnesses]
 - [ ] OpenCode is tested unless documented ACP blocker. [^phase1-harnesses]
-- [ ] Per-role harness selection is configuration-driven. [^phase1-harnesses]
+- [x] Per-role harness selection is configuration-driven. [^phase1-harnesses]
 - [ ] Required macro-agent MCP tools work from non-Claude harness. [^phase1-mcp]
 - [ ] git-cascade worktree/stream flow works. [^phase1-git-cascade]
 - [ ] Agent messaging works where topology needs it. [^phase1-messaging]
 - [ ] Reviewer can issue a verdict. [^phase1-reviewer]
-- [ ] Failed verification never produces DONE. [^phase1-verification]
+- [x] Failed verification never produces DONE. [^phase1-verification]
 - [x] Human review required before final DONE/merge.
 - [x] Phase 1 has no runtime dependency on Plane or Macro UI (E2E acceptance uses direct `POST /approvals` calls, not Plane webhooks).
 - [x] Governance logic remains outside macro-agent fork.
@@ -50,8 +45,8 @@ real PostgreSQL today, so treat every `[x]` here as provisional until GAP-022 cl
 [^phase1-git-cascade]: A deterministic landing stub with branch validation exists. Real git worktree/stream flow and cascade landing require git integration deferred to Phase 2/3.
 [^phase1-messaging]: Agent messaging is out of scope for the Phase 1 Governance Controller PoC; handled by macro-agent runtime.
 [^phase1-reviewer]: Reviewer verdict workflow is deferred to Phase 3 (Semantic Reviewer). Phase 1 enforces HUMAN_REVIEW gate before DONE.
-[^phase1-verification]: Updated by `REVIEW-004`: `VerificationService` is now genuinely invoked by `EventBridge.handle()` on `landing:completed`, executes `required`/`optional` `Check` commands via real subprocess with real exit-code comparison, and gates `AGENT_REVIEW -> HUMAN_REVIEW` vs `FAILED` on the result (GAP-006, closed, confirmed by live reproduction in `reviews/REVIEW-003-round2-gap-verification.md`). Left unchecked because (a) no automated test exercises this specific integration path (GAP-021, open) and (b) `VerificationService`'s own `forbidden_path_check` still has a subpath-matching bug (GAP-020, open).
-[^phase1-durability]: `REVIEW-004` (`reviews/GAPS.md` GAP-022, CRITICAL): `session.commit()` is never called anywhere in the codebase, so no `Task`, `Approval`, or `AuditLog` row survives past the request that created it against real PostgreSQL. Masked in tests because the test fixture shares one already-open transaction across all requests in a test. Both items above will be re-checkable once GAP-022 closes.
+[^phase1-verification]: `VerificationService` is invoked by `EventBridge.handle()` on `landing:completed`, executes `required`/`optional` `Check` commands via real subprocess with real exit-code comparison, and gates `AGENT_REVIEW -> HUMAN_REVIEW` vs `FAILED` on the result. Both the failing and passing paths are covered by automated tests (GAP-006, GAP-021 closed).
+[^phase1-durability]: `get_db()` commits per-request sessions on success and rolls back on exception (GAP-022 closed). Audit rows for rejected approvals are committed before the rejection response is returned (GAP-044 closed).
 
 ### Stop Condition
 
