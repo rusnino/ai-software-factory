@@ -2,17 +2,16 @@
 
 ## Current State
 
-**REVIEW-016 (a full fresh review) found a new `CRITICAL` gap that overrides everything below: the system has never been verified to work against real PostgreSQL, and in fact does not.**
+**All `CRITICAL` and `HIGH` gaps from REVIEW-016 are closed.** `GAP-078` was live-verified by creating a task in a real `postgres:16-alpine` container. The remaining `MEDIUM` gap is `GAP-077` (SPEC-09 §9.6 verification retry), which fails closed, is documented in Phase 2 candidates below, and is intentionally left unimplemented in Phase 1.
 
-- `GAP-078` (CRITICAL): every `datetime` column across all 5 models is `TIMESTAMP WITHOUT TIME ZONE`, but every `utc_now()`/`datetime.now(UTC)` call in the codebase produces a timezone-*aware* value. `asyncpg` rejects this outright. **Live-reproduced against a real Postgres container: `POST /tasks` — task creation, the single most basic write in the system — fails on its first audit-log insert.** Every write path shares the same models, so this is not a narrow bug; it means the Controller has never actually worked against the database `CLAUDE.md`/`docker-compose.yml` mandate as the Phase 1 target. It went undetected through 15 prior review rounds because the entire test suite (186 tests) and every prior round's live reproduction ran exclusively against SQLite, which tolerates the tz-naive/tz-aware mismatch that Postgres does not.
-- `GAP-079` (HIGH): `TaskService.create()`'s project-profile upsert is a TOCTOU race; a losing concurrent request's task is silently dropped and misreported as "already exists."
-- `GAP-080` (HIGH): `get_by_id_for_update()`'s row lock (a no-op on SQLite, real on Postgres) is held across the live macro-agent HTTP call in `POST /approvals`, contradicting the codebase's own fail-fast CAS design and creating a pool-exhaustion path under a hung macro-agent.
-- `GAP-074` (HIGH): `TaskContract.forbidden_paths` (SPEC-03 §3.5) is never read by `PolicyEngine` and is silently dropped by `VerificationService` whenever a `CompletionContract` is attached.
-- `GAP-073` (MEDIUM): the `GAP-062` body-size limit only applies to `POST /events`, not `POST /tasks`/`POST /approvals`, which share the identical unbounded-body exposure.
+Closed gaps:
+- `GAP-078` (CRITICAL): added `DateTime(timezone=True)` to every `datetime` column across all 5 models.
+- `GAP-079` (HIGH): project-profile creation now uses dialect-aware `INSERT ... ON CONFLICT DO NOTHING` + re-fetch.
+- `GAP-080` (HIGH): approval route no longer holds `SELECT ... FOR UPDATE` across the live macro-agent HTTP call; relies on the existing `atomic_transition()` CAS.
+- `GAP-074` (HIGH): `PolicyEngine` now merges `contract.forbidden_paths` with `profile.security.forbidden_paths`, and `VerificationService` checks them regardless of `CompletionContract`.
+- `GAP-073` (MEDIUM): body-size limit middleware now applies to `/events`, `/tasks`, and `/approvals`.
 
-See `reviews/REVIEW-016-full-fresh-review.md` and `reviews/GAPS.md` for full detail. Per the ledger's gate rule, Phase 1 cannot be described as complete while these `CRITICAL`/`HIGH` rows are `OPEN`.
-
-Test status: **186 passed** (SQLite only — see `GAP-078`; this number does not demonstrate Postgres correctness), `ruff` clean, `mypy --strict` clean.
+Test status: **202 passed**, `ruff` clean, `mypy --strict` clean. PostgreSQL smoke test passed against `postgres:16-alpine`.
 
 Implemented components:
 
