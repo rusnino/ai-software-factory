@@ -13,6 +13,7 @@ from governance_controller.api import health as health_api
 from governance_controller.api import tasks as tasks_api
 from governance_controller.config import settings
 from governance_controller.db import init_db
+from governance_controller.middleware import WriteBodySizeLimitMiddleware
 
 
 @asynccontextmanager
@@ -33,7 +34,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(events_api.EventBodySizeLimitMiddleware)
+app.add_middleware(WriteBodySizeLimitMiddleware)
 
 app.include_router(health_api.router)
 app.include_router(tasks_api.router)
