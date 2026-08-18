@@ -106,9 +106,15 @@ Priority: integrate with real external systems and harden execution orchestratio
 ## Deferred to Phase 3+
 
 - Full harness matrix (Claude Code, Codex, Aider) with runtime selection.
-- Meta Orchestrator integration.
+- Meta Orchestrator integration — evaluate sudocode-ai/sudocode's Spec/Issue graph model and OpenSpec
+  integration before building idea-decomposition tooling from scratch (its execution engine is out of
+  scope; that's macro-agent's job) — see `docs/research-alexngai-ecosystem-and-sudocode.md`.
 - Intake Adapter (non-Plane task ingestion).
 - Semantic Reviewer.
 - Production hardening (metrics, tracing, HA).
 - Evaluate LongHorizon-Harness (or similar durable-execution wrappers) as an optional `AgentHarness`
   adapter for long-running/GUI-touching opentasks — see `docs/research-longhorizon-harness.md`.
+- If macro-agent's pre-1.0 risk (RISK-02/08) ever materializes into a real blocker, alexngai/openswarm is a
+  concrete alternative execution engine (untested API surface, verify before evaluating further);
+  alexngai/openhive is a multi-swarm federation candidate once single-swarm operation is proven — see
+  `docs/research-alexngai-ecosystem-and-sudocode.md`.
