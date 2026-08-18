@@ -2,7 +2,7 @@
 
 ## Current State
 
-**All gaps found by `REVIEW-013` are now closed per `reviews/GAPS.md`.**
+**14 of the 15 gaps found by `REVIEW-013` are genuinely closed, independently re-verified in `REVIEW-014` by live reproduction (not just diff review).** All `CRITICAL`/`HIGH` gaps (`GAP-057` through `GAP-061`) are confirmed fixed — the phase-gate rule is satisfied. One `MEDIUM` gap, `GAP-062` (`POST /events` body-size limit), is only partially fixed: the middleware checks the declared `Content-Length` header but never caps actual bytes read from the stream, so a client that omits or lies about that header still gets an unbounded body processed. See `reviews/REVIEW-014-gap-verification.md` and `reviews/GAPS.md`.
 
 Test status: **185 passed**, `ruff` clean, `mypy --strict` clean.
 
