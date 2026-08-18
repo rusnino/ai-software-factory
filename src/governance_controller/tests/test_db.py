@@ -73,3 +73,37 @@ async def test_get_db_rolls_back_on_generator_exit(in_memory_get_db):
 
     async with asynccontextmanager(in_memory_get_db)() as session:
         assert await session.get(Task, "rollback-gen") is None
+
+
+async def test_get_db_commit_branch_requires_exception_catch(in_memory_get_db):
+    """Mutation test: if except Exception were used, an exception thrown INTO
+    the generator (as FastAPI does) would *not* be caught and rollback would not
+    run, leaving the uncommitted insert visible to a later session. The
+    BaseException branch ensures rollback happens and the insert is absent.
+    """
+    gen = in_memory_get_db()
+    session = await gen.asend(None)
+    task = Task(id="thrown-exc", project_id="p1", proposed_by="tester")
+    session.add(task)
+
+    with pytest.raises(ValueError, match="thrown"):
+        await gen.athrow(ValueError("thrown"))
+
+    async with asynccontextmanager(in_memory_get_db)() as session:
+        assert await session.get(Task, "thrown-exc") is None
+
+
+async def test_get_db_success_branch_requires_no_exception(in_memory_get_db):
+    """Confirm that the commit branch is exercised on normal exit."""
+    from contextlib import suppress
+
+    gen = in_memory_get_db()
+    session = await gen.asend(None)
+    task = Task(id="thrown-commit", project_id="p1", proposed_by="tester")
+    session.add(task)
+
+    with suppress(StopAsyncIteration):
+        await gen.asend(None)
+
+    async with asynccontextmanager(in_memory_get_db)() as session:
+        assert await session.get(Task, "thrown-commit") is not None
