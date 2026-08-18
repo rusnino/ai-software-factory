@@ -30,6 +30,7 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.state_machine import StateMachine
 
 
 def _make_contract(task_id: str = "task-concurrent") -> TaskContract:
@@ -401,13 +402,15 @@ class TestApprovalConcurrency:
         await engine.dispose()
         os.unlink(path)
 
-    async def test_ready_cas_loss_survives_get_db_rollback(self) -> None:
-        """Losing the READY CAS persists its audit and the winner's state.
+    async def test_outer_cas_loss_survives_get_db_rollback(self) -> None:
+        """Losing the outer ``approve()`` CAS persists its audit and winner state.
 
         Session A reads PLAN_APPROVED. Session B wins the EXECUTION approval
         through READY and RUNNING. Session A then drives the real ``get_db()``
-        generator and loses the READY CAS; its audit row must survive the
-        rollback and the database must reflect session B's RUNNING state.
+        generator and loses the ``PLAN_APPROVED -> EXEC_APPROVED`` CAS inside
+        ``approve()`` (before ``_trigger_execution`` runs); its audit row must
+        survive the rollback and the database must reflect session B's RUNNING
+        state.
         """
         engine, local_session, path = _file_db_session_maker()
 
@@ -515,6 +518,214 @@ class TestApprovalConcurrency:
                 select(Execution).where(Execution.task_id == "task-ready-cas")
             )
             assert len(executions.scalars().all()) == 1
+
+        await engine.dispose()
+        os.unlink(path)
+
+    async def test_trigger_execution_ready_cas_loss_commits_before_raise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Losing the READY CAS inside ``_trigger_execution`` persists audit.
+
+        The task is seeded at ``PLAN_APPROVED``. ``approve()`` succeeds through
+        ``EXEC_APPROVED``, but the ``EXEC_APPROVED -> READY`` CAS inside
+        ``_trigger_execution`` is forced to lose. The commit-before-raise must
+        leave the task at ``EXEC_APPROVED`` with a durable
+        ``concurrent_modification`` audit row.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-ready-cas-internal")
+
+        contract = _make_contract("task-ready-cas-internal")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-ready-cas"}
+
+        # Force only the READY-CAS inside _trigger_execution to lose.
+        original = StateMachine.atomic_transition
+
+        async def _patched(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.READY:
+                return False
+            return await original(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine, "atomic_transition", staticmethod(_patched)
+        )
+
+        from governance_controller import config as config_module
+        from governance_controller import db as db_module
+
+        original_database_url = config_module.settings.database_url
+        config_module.settings.database_url = (
+            engine.url.render_as_string(hide_password=False)
+        )
+        original_engine = db_module.engine
+        original_session_local = db_module.AsyncSessionLocal
+        db_module.engine = engine
+        db_module.AsyncSessionLocal = local_session
+
+        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+
+        try:
+            with pytest.raises(
+                ValueError, match="Concurrent modification detected"
+            ):
+                async with asynccontextmanager(get_db)() as db:
+                    service.db = db
+                    task = await db.scalar(
+                        select(Task).where(Task.id == "task-ready-cas-internal")
+                    )
+                    assert task is not None
+                    await service.approve(
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key="key-ready-cas-internal",
+                    )
+        finally:
+            config_module.settings.database_url = original_database_url
+            db_module.engine = original_engine
+            db_module.AsyncSessionLocal = original_session_local
+
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-ready-cas-internal")
+            )
+            assert task is not None
+            assert task.state == TaskState.EXEC_APPROVED
+
+            audits = await check.execute(
+                select(AuditLog).where(
+                    AuditLog.task_id == "task-ready-cas-internal"
+                )
+            )
+            events = [a.event_type for a in audits.scalars().all()]
+            assert "concurrent_modification" in events
+
+            executions = await check.execute(
+                select(Execution).where(
+                    Execution.task_id == "task-ready-cas-internal"
+                )
+            )
+            assert len(executions.scalars().all()) == 0
+
+        await engine.dispose()
+        os.unlink(path)
+
+    async def test_trigger_execution_running_cas_loss_commits_before_raise(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Losing the RUNNING CAS inside ``_trigger_execution`` persists audit.
+
+        ``approve()`` reaches ``_trigger_execution``, the executor starts, the
+        Execution row is persisted, but the ``READY -> RUNNING`` CAS loses.
+        The commit-before-raise must leave the task at ``READY`` and preserve
+        the ``concurrent_modification`` audit row.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-running-cas-internal")
+
+        contract = _make_contract("task-running-cas-internal")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-running-cas"}
+
+        original = StateMachine.atomic_transition
+
+        async def _patched(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine, "atomic_transition", staticmethod(_patched)
+        )
+
+        from governance_controller import config as config_module
+        from governance_controller import db as db_module
+
+        original_database_url = config_module.settings.database_url
+        config_module.settings.database_url = (
+            engine.url.render_as_string(hide_password=False)
+        )
+        original_engine = db_module.engine
+        original_session_local = db_module.AsyncSessionLocal
+        db_module.engine = engine
+        db_module.AsyncSessionLocal = local_session
+
+        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+
+        try:
+            with pytest.raises(
+                ValueError, match="Concurrent modification detected"
+            ):
+                async with asynccontextmanager(get_db)() as db:
+                    service.db = db
+                    task = await db.scalar(
+                        select(Task).where(
+                            Task.id == "task-running-cas-internal"
+                        )
+                    )
+                    assert task is not None
+                    await service.approve(
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key="key-running-cas-internal",
+                    )
+        finally:
+            config_module.settings.database_url = original_database_url
+            db_module.engine = original_engine
+            db_module.AsyncSessionLocal = original_session_local
+
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-running-cas-internal")
+            )
+            assert task is not None
+            assert task.state == TaskState.READY
+
+            audits = await check.execute(
+                select(AuditLog).where(
+                    AuditLog.task_id == "task-running-cas-internal"
+                )
+            )
+            events = [a.event_type for a in audits.scalars().all()]
+            assert "concurrent_modification" in events
+
+            executions = await check.execute(
+                select(Execution).where(
+                    Execution.task_id == "task-running-cas-internal"
+                )
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].state == TaskState.RUNNING
 
         await engine.dispose()
         os.unlink(path)
