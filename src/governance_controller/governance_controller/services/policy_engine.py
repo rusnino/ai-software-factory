@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass
 
 from governance_controller.constants import ApprovalType
+from governance_controller.harness import registry
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 
@@ -290,13 +291,22 @@ class PolicyEngine:
         if not contract.acceptance:
             violations.append("Task contract acceptance criteria are empty")
 
-        # 2 & 5. Harness allowlist
+        # 2 & 5. Harness allowlist and role allowlist for that harness.
         requested_harness = contract.execution.harness
         allowed_harnesses = profile.execution.allowed_harnesses
         if requested_harness not in allowed_harnesses:
             violations.append(
                 f"Harness '{requested_harness}' is not in the allowed harness list"
             )
+
+        if registry.is_registered(requested_harness):
+            provider = registry.get(requested_harness)
+            requested_role = contract.execution.role
+            if requested_role not in provider.allowed_roles:
+                violations.append(
+                    f"Role '{requested_role}' is not allowed by harness "
+                    f"'{requested_harness}'"
+                )
 
         # 3. Forbidden path enforcement: any input or deliverable that the task
         #    explicitly touches must not be inside a path forbidden by the

@@ -3,6 +3,8 @@
 import pytest
 
 from governance_controller.constants import ApprovalType
+from governance_controller.harness import registry
+from governance_controller.harness.base import HarnessProvider
 from governance_controller.schemas import Check, CompletionContract, ScopeCheck
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
@@ -433,3 +435,54 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is True
+
+
+class TestPolicyEngineRoleAllowlist:
+    def test_default_worker_role_on_opencode_passes(self) -> None:
+        contract = _make_contract()
+        assert contract.execution.role == "worker"
+        profile = _make_profile(allowed_harnesses=["opencode"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+        assert result.violations == []
+
+    def test_allowed_planner_role_on_claude_code_passes(self) -> None:
+        contract = _make_contract(
+            harness="claude-code",
+        )
+        contract.execution.role = "planner"
+        profile = _make_profile(allowed_harnesses=["claude-code"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+        assert result.violations == []
+
+    def test_unknown_role_on_registered_harness_is_rejected(self) -> None:
+        # Use a custom, registered harness that does NOT allow planner to prove
+        # allowed_roles enforcement is actually evaluated. The global registry is
+        # restored afterwards.
+        fake_harness = HarnessProvider(
+            name="aider",
+            command="aider",
+            auth="provider-configured",
+            supports_mcp=False,
+            allowed_roles=["worker", "fallback"],
+        )
+        registry.register(fake_harness)
+        try:
+            contract = _make_contract(harness="aider")
+            contract.execution.role = "planner"
+            profile = _make_profile(allowed_harnesses=["aider"])
+
+            result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+            assert result.allowed is False
+            assert any(
+                "Role 'planner' is not allowed by harness 'aider'" in v
+                for v in result.violations
+            )
+        finally:
+            del registry._providers["aider"]
