@@ -197,32 +197,47 @@ class VerificationService:
         task: Task,
         contract: TaskContract,
     ) -> dict[str, object]:
-        """Verify *contract* and advance *task* out of ``AGENT_REVIEW``.
+        """Verify *contract* and atomically advance *task* out of ``AGENT_REVIEW``.
 
         The task must already be in ``AGENT_REVIEW``. On success it transitions
-        to ``HUMAN_REVIEW``; on failure it transitions to ``FAILED``.
+        to ``HUMAN_REVIEW``; on failure it transitions to ``FAILED``. The state
+        change uses the same compare-and-swap discipline as ``ApprovalService``
+        so concurrent events cannot silently clobber each other.
         """
         report = await cls.verify_execution(contract)
 
         if report["passed"]:
-            StateMachine.transition(task, TaskState.HUMAN_REVIEW)
-            await AuditService.log(
-                db=db,
-                event_type="verification_passed",
-                task_id=task.id,
-                actor="system",
-                source="verification_service",
-                payload=report,
-            )
+            target_state = TaskState.HUMAN_REVIEW
+            event_type = "verification_passed"
         else:
-            StateMachine.transition(task, TaskState.FAILED)
+            target_state = TaskState.FAILED
+            event_type = "verification_failed"
+
+        if not await StateMachine.atomic_transition(db, task, target_state):
             await AuditService.log(
                 db=db,
-                event_type="verification_failed",
+                event_type="concurrent_modification",
                 task_id=task.id,
                 actor="system",
                 source="verification_service",
-                payload=report,
+                payload={
+                    "expected_state": TaskState.AGENT_REVIEW.value,
+                    "target_state": target_state.value,
+                    "verification_report": report,
+                },
             )
+            raise ValueError(
+                "Concurrent modification detected: "
+                "task state changed during verification"
+            )
+
+        await AuditService.log(
+            db=db,
+            event_type=event_type,
+            task_id=task.id,
+            actor="system",
+            source="verification_service",
+            payload=report,
+        )
 
         return report

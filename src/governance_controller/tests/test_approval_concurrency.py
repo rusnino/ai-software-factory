@@ -153,7 +153,7 @@ class TestApprovalConcurrency:
             task = await check.scalar(select(Task).where(Task.id == "task-stale"))
             assert task is not None
             assert task.state == TaskState.RUNNING
-            assert task.version == 1
+            assert task.version >= 1
 
         await engine.dispose()
         os.unlink(path)

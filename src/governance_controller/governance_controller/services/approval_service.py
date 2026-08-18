@@ -269,8 +269,27 @@ class ApprovalService:
         previous_state: TaskState,
     ) -> Task:
         """Move task to READY, start macro-agent, record Execution, go RUNNING."""
-        StateMachine.transition(task, TaskState.READY)
-        task.updated_at = datetime.now(UTC)
+        # Atomically advance EXEC_APPROVED -> READY. If another caller already
+        # moved the task, the UPDATE affects 0 rows and we fail loudly.
+        if not await StateMachine.atomic_transition(
+            self.db, task, TaskState.READY
+        ):
+            await AuditService.log(
+                db=self.db,
+                event_type="concurrent_modification",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": ApprovalType.EXECUTION.value,
+                    "expected_state": TaskState.EXEC_APPROVED.value,
+                    "target_state": TaskState.READY.value,
+                },
+            )
+            raise ValueError(
+                "Concurrent modification detected: "
+                "task state changed during execution trigger"
+            )
 
         await AuditService.log(
             db=self.db,
@@ -300,34 +319,39 @@ class ApprovalService:
         try:
             result = await self.executor.start(contract, execution.id)
         except Exception as exc:  # pragma: no cover - broad error shield
-            StateMachine.transition(task, TaskState.FAILED)
-            task.updated_at = datetime.now(UTC)
-            execution.state = TaskState.FAILED
-            execution.ended_at = datetime.now(UTC)
-            await self.db.flush()
+            if await StateMachine.atomic_transition(
+                self.db, task, TaskState.FAILED
+            ):
+                execution.state = TaskState.FAILED
+                execution.ended_at = datetime.now(UTC)
+                await self.db.flush()
 
-            await AuditService.log(
-                db=self.db,
-                event_type="execution_start_failed",
-                task_id=task.id,
-                actor=actor,
-                source=source,
-                execution_id=execution.id,
-                payload={
-                    "approval_type": ApprovalType.EXECUTION.value,
-                    "execution_id": execution.id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                },
-            )
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_start_failed",
+                    task_id=task.id,
+                    actor=actor,
+                    source=source,
+                    execution_id=execution.id,
+                    payload={
+                        "approval_type": ApprovalType.EXECUTION.value,
+                        "execution_id": execution.id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
             raise RuntimeError(f"macro-agent start failed: {exc}") from exc
 
         execution.macro_agent_run_id = result["run_id"]
         execution.state = TaskState.RUNNING
         await self.db.flush()
 
-        StateMachine.transition(task, TaskState.RUNNING)
-        task.updated_at = datetime.now(UTC)
+        if not await StateMachine.atomic_transition(
+            self.db, task, TaskState.RUNNING
+        ):
+            raise ValueError(
+                "Concurrent modification detected: task state changed before RUNNING"
+            )
 
         await AuditService.log(
             db=self.db,

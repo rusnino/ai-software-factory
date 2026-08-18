@@ -2,6 +2,9 @@
 
 from datetime import UTC, datetime
 
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from governance_controller.constants import TaskState
 from governance_controller.models.task import Task
 
@@ -78,3 +81,50 @@ class StateMachine:
         task.state = target_state
         task.updated_at = datetime.now(UTC)
         return task
+
+    @classmethod
+    async def atomic_transition(
+        cls,
+        db: AsyncSession,
+        task: Task,
+        target_state: TaskState,
+    ) -> bool:
+        """Atomically transition *task* to *target_state* using an UPDATE WHERE.
+
+        The database update only succeeds when the task's current state and
+        version match the in-memory object. This prevents concurrent callers
+        from silently overwriting each other's state changes.
+
+        Args:
+            db: The SQLAlchemy async session.
+            task: The task instance holding the expected current state/version.
+            target_state: The desired state.
+
+        Returns:
+            True if the update succeeded, False if the task was already
+            modified by another transaction or the transition is invalid.
+        """
+        try:
+            cls._validate(task.state, target_state)
+        except ValueError:
+            return False
+
+        result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == task.version,  # type: ignore[arg-type]
+                Task.state == task.state.value,  # type: ignore[arg-type]
+            )
+            .values(
+                state=target_state.value,
+                version=task.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        if result.rowcount:  # type: ignore[attr-defined]
+            task.state = target_state
+            task.version = task.version + 1
+            task.updated_at = datetime.now(UTC)
+            return True
+        return False

@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from governance_controller.api import approvals as approvals_api
 from governance_controller.api import audit as audit_api
+from governance_controller.api import events as events_api
 from governance_controller.api import executions as executions_api
 from governance_controller.api import health as health_api
 from governance_controller.api import tasks as tasks_api
@@ -35,5 +36,6 @@ app = FastAPI(
 app.include_router(health_api.router)
 app.include_router(tasks_api.router)
 app.include_router(approvals_api.router)
+app.include_router(events_api.router)
 app.include_router(executions_api.router)
 app.include_router(audit_api.router)
