@@ -15,6 +15,34 @@ class PolicyResult:
     violations: list[str]
 
 
+def _normalize_path(path: str) -> str:
+    """Return a path with trailing slashes removed for prefix comparison."""
+    return path.rstrip("/")
+
+
+def _is_inside(path: str, forbidden: str) -> bool:
+    """Return True if *path* is exactly *forbidden* or lives underneath it."""
+    path = _normalize_path(path)
+    forbidden = _normalize_path(forbidden)
+    if path == forbidden:
+        return True
+    prefix = forbidden + "/"
+    return path.startswith(prefix)
+
+
+def _forbidden_path_conflicts(
+    touched_paths: set[str], forbidden_paths: list[str]
+) -> set[str]:
+    """Return the subset of *touched_paths* that fall under any forbidden path."""
+    conflicts: set[str] = set()
+    for touched in touched_paths:
+        for forbidden in forbidden_paths:
+            if _is_inside(touched, forbidden):
+                conflicts.add(touched)
+                break
+    return conflicts
+
+
 class PolicyEngine:
     """Evaluate policy rules against a TaskContract and ProjectProfile."""
 
@@ -53,12 +81,13 @@ class PolicyEngine:
             )
 
         # 3. Forbidden path enforcement: any input or deliverable that the task
-        #    explicitly touches must not match a path forbidden by the project
-        #    profile. Agreeing with the profile on a forbidden path is fine.
-        profile_forbidden = set(profile.security.forbidden_paths)
+        #    explicitly touches must not be inside a path forbidden by the
+        #    project profile. Exact matches are also rejected.
         touched_paths = set(contract.inputs + contract.deliverables)
-        conflicts = sorted(touched_paths & profile_forbidden)
-        for path in conflicts:
+        conflicts = _forbidden_path_conflicts(
+            touched_paths, profile.security.forbidden_paths
+        )
+        for path in sorted(conflicts):
             violations.append(f"Task touches forbidden path: {path}")
 
         # 4. Security posture enforcement from project profile.

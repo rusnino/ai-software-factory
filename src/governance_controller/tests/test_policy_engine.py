@@ -151,3 +151,25 @@ class TestPolicyEngineRejections:
             "Task touches forbidden path: /etc/shadow" in v
             for v in result.violations
         )
+
+    def test_nested_forbidden_path_is_rejected(self) -> None:
+        # A file inside a forbidden directory must be rejected.
+        contract = _make_contract(inputs=["~/.ssh/id_rsa"])
+        profile = _make_profile(forbidden_paths=["~/.ssh", "/srv/production"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path: ~/.ssh/id_rsa" in v
+            for v in result.violations
+        )
+
+    def test_sibling_of_forbidden_path_is_allowed(self) -> None:
+        # A path that shares a prefix but is not under the forbidden directory.
+        contract = _make_contract(inputs=["~/.ssh_backup"])
+        profile = _make_profile(forbidden_paths=["~/.ssh"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
