@@ -192,6 +192,8 @@ class TestApprovalConcurrency:
                 select(Task).where(Task.id == "task-exec-fail")
             )
             assert task is not None
+            # Let the service raise and the session rollback naturally; do not
+            # manually commit -- that is production code's responsibility.
             with pytest.raises(RuntimeError, match="macro-agent start failed"):
                 await service.approve(
                     task=task,
@@ -202,7 +204,6 @@ class TestApprovalConcurrency:
                     actor="admin",
                     idempotency_key="key-exec-fail",
                 )
-            await db.commit()
 
         async with local_session() as check:
             task = await check.scalar(
@@ -351,13 +352,13 @@ class TestApprovalConcurrency:
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
         try:
-            async with asynccontextmanager(get_db)() as db:
-                service.db = db
-                task = await db.scalar(
-                    select(Task).where(Task.id == "task-get-db-fail")
-                )
-                assert task is not None
-                with pytest.raises(RuntimeError, match="macro-agent start failed"):
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                async with asynccontextmanager(get_db)() as db:
+                    service.db = db
+                    task = await db.scalar(
+                        select(Task).where(Task.id == "task-get-db-fail")
+                    )
+                    assert task is not None
                     await service.approve(
                         task=task,
                         contract=contract,
@@ -467,11 +468,11 @@ class TestApprovalConcurrency:
         service_a = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
         try:
-            async with asynccontextmanager(get_db)() as db:
-                service_a.db = db
-                with pytest.raises(
-                    ValueError, match="Concurrent modification detected"
-                ):
+            with pytest.raises(
+                ValueError, match="Concurrent modification detected"
+            ):
+                async with asynccontextmanager(get_db)() as db:
+                    service_a.db = db
                     await service_a.approve(
                         task=task_a,
                         contract=contract,
