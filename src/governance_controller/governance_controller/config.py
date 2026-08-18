@@ -1,4 +1,8 @@
+"""Application configuration and settings."""
+
+import structlog
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from structlog._log_levels import NAME_TO_LEVEL
 
 
 class Settings(BaseSettings):
@@ -13,6 +17,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/governance"
     macro_agent_base_url: str = "http://localhost:3000"
     macro_agent_timeout_seconds: float = 30.0
+    log_level: str = "info"
 
     # Telegram webhook authentication. The secret token is sent by Telegram in
     # the ``X-Telegram-Bot-Api-Secret-Token`` header when webhooks are
@@ -21,4 +26,14 @@ class Settings(BaseSettings):
     telegram_webhook_secret_token: str = ""
 
 
+def configure_logging(log_level: str) -> None:
+    """Configure structlog using the provided log level."""
+    structlog.configure(
+        wrapper_class=structlog.make_filtering_bound_logger(
+            NAME_TO_LEVEL.get(log_level.lower(), 20)
+        ),
+    )
+
+
 settings = Settings()
+configure_logging(settings.log_level)
