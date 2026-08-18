@@ -15,7 +15,6 @@ must be documented.
 | `asyncpg` | Async PostgreSQL driver used by SQLAlchemy in production. |
 | `httpx` | Async HTTP client for macro-agent executor and Telegram/Plane adapters. |
 | `structlog` | Structured, typed logging; renders the audit trail and application logs. |
-| `python-json-logger` | Formatter used by `structlog` to output JSON-shaped log records for log aggregation. |
 | `typer` | CLI framework for the `governance-controller` command-line tool. |
 
 ## Development dependencies
@@ -30,10 +29,8 @@ must be documented.
 
 ## Notes
 
-- `structlog` and `python-json-logger` are intentionally paired:
-  `structlog` produces the structured log events and performs message formatting,
-  while `python-json-logger` provides the JSON formatter consumed by the
-  `structlog` console processor. This keeps log output machine-parseable without
-  duplicating responsibilities.
+- `structlog` is used directly for structured log emission. A machine-parseable
+  JSON formatter (for example, `python-json-logger`) will be added once log
+  aggregation is required in production; it is not needed in Phase 1.
 - `httpx` is used instead of `aiohttp` because it is already a transitive
   dependency of FastAPI's test client and provides a consistent sync/async API.
