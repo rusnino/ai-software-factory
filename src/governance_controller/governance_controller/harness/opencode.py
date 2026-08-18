@@ -9,4 +9,5 @@ OPEN_CODE = HarnessProvider(
     command="opencode",
     auth="provider-configured",
     supports_mcp=True,
+    allowed_roles=["worker", "reviewer", "planner", "meta"],
 )

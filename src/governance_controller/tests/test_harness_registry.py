@@ -17,7 +17,12 @@ def test_get_opencode_returns_expected_command() -> None:
     assert provider.command == "opencode"
     assert provider.auth == "provider-configured"
     assert provider.supports_mcp is True
-    assert provider.allowed_roles == ["worker", "reviewer", "planner"]
+    assert provider.allowed_roles == ["worker", "reviewer", "planner", "meta"]
+
+
+def test_claude_code_allowed_roles_match_spec_06() -> None:
+    provider = registry.get("claude-code")
+    assert provider.allowed_roles == ["planner", "architect", "reviewer"]
 
 
 def test_get_unknown_raises_key_error() -> None:

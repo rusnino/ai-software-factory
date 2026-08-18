@@ -8,4 +8,5 @@ CLAUDE_CODE = HarnessProvider(
     command="claude",
     auth="subscription",
     supports_mcp=True,
+    allowed_roles=["planner", "architect", "reviewer"],
 )

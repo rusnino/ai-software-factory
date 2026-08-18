@@ -16,6 +16,6 @@ class HarnessProvider:
     command: str
     auth: str  # "subscription" or "provider-configured"
     supports_mcp: bool = True
-    allowed_roles: list[str] = field(
-        default_factory=lambda: ["worker", "reviewer", "planner"]
-    )
+    # Per SPEC-06 §6.2. Each concrete harness must override this; there is no
+    # safe universal default because different harnesses support different roles.
+    allowed_roles: list[str] = field(default_factory=list)
