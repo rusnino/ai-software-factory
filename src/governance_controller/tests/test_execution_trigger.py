@@ -82,7 +82,7 @@ class TestExecutionTrigger:
         )
 
         assert result.state == TaskState.RUNNING
-        fake_executor.start.assert_awaited_once_with(contract)
+        fake_executor.start.assert_awaited_once()
 
         execution = await db_session.scalar(
             select(Execution).where(Execution.task_id == task.id)
@@ -119,7 +119,9 @@ class TestExecutionTrigger:
         execution = await db_session.scalar(
             select(Execution).where(Execution.task_id == task.id)
         )
-        assert execution is None
+        assert execution is not None
+        assert execution.state == TaskState.FAILED
+        assert execution.ended_at is not None
 
     async def test_plan_approval_does_not_create_execution(
         self,

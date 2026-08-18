@@ -31,7 +31,7 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
     client.start.return_value = {"run_id": "run-abc"}
     executor = MacroAgentExecutor(client=client)
 
-    result = await executor.start(task_contract)
+    result = await executor.start(task_contract, controller_execution_id="exec-1")
 
     assert result == {"run_id": "run-abc"}
     client.start.assert_awaited_once_with(
@@ -43,7 +43,7 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
             "acceptance": ["Tests pass", "Code merged"],
             "metadata": {
                 "controller_task_id": "task-1",
-                "controller_execution_id": None,
+                "controller_execution_id": "exec-1",
                 "opentasks_id": None,
                 "project_id": "project-1",
             },

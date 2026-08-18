@@ -285,11 +285,26 @@ class ApprovalService:
             },
         )
 
+        from governance_controller.models import Execution
+
+        started_at = datetime.now(UTC)
+        execution = Execution(
+            id=str(uuid4()),
+            task_id=task.id,
+            state=TaskState.READY,
+            started_at=started_at,
+        )
+        self.db.add(execution)
+        await self.db.flush()
+
         try:
-            result = await self.executor.start(contract)
+            result = await self.executor.start(contract, execution.id)
         except Exception as exc:  # pragma: no cover - broad error shield
             StateMachine.transition(task, TaskState.FAILED)
             task.updated_at = datetime.now(UTC)
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            await self.db.flush()
 
             await AuditService.log(
                 db=self.db,
@@ -297,25 +312,18 @@ class ApprovalService:
                 task_id=task.id,
                 actor=actor,
                 source=source,
+                execution_id=execution.id,
                 payload={
                     "approval_type": ApprovalType.EXECUTION.value,
+                    "execution_id": execution.id,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
                 },
             )
             raise RuntimeError(f"macro-agent start failed: {exc}") from exc
 
-        from governance_controller.models import Execution
-
-        started_at = datetime.now(UTC)
-        execution = Execution(
-            id=str(uuid4()),
-            task_id=task.id,
-            macro_agent_run_id=result["run_id"],
-            state=TaskState.RUNNING,
-            started_at=started_at,
-        )
-        self.db.add(execution)
+        execution.macro_agent_run_id = result["run_id"]
+        execution.state = TaskState.RUNNING
         await self.db.flush()
 
         StateMachine.transition(task, TaskState.RUNNING)
