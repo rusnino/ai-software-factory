@@ -13,6 +13,7 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
 from governance_controller.services.state_machine import StateMachine
 
@@ -31,6 +32,7 @@ class ApprovalService:
         db: AsyncSession,
         policy_engine: type[PolicyEngine] | None = None,
         executor: MacroAgentExecutor | None = None,
+        permission_service: PermissionService | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -39,10 +41,13 @@ class ApprovalService:
             policy_engine: PolicyEngine class to use for evaluation. Defaults to
                 the embedded PolicyEngine.
             executor: Macro-agent executor to invoke on EXECUTION approvals.
+            permission_service: Permission validator. Defaults to the embedded
+                PermissionService.
         """
         self.db = db
         self.policy_engine = policy_engine or PolicyEngine
         self.executor = executor or MacroAgentExecutor()
+        self.permission_service = permission_service or PermissionService()
 
     async def approve(
         self,
@@ -71,9 +76,48 @@ class ApprovalService:
             The task with its updated state.
 
         Raises:
-            ValueError: If policy evaluation fails or the state transition is
-                invalid.
+            ValueError: If policy evaluation fails, the actor lacks permission,
+                or the state transition is invalid.
         """
+        # 0. Permission check: agents/system cannot approve, and the proposer
+        #    cannot approve their own task.
+        if actor == task.proposed_by:
+            await AuditService.log(
+                db=self.db,
+                event_type="approval_rejected",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": approval_type.value,
+                    "reason": "self-approval",
+                    "proposed_by": task.proposed_by,
+                },
+            )
+            raise ValueError(
+                "Policy violation(s): actor cannot approve their own task"
+            )
+
+        permitted = await self.permission_service.may_approve(
+            actor, task.id, approval_type
+        )
+        if not permitted:
+            await AuditService.log(
+                db=self.db,
+                event_type="approval_rejected",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": approval_type.value,
+                    "reason": "permission_denied",
+                },
+            )
+            raise ValueError(
+                "Policy violation(s): "
+                f"{actor} may not request {approval_type.value} approval"
+            )
+
         # 1. Policy evaluation must happen before any state change or record.
         policy_result: PolicyResult = self.policy_engine.evaluate(
             contract, profile, approval_type

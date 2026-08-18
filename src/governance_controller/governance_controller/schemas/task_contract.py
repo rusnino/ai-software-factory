@@ -14,6 +14,7 @@ class TaskContract(BaseModel):
     contract_version: str = "1.0"
     task_id: str
     project_id: str
+    proposed_by: str
     objective: str
     inputs: list[str] = []
     dependencies: list[str] = []

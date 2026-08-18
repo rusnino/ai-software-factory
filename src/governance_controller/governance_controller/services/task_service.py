@@ -48,6 +48,7 @@ class TaskService:
         task = Task(
             id=task_contract.task_id,
             project_id=task_contract.project_id,
+            proposed_by=task_contract.proposed_by,
             task_contract_json=task_contract.model_dump(mode="json"),
         )
         self.db.add(task)

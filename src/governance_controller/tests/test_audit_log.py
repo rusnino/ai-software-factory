@@ -17,13 +17,14 @@ from governance_controller.services.audit_service import AuditService
 
 
 def _make_task(state: TaskState = TaskState.PROPOSED) -> Task:
-    return Task(id="task-1", project_id="proj-1", state=state)
+    return Task(id="task-1", project_id="proj-1", state=state, proposed_by="agent-1")
 
 
 def _make_contract(harness: str = "opencode") -> TaskContract:
     return TaskContract(
         task_id="task-1",
         project_id="proj-1",
+        proposed_by="agent-1",
         objective="Implement feature X",
         acceptance=["feature X passes tests"],
         execution=ExecutionConfig(harness=harness),

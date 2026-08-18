@@ -14,6 +14,7 @@ def test_task_contract_construction() -> None:
     contract = TaskContract(
         task_id="task-1",
         project_id="project-1",
+        proposed_by="agent-1",
         objective="Implement the thing",
         acceptance=["It works"],
         inputs=["input.txt"],
@@ -25,6 +26,7 @@ def test_task_contract_construction() -> None:
 
     assert contract.task_id == "task-1"
     assert contract.project_id == "project-1"
+    assert contract.proposed_by == "agent-1"
     assert contract.objective == "Implement the thing"
     assert contract.inputs == ["input.txt"]
     assert contract.dependencies == []
@@ -93,6 +95,7 @@ def test_task_contract_execution_defaults() -> None:
     contract = TaskContract(
         task_id="task-2",
         project_id="project-1",
+        proposed_by="agent-1",
         objective="Test defaults",
         acceptance=["Default execution config is used"],
     )

@@ -15,6 +15,7 @@ def sample_contract() -> TaskContract:
     return TaskContract(
         task_id="api-task-1",
         project_id="api-proj-1",
+        proposed_by="agent-1",
         objective="Build the API",
         acceptance=["API endpoints exist", "Tests pass"],
     )

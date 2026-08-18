@@ -6,6 +6,7 @@ def test_default_contract_passes_all_checks() -> None:
     contract = TaskContract(
         task_id="task-001",
         project_id="project-001",
+        proposed_by="agent-1",
         objective="Do something",
         acceptance=["It works"],
     )
@@ -27,6 +28,7 @@ def test_forbidden_path_fails_verification() -> None:
     contract = TaskContract(
         task_id="task-002",
         project_id="project-001",
+        proposed_by="agent-1",
         objective="Do something bad",
         acceptance=["It works"],
         forbidden_paths=[".env", "README.md"],

@@ -16,7 +16,9 @@ from governance_controller.services.approval_service import ApprovalService
 
 
 def _make_task(state: TaskState = TaskState.PLAN_APPROVED) -> Task:
-    return Task(id="task-exec", project_id="proj-1", state=state)
+    return Task(
+        id="task-exec", project_id="proj-1", state=state, proposed_by="agent-1"
+    )
 
 
 def _make_contract(
@@ -27,6 +29,7 @@ def _make_contract(
     data: dict = {
         "task_id": "task-exec",
         "project_id": "proj-1",
+        "proposed_by": "agent-1",
         "objective": objective,
         "execution": ExecutionConfig(harness=harness),
         "forbidden_paths": [],
@@ -67,7 +70,7 @@ class TestExecutionTrigger:
             profile=profile,
             approval_type=ApprovalType.EXECUTION,
             source="telegram",
-            actor="human-1",
+            actor="admin",
             idempotency_key="key-exec-trigger",
         )
 
@@ -100,9 +103,9 @@ class TestExecutionTrigger:
                 profile=profile,
                 approval_type=ApprovalType.EXECUTION,
                 source="telegram",
-                actor="human-1",
-                idempotency_key="key-exec-fail",
-            )
+            actor="admin",
+            idempotency_key="key-exec-fail",
+        )
 
         assert task.state == TaskState.FAILED
 

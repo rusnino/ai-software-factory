@@ -23,7 +23,7 @@ def fake_executor() -> MacroAgentExecutor:
 
 
 def _make_task(state: TaskState = TaskState.PROPOSED) -> Task:
-    return Task(id="task-1", project_id="proj-1", state=state)
+    return Task(id="task-1", project_id="proj-1", state=state, proposed_by="agent-1")
 
 
 def _make_contract(
@@ -35,6 +35,7 @@ def _make_contract(
     data: dict = {
         "task_id": "task-1",
         "project_id": "proj-1",
+        "proposed_by": "agent-1",
         "objective": objective,
         "execution": ExecutionConfig(harness=harness),
         "forbidden_paths": forbidden_paths or [],
@@ -103,7 +104,7 @@ class TestApprovalServiceStateTransitions:
             profile=profile,
             approval_type=ApprovalType.EXECUTION,
             source="telegram",
-            actor="human-1",
+            actor="admin",
             idempotency_key="key-exec-1",
         )
 
@@ -124,7 +125,7 @@ class TestApprovalServiceStateTransitions:
             profile=profile,
             approval_type=ApprovalType.MERGE,
             source="dashboard",
-            actor="human-1",
+            actor="admin",
             idempotency_key="key-merge-1",
         )
 
@@ -217,3 +218,41 @@ class TestApprovalServicePolicyViolations:
                 actor="human-1",
                 idempotency_key="key-injected",
             )
+
+
+class TestApprovalServiceSelfApprovalPrevention:
+    async def test_proposer_cannot_approve_own_task(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        service = ApprovalService(db=db_session)
+        task = _make_task(TaskState.PROPOSED)
+        # Simulate the proposer attempting to approve their own task.
+        with pytest.raises(ValueError, match="cannot approve their own task"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.PLAN,
+                source="plane",
+                actor="agent-1",
+                idempotency_key="key-self-approve",
+            )
+
+    async def test_system_actor_cannot_approve(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        service = ApprovalService(db=db_session)
+        task = _make_task(TaskState.PROPOSED)
+        for forbidden_actor in ("system", "agent"):
+            with pytest.raises(ValueError, match="may not request"):
+                await service.approve(
+                    task=task,
+                    contract=_make_contract(),
+                    profile=_make_profile(),
+                    approval_type=ApprovalType.PLAN,
+                    source="plane",
+                    actor=forbidden_actor,
+                    idempotency_key=f"key-{forbidden_actor}",
+                )

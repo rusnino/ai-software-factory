@@ -13,6 +13,7 @@ def _make_contract(
     return TaskContract(
         task_id=task_id,
         project_id="proj-1",
+        proposed_by="agent-1",
         objective="Test task",
         acceptance=["passes tests"],
         dependencies=dependencies or [],

@@ -34,7 +34,12 @@ class TestEventBridgeTransitions:
         self,
         db_session: AsyncSession,
     ) -> None:
-        task = Task(id="task-1", project_id="proj-1", state=TaskState.RUNNING)
+        task = Task(
+            id="task-1",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
         db_session.add(task)
         await db_session.flush()
 
@@ -55,7 +60,12 @@ class TestEventBridgeTransitions:
         self,
         db_session: AsyncSession,
     ) -> None:
-        task = Task(id="task-2", project_id="proj-1", state=TaskState.RUNNING)
+        task = Task(
+            id="task-2",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
         db_session.add(task)
         await db_session.flush()
 
@@ -75,7 +85,12 @@ class TestEventBridgeTransitions:
         self,
         db_session: AsyncSession,
     ) -> None:
-        task = Task(id="task-3", project_id="proj-1", state=TaskState.RUNNING)
+        task = Task(
+            id="task-3",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
         db_session.add(task)
         await db_session.flush()
 
@@ -128,7 +143,12 @@ class TestEventBridgeTransitions:
         self,
         db_session: AsyncSession,
     ) -> None:
-        task = Task(id="task-4", project_id="proj-1", state=TaskState.RUNNING)
+        task = Task(
+            id="task-4",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
         db_session.add(task)
         await db_session.flush()
 
@@ -152,7 +172,12 @@ class TestEventBridgeTransitions:
         db_session: AsyncSession,
     ) -> None:
         # landing:completed targets AGENT_REVIEW, but PROPOSED cannot move there.
-        task = Task(id="task-5", project_id="proj-1", state=TaskState.PROPOSED)
+        task = Task(
+            id="task-5",
+            project_id="proj-1",
+            state=TaskState.PROPOSED,
+            proposed_by="agent-1",
+        )
         db_session.add(task)
         await db_session.flush()
 

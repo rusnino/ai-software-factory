@@ -22,6 +22,7 @@ def sample_contract() -> TaskContract:
     return TaskContract(
         task_id="approval-task-1",
         project_id="approval-proj-1",
+        proposed_by="agent-1",
         objective="Test approvals via API",
         acceptance=["Approvals advance state"],
     )
@@ -75,7 +76,7 @@ async def _create_task(
 
 
 def _approval_payload(
-    task_id: str, approval_type: ApprovalType, actor: str = "human-1"
+    task_id: str, approval_type: ApprovalType, actor: str = "admin"
 ) -> dict:
     return {
         "task_id": task_id,

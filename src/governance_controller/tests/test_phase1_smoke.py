@@ -31,6 +31,7 @@ def smoke_contract() -> TaskContract:
     return TaskContract(
         task_id="phase1-task-1",
         project_id="phase1-proj-1",
+        proposed_by="agent-1",
         objective="End-to-end Phase 1 smoke test",
         acceptance=["State machine reaches DONE"],
     )
@@ -75,7 +76,7 @@ def _approval_payload(task_id: str, approval_type: ApprovalType) -> dict:
         "task_id": task_id,
         "approval_type": approval_type.value,
         "source": "smoke-test",
-        "actor": "human-1",
+        "actor": "admin",
         "timestamp": "2026-08-18T12:00:00+00:00",
     }
 

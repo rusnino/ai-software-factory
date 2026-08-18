@@ -21,5 +21,6 @@ class TaskResponse(BaseModel):
     id: str
     state: str
     project_id: str
+    proposed_by: str
     created_at: datetime
     updated_at: datetime | None

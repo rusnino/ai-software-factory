@@ -18,6 +18,7 @@ def _make_contract(
     data: dict = {
         "task_id": "task-1",
         "project_id": "proj-1",
+        "proposed_by": "agent-1",
         "objective": objective,
         "execution": ExecutionConfig(harness=harness),
         "forbidden_paths": forbidden_paths or [],

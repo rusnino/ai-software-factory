@@ -16,6 +16,7 @@ def task_contract() -> TaskContract:
     return TaskContract(
         task_id="task-1",
         project_id="project-1",
+        proposed_by="agent-1",
         objective="Implement the feature",
         acceptance=["Tests pass", "Code merged"],
         execution=ExecutionConfig(team="default", harness="opencode"),
