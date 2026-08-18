@@ -11,7 +11,7 @@ class OpenTasksService:
     """
 
     @classmethod
-    def materialize(cls, task_contract: TaskContract) -> dict:
+    def materialize(cls, task_contract: TaskContract) -> dict[str, object]:
         return {
             "runtime_tasks": [
                 {

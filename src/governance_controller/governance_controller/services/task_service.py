@@ -1,5 +1,7 @@
 """Task and project profile persistence service."""
 
+from typing import Any, cast
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import select
 
@@ -33,7 +35,7 @@ class TaskService:
         project_profile_json = project_profile.model_dump(mode="json")
         existing = await self.db.scalar(
             select(ProjectProfileModel).where(
-                ProjectProfileModel.project_id == project_profile.project_id
+                ProjectProfileModel.project_id == project_profile.project_id  # type: ignore[arg-type]
             )
         )
         if existing is None:
@@ -90,12 +92,14 @@ class TaskService:
 
     async def get_by_id(self, task_id: str) -> Task | None:
         """Return the Task with the given primary key, or None."""
-        return await self.db.scalar(select(Task).where(Task.id == task_id))
+        return await self.db.scalar(
+            select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
+        )
 
     async def get_by_id_for_update(self, task_id: str) -> Task | None:
         """Return the Task with the given primary key, locked for update."""
         result = await self.db.execute(
-            select(Task).where(Task.id == task_id).with_for_update()
+            select(Task).where(Task.id == task_id).with_for_update()  # type: ignore[arg-type]
         )
         return result.scalar_one_or_none()
 
@@ -105,9 +109,9 @@ class TaskService:
         """Return the stored project profile for a project, or None."""
         row = await self.db.scalar(
             select(ProjectProfileModel).where(
-                ProjectProfileModel.project_id == project_id
+                ProjectProfileModel.project_id == project_id  # type: ignore[arg-type]
             )
         )
         if row is None:
             return None
-        return ProjectProfile(**row.profile_json)
+        return ProjectProfile(**cast(dict[str, Any], row.profile_json))

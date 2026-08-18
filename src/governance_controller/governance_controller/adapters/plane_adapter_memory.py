@@ -16,7 +16,7 @@ class MemoryPlaneAdapter(PlaneAdapter):
     """
 
     def __init__(self) -> None:
-        self.updates: list[dict] = []
+        self.updates: list[dict[str, object]] = []
 
     def sync_task_state(self, task_id: str, state: str) -> None:
         self.updates.append({
@@ -25,7 +25,7 @@ class MemoryPlaneAdapter(PlaneAdapter):
             "state": state,
         })
 
-    def sync_task_fields(self, task_id: str, fields: dict) -> None:
+    def sync_task_fields(self, task_id: str, fields: dict[str, object]) -> None:
         self.updates.append({
             "op": "sync_task_fields",
             "task_id": task_id,

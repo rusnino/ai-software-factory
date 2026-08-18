@@ -16,7 +16,7 @@ class PlaneAdapter(ABC):
         """Synchronize the high-level state of a task with Plane CE."""
 
     @abstractmethod
-    def sync_task_fields(self, task_id: str, fields: dict) -> None:
+    def sync_task_fields(self, task_id: str, fields: dict[str, object]) -> None:
         """Synchronize arbitrary task fields with Plane CE."""
 
     @abstractmethod
