@@ -2,7 +2,14 @@
 
 ## Current State
 
-**`reviews/GAPS.md` has no open `CRITICAL` or `HIGH` gaps, and `GAP-056` (the last open `MEDIUM` gap) is now closed.** See `reviews/REVIEW-010-round7-gap-verification.md` for the prior verification that made the gate rule clear.
+**`reviews/GAPS.md` still has no open `CRITICAL` or `HIGH` gaps** (the gate rule is clear, per
+`reviews/REVIEW-010-round7-gap-verification.md`), but `GAP-056` is reopened, not closed —
+`reviews/REVIEW-011-round8-gap-verification.md` found the attempted fix protects only 1 of the 3
+`_trigger_execution` commit-before-raise branches. Empirically confirmed (removing each commit call one at a
+time, no file ever edited on disk): removing the executor-crash/FAILED-CAS commit correctly fails 2 tests;
+removing either the READY-CAS-loss or the RUNNING-CAS-loss commit fails nothing. The test named for
+READY-CAS-loss is actually sensitive to a different, unrelated commit (`approve()`'s own outer CAS, not
+`_trigger_execution`'s), and no test at all exists for RUNNING-CAS-loss.
 
 Test status: **173 passed**, `ruff` clean, `mypy --strict` clean.
 
