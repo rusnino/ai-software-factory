@@ -23,7 +23,6 @@ from governance_controller.schemas import (
     TaskContract,
 )
 from governance_controller.services.approval_service import ApprovalService
-from governance_controller.services.state_machine import StateMachine
 
 
 @pytest.fixture
@@ -137,17 +136,8 @@ class TestPhase1Smoke:
             }
 
         # 5. Simulate macro-agent events through the event bridge.
-        await EventBridge.handle(client_db_session, make_event("landing:completed"))
-        await self._assert_task_state(
-            client_db_session, task_id, TaskState.AGENT_REVIEW
-        )
-
-        # Duplicate event is idempotent.
-        await EventBridge.handle(client_db_session, make_event("landing:completed"))
-        await self._assert_task_state(
-            client_db_session, task_id, TaskState.AGENT_REVIEW
-        )
-
+        # Conflict arises while running, is resolved, then landing:completed
+        # triggers verification and advances the task to HUMAN_REVIEW.
         await EventBridge.handle(client_db_session, make_event("conflict:created"))
         await self._assert_task_state(client_db_session, task_id, TaskState.BLOCKED)
 
@@ -156,13 +146,14 @@ class TestPhase1Smoke:
 
         await EventBridge.handle(client_db_session, make_event("landing:completed"))
         await self._assert_task_state(
-            client_db_session, task_id, TaskState.AGENT_REVIEW
+            client_db_session, task_id, TaskState.HUMAN_REVIEW
         )
 
-        # Direct state transition to HUMAN_REVIEW.
-        task = await client_db_session.scalar(select(Task).where(Task.id == task_id))
-        StateMachine.transition(task, TaskState.HUMAN_REVIEW)
-        await client_db_session.flush()
+        # Duplicate landing:completed from HUMAN_REVIEW is ignored.
+        await EventBridge.handle(client_db_session, make_event("landing:completed"))
+        await self._assert_task_state(
+            client_db_session, task_id, TaskState.HUMAN_REVIEW
+        )
 
         # 6. MERGE approval.
         merge_response = await async_client.post(

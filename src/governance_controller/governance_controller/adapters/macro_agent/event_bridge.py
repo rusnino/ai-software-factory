@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.constants import TaskState
 from governance_controller.models.task import Task
+from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.state_machine import StateMachine
+from governance_controller.services.verification_service import VerificationService
 
 _EVENT_TO_STATE: dict[str, TaskState] = {
     "worktree:allocated": TaskState.RUNNING,
@@ -26,13 +28,19 @@ class EventBridge:
     _event_to_state = _EVENT_TO_STATE
 
     @staticmethod
-    async def handle(db: AsyncSession, event: dict[str, Any]) -> None:
+    async def handle(
+        db: AsyncSession,
+        event: dict[str, Any],
+        verification_service: VerificationService | None = None,
+    ) -> None:
         """Process a single macro-agent workspace event.
 
         Args:
             db: The SQLAlchemy async session to use.
             event: The macro-agent workspace event. Must contain ``type`` and
                 ``metadata.controller_task_id``.
+            verification_service: Optional service used to verify the task when
+                a ``landing:completed`` event moves it to ``AGENT_REVIEW``.
         """
         event_type = event.get("type", "")
         metadata = event.get("metadata") or {}
@@ -76,6 +84,21 @@ class EventBridge:
                 StateMachine.transition(task, target_state)
             except ValueError as exc:
                 transition_error = str(exc)
+
+        # Phase 1: landing:completed triggers automated verification that gates
+        # AGENT_REVIEW -> HUMAN_REVIEW. This is a stub-grade integration until
+        # real CI/artifact checks exist in Phase 2. Skip verification if the
+        # task has no stored contract (e.g., tests that only exercise state
+        # transitions).
+        if (
+            transition_error is None
+            and target_state == TaskState.AGENT_REVIEW
+            and task.state == TaskState.AGENT_REVIEW
+            and task.task_contract_json
+        ):
+            verifier = verification_service or VerificationService()
+            contract = TaskContract(**task.task_contract_json)
+            await verifier.verify_and_advance(db, task, contract)
 
         payload: dict[str, Any] = {"event": event}
         if transition_error is not None:
