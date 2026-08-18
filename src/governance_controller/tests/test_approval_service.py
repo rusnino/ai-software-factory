@@ -120,7 +120,7 @@ class TestApprovalServiceStateTransitions:
         )
 
         assert result.state == TaskState.RUNNING
-        fake_executor.start.assert_awaited_once_with(contract)
+        fake_executor.start.assert_awaited_once()
 
     async def test_merge_approval_advances_state_to_done(
         self,

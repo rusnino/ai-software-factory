@@ -119,6 +119,9 @@ class TestPhase1Smoke:
         assert exec_response.status_code == 200
         assert exec_response.json()["state"] == TaskState.RUNNING.value
         mock_executor.start.assert_awaited_once()
+        call_args, _ = mock_executor.start.await_args
+        assert len(call_args) == 2
+        assert call_args[1] is not None
 
         # 4. Execution record exists.
         execution = await client_db_session.scalar(

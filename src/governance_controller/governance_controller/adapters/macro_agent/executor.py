@@ -12,7 +12,11 @@ class MacroAgentExecutor:
     def __init__(self, client: MacroAgentClient | None = None) -> None:
         self.client = client or MacroAgentClient()
 
-    async def start(self, task_contract: TaskContract) -> dict[str, Any]:
+    async def start(
+        self,
+        task_contract: TaskContract,
+        controller_execution_id: str,
+    ) -> dict[str, Any]:
         """Start a macro-agent run for the given task contract."""
         payload: dict[str, object] = {
             "task_id": task_contract.task_id,
@@ -22,7 +26,7 @@ class MacroAgentExecutor:
             "acceptance": task_contract.acceptance,
             "metadata": {
                 "controller_task_id": task_contract.task_id,
-                "controller_execution_id": None,
+                "controller_execution_id": controller_execution_id,
                 "opentasks_id": None,
                 "project_id": task_contract.project_id,
             },

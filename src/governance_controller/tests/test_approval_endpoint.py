@@ -145,6 +145,9 @@ class TestApprovalEndpoint:
         assert body["state"] == TaskState.RUNNING.value
         assert body["approved"] is True
         mock_executor.start.assert_awaited_once()
+        call_args, _ = mock_executor.start.await_args
+        assert len(call_args) == 2
+        assert call_args[1] is not None
 
     async def test_approval_merge_advances_to_done(
         self,
