@@ -13,7 +13,7 @@ class StateMachine:
         TaskState.PROPOSED: {TaskState.PLAN_APPROVED},
         TaskState.PLAN_APPROVED: {TaskState.EXEC_APPROVED},
         TaskState.EXEC_APPROVED: {TaskState.READY},
-        TaskState.READY: {TaskState.RUNNING},
+        TaskState.READY: {TaskState.RUNNING, TaskState.FAILED},
         TaskState.RUNNING: {
             TaskState.AGENT_REVIEW,
             TaskState.BLOCKED,

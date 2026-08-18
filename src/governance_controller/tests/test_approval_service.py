@@ -1,8 +1,11 @@
 """Tests for the ApprovalService."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
@@ -10,6 +13,13 @@ from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.policy_engine import PolicyEngine
+
+
+@pytest.fixture
+def fake_executor() -> MacroAgentExecutor:
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.start.return_value = {"run_id": "run-test-1"}
+    return executor
 
 
 def _make_task(state: TaskState = TaskState.PROPOSED) -> Task:
@@ -50,8 +60,11 @@ def _make_profile(
 
 
 @pytest.fixture
-def service(db_session: AsyncSession) -> ApprovalService:
-    return ApprovalService(db=db_session)
+def service(
+    db_session: AsyncSession,
+    fake_executor: MacroAgentExecutor,
+) -> ApprovalService:
+    return ApprovalService(db=db_session, executor=fake_executor)
 
 
 class TestApprovalServiceStateTransitions:
@@ -75,9 +88,10 @@ class TestApprovalServiceStateTransitions:
 
         assert result.state == TaskState.PLAN_APPROVED
 
-    async def test_execution_approval_advances_state_to_exec_approved(
+    async def test_execution_approval_starts_run_and_advances_to_running(
         self,
         service: ApprovalService,
+        fake_executor: MacroAgentExecutor,
     ) -> None:
         task = _make_task(TaskState.PLAN_APPROVED)
         contract = _make_contract()
@@ -93,7 +107,8 @@ class TestApprovalServiceStateTransitions:
             idempotency_key="key-exec-1",
         )
 
-        assert result.state == TaskState.EXEC_APPROVED
+        assert result.state == TaskState.RUNNING
+        fake_executor.start.assert_awaited_once_with(contract)
 
     async def test_merge_approval_advances_state_to_done(
         self,

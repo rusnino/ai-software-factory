@@ -1,10 +1,12 @@
 """Approval service with embedded policy enforcement."""
 
 from datetime import UTC, datetime
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
@@ -28,6 +30,7 @@ class ApprovalService:
         self,
         db: AsyncSession,
         policy_engine: type[PolicyEngine] | None = None,
+        executor: MacroAgentExecutor | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -35,9 +38,11 @@ class ApprovalService:
             db: The SQLAlchemy async session to use.
             policy_engine: PolicyEngine class to use for evaluation. Defaults to
                 the embedded PolicyEngine.
+            executor: Macro-agent executor to invoke on EXECUTION approvals.
         """
         self.db = db
         self.policy_engine = policy_engine or PolicyEngine
+        self.executor = executor or MacroAgentExecutor()
 
     async def approve(
         self,
@@ -154,6 +159,87 @@ class ApprovalService:
                 "approval_type": approval_type.value,
                 "previous_state": previous_state.value,
                 "new_state": target_state.value,
+            },
+        )
+
+        if approval_type == ApprovalType.EXECUTION:
+            return await self._trigger_execution(
+                task, contract, actor, source, previous_state
+            )
+
+        return task
+
+    async def _trigger_execution(
+        self,
+        task: Task,
+        contract: TaskContract,
+        actor: str,
+        source: str,
+        previous_state: TaskState,
+    ) -> Task:
+        """Move task to READY, start macro-agent, record Execution, go RUNNING."""
+        StateMachine.transition(task, TaskState.READY)
+        task.updated_at = datetime.now(UTC)
+
+        await AuditService.log(
+            db=self.db,
+            event_type="state_change",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            payload={
+                "previous_state": previous_state.value,
+                "new_state": TaskState.READY.value,
+                "approval_type": ApprovalType.EXECUTION.value,
+            },
+        )
+
+        try:
+            result = await self.executor.start(contract)
+        except Exception as exc:  # pragma: no cover - broad error shield
+            StateMachine.transition(task, TaskState.FAILED)
+            task.updated_at = datetime.now(UTC)
+
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_start_failed",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": ApprovalType.EXECUTION.value,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise RuntimeError(f"macro-agent start failed: {exc}") from exc
+
+        from governance_controller.models import Execution
+
+        started_at = datetime.now(UTC)
+        execution = Execution(
+            id=str(uuid4()),
+            task_id=task.id,
+            macro_agent_run_id=result["run_id"],
+            state=TaskState.RUNNING,
+            started_at=started_at,
+        )
+        self.db.add(execution)
+        await self.db.flush()
+
+        StateMachine.transition(task, TaskState.RUNNING)
+        task.updated_at = datetime.now(UTC)
+
+        await AuditService.log(
+            db=self.db,
+            event_type="execution_start",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            execution_id=execution.id,
+            payload={
+                "execution_id": execution.id,
+                "macro_agent_run_id": execution.macro_agent_run_id,
             },
         )
 
