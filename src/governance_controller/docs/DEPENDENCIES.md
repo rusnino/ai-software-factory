@@ -16,6 +16,7 @@ must be documented.
 | `httpx` | Async HTTP client for macro-agent executor and Telegram/Plane adapters. |
 | `structlog` | Structured, typed logging; renders the audit trail. Application-level request/response logs are emitted by FastAPI/uvicorn; `structlog` is not used for those. |
 | `typer` | CLI framework for the `governance-controller` command-line tool. |
+| `uvicorn` | ASGI server used by the Docker image's `CMD` to run the FastAPI app. |
 
 ## Development dependencies
 
