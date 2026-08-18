@@ -278,14 +278,12 @@ class ApprovalService:
             source=source,
             payload=payload,
         )
-        # Commit only if we are not inside an explicit transaction context.
-        # Test fixtures use ``async with session.begin()``; committing there
-        # would close the transaction and break subsequent fixture teardown.
-        # In production (FastAPI + get_db()) there is no open begin() context,
-        # so a commit is required to make the audit row durable before the
-        # exception propagates and triggers get_db()'s rollback.
-        if self.db.get_transaction() is None:
-            await self.db.commit()
+        # Always commit so the audit row survives the rollback triggered when
+        # the exception propagates out of ``get_db()``. Tests that drive
+        # approval service directly through a session wrapped in
+        # ``async with session.begin()`` may need to handle the now-committed
+        # state; production path requires this commit for durable audit.
+        await self.db.commit()
         raise ValueError(message)
 
     async def _trigger_execution(
@@ -372,6 +370,20 @@ class ApprovalService:
                         "execution_id": execution.id,
                         "error": str(exc),
                         "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                await AuditService.log(
+                    db=self.db,
+                    event_type="concurrent_modification",
+                    task_id=task.id,
+                    actor=actor,
+                    source=source,
+                    execution_id=execution.id,
+                    payload={
+                        "approval_type": ApprovalType.EXECUTION.value,
+                        "expected_state": TaskState.READY.value,
+                        "target_state": TaskState.FAILED.value,
                     },
                 )
             raise RuntimeError(f"macro-agent start failed: {exc}") from exc

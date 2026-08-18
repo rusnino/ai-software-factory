@@ -153,7 +153,70 @@ class TestApprovalConcurrency:
             task = await check.scalar(select(Task).where(Task.id == "task-stale"))
             assert task is not None
             assert task.state == TaskState.RUNNING
-            assert task.version >= 1
+            # Successful EXECUTION approval performs 5 CAS increments:
+            # PLAN_APPROVED -> EXEC_APPROVED, EXEC_APPROVED -> READY,
+            # READY -> RUNNING (logged as state_change), plus the executor
+            # state updates and final READY -> RUNNING atomic_transition.
+            # The task starts at version 0, so the final version is 5.
+            assert task.version == 5
+
+        await engine.dispose()
+        os.unlink(path)
+
+    async def test_executor_failure_advances_to_failed_with_version_5(
+        self,
+    ) -> None:
+        """If executor.start raises, the task ends at FAILED with version 5.
+
+        The CAS increments are PLAN_APPROVED -> EXEC_APPROVED,
+        EXEC_APPROVED -> READY, READY -> FAILED. Additional internal
+        state-change updates (e.g. execution row state) add two more version
+        bumps, so the final version is 5.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-exec-fail")
+
+        contract = _make_contract("task-exec-fail")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = RuntimeError("boom")
+
+        async with local_session() as db:
+            service = ApprovalService(db=db, executor=fake_executor)
+            task = await db.scalar(
+                select(Task).where(Task.id == "task-exec-fail")
+            )
+            assert task is not None
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-exec-fail",
+                )
+            await db.commit()
+
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-exec-fail")
+            )
+            assert task is not None
+            assert task.state == TaskState.FAILED
+            assert task.version == 5
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == "task-exec-fail")
+            )
+            assert len(executions.scalars().all()) == 1
 
         await engine.dispose()
         os.unlink(path)
