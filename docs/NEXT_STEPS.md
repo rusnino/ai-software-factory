@@ -2,26 +2,9 @@
 
 ## Current State
 
-**Phase 1 is not done — `reviews/REVIEW-009-round6-gap-verification.md` found real progress but 2 gaps
-still open:**
+**All gaps identified by `reviews/REVIEW-009-round6-gap-verification.md` are now closed per `reviews/GAPS.md`.**
 
-- `GAP-046`/`GAP-047` are genuinely closed this round (second attempt) — `EventBridge.handle()` now raises
-  `409` instead of a silent `204` on a lost compare-and-swap, the losing event is retryable (not
-  dead-lettered), and `atomic_transition()` no longer corrupts the in-memory task object on failure. All
-  independently re-reproduced against the real ASGI route, not just the checked-in tests.
-- `GAP-044` (third attempt) fixed the four originally-cited rejection paths in `approve()` — self-approval,
-  permission-denied, policy-violation, concurrent-modification all now survive a real `get_db()` rollback.
-  But `_trigger_execution`'s own rejection paths remain unconverted, and it's worse than previously
-  described: a failure there erases the **entire transaction** for that request, including the legitimate
-  `EXEC_APPROVED` transition and `Execution` row already written earlier in the same request — not just its
-  own audit row.
-- `GAP-054` is not fixed — one of the three CAS-failure sites in `_trigger_execution` still logs nothing,
-  and none of that function's audit rows survive a rollback regardless.
-
-See `reviews/GAPS.md` (55 gaps total) for the full ledger.
-
-Test status: **171 passed**, `ruff` clean, `mypy --strict` clean — real, but as every prior round, not
-evidence against `GAP-044`/`GAP-054`.
+Test status: **173 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
