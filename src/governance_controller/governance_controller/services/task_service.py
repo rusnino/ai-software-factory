@@ -54,7 +54,7 @@ class TaskService:
                     "profile_version": project_profile.profile_version,
                 },
             )
-        else:
+        elif existing.profile_json != project_profile_json:
             existing.profile_json = project_profile_json
             await AuditService.log(
                 db=self.db,
