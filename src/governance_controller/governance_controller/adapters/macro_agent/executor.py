@@ -18,6 +18,12 @@ class MacroAgentExecutor:
             "harness": task_contract.execution.harness,
             "objective": task_contract.objective,
             "acceptance": task_contract.acceptance,
+            "metadata": {
+                "controller_task_id": task_contract.task_id,
+                "controller_execution_id": None,
+                "opentasks_id": None,
+                "project_id": task_contract.project_id,
+            },
         }
         return await self.client.start(payload)
 

@@ -41,6 +41,12 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
             "harness": "opencode",
             "objective": "Implement the feature",
             "acceptance": ["Tests pass", "Code merged"],
+            "metadata": {
+                "controller_task_id": "task-1",
+                "controller_execution_id": None,
+                "opentasks_id": None,
+                "project_id": "project-1",
+            },
         }
     )
 
