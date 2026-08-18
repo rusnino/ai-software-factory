@@ -180,3 +180,32 @@ class TestApprovalEndpoint:
         body = response.json()
         assert body["state"] == TaskState.DONE.value
         assert body["approved"] is True
+
+    async def test_policy_violation_returns_403(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        sample_contract.execution.harness = "forbidden-harness"
+        await _create_task(async_client, sample_contract, sample_profile)
+
+        response = await async_client.post(
+            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+
+        assert response.status_code == 403
+
+    async def test_invalid_timestamp_returns_400(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        await _create_task(async_client, sample_contract, sample_profile)
+        payload = _approval_payload("approval-task-1", ApprovalType.PLAN)
+        payload["timestamp"] = "not-a-timestamp"
+
+        response = await async_client.post("/approvals", json=payload)
+
+        assert response.status_code == 400

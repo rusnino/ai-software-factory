@@ -25,7 +25,12 @@ def _make_idempotency_key(
     task_id: str, approval_type: ApprovalType, actor: str, timestamp: str
 ) -> str:
     """Round timestamp to seconds and build a deterministic idempotency key."""
-    parsed = datetime.fromisoformat(timestamp)
+    try:
+        parsed = datetime.fromisoformat(timestamp)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid timestamp format: {timestamp}"
+        ) from exc
     rounded = parsed.replace(microsecond=0)
     if rounded.tzinfo is None:
         rounded = rounded.replace(tzinfo=UTC)
@@ -79,12 +84,18 @@ async def submit_approval(
         ) from exc
 
     if idempotency_key is None:
-        idempotency_key = _make_idempotency_key(
-            payload.task_id,
-            payload.approval_type,
-            payload.actor,
-            payload.timestamp,
-        )
+        try:
+            idempotency_key = _make_idempotency_key(
+                payload.task_id,
+                payload.approval_type,
+                payload.actor,
+                payload.timestamp,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
 
     try:
         updated_task = await approval_service.approve(
@@ -113,7 +124,7 @@ async def submit_approval(
                     v.strip() for v in message[len(prefix) :].split(",") if v.strip()
                 ]
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail={"message": message, "violations": violations},
             ) from exc
         raise HTTPException(
