@@ -353,6 +353,7 @@ class TestEventBridgeTransitions:
             project_id="proj-1",
             state=TaskState.RUNNING,
             proposed_by="agent-1",
+            execution_attempts=2,
             task_contract_json=TaskContract(
                 task_id="task-failing-contract",
                 project_id="proj-1",

@@ -39,3 +39,9 @@ class Task(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    execution_attempts: int = Field(
+        default=0,
+        sa_column=Column(
+            "execution_attempts", Integer, default=0, nullable=False, server_default="0"
+        ),
+    )

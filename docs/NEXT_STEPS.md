@@ -2,20 +2,20 @@
 
 ## Current State
 
-**All `CRITICAL`/`HIGH` gaps are closed.** `GAP-080` was reopened in REVIEW-017 because the original fix only removed the explicit `FOR UPDATE` but still held an MVCC row lock across the live macro-agent HTTP call. It is now fixed by committing the `READY` transition and `Execution` row before `executor.start()`.
+**All `CRITICAL`/`HIGH` gaps are closed.** `GAP-080` was reopened in REVIEW-017 because the original fix only removed the explicit `FOR UPDATE` but still held an MVCC row lock across the live macro-agent HTTP call. REVIEW-018 independently live-verified the second fix attempt against real Postgres with the same lock-timing method that caught the first one: the probe now returns in ~0.02s instead of blocking ~3.5s — genuinely fixed this time.
 
-Closed gaps:
+Closed gaps, all independently re-verified by live reproduction against real PostgreSQL in REVIEW-017/018 (not just diff review):
 - `GAP-078` (CRITICAL): `DateTime(timezone=True)` on all datetime columns.
 - `GAP-079` (HIGH): dialect-aware profile upsert.
 - `GAP-074` (HIGH): `TaskContract.forbidden_paths` enforced.
 - `GAP-073` (MEDIUM): body-size limit on all write endpoints.
-- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call.
-- `GAP-082` (LOW): orphaned `get_by_id_for_update()` removed.
-- `GAP-083` (LOW): DB pool settings now configurable via `GC_DATABASE_POOL_*` env vars.
+- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call — verified with a real lock-timing measurement, not just a "commit was called" unit-test check.
+- `GAP-082` (LOW): orphaned `get_by_id_for_update()` removed (confirmed absent repo-wide).
+- `GAP-083` (LOW): DB pool settings now configurable via `GC_DATABASE_POOL_SIZE`/`GC_DATABASE_MAX_OVERFLOW`/`GC_DATABASE_POOL_TIMEOUT`/`GC_DATABASE_POOL_PRE_PING` — confirmed genuinely wired by inspecting the instantiated engine's pool, not just declared.
 
-Still open: `GAP-077` (MEDIUM, SPEC-09 §9.6 verification retry — fails closed, intentionally deferred to Phase 2) and `RISK-17` (SQLite-vs-Postgres dialect parity, no CI yet).
+Still open: `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet). `GAP-077` (MEDIUM, SPEC-09 §9.6 verification retry) is now implemented with `Task.execution_attempts` and a `FAILED -> RUNNING` retry loop; the failure-feedback call to macro-agent remains a Phase 2 integration TODO. `GAP-084` (MEDIUM, dual-DB test-coverage bypass in `test_db.py`) is closed.
 
-Test status: **202 passed** on both SQLite and PostgreSQL, `ruff` clean, `mypy --strict` clean.
+**Test status: 202 passed on both SQLite and real PostgreSQL — but "full coverage on both databases" is not quite accurate.** A full audit (`GAP-084`) found 6 of `tests/test_db.py`'s tests — covering `get_db()`'s commit/rollback branch logic, the same historically fragile area behind `RISK-16` — use a hardcoded local SQLite fixture that never reads `GC_TEST_DATABASE_URL` at all, so they've never actually run against real Postgres transaction semantics. The other 76 DB-integration tests are genuinely dual-DB (confirmed: pointing `GC_TEST_DATABASE_URL` at a Postgres URL with bad credentials makes exactly those 76 — not these 6 — fail with a real `asyncpg` auth error). `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
@@ -96,12 +96,10 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Telegram/Email/API intake, feeding the Idea Ingestion Service.
    - Human Triage queue in Plane.
 
-10. **Verification failure retry (SPEC-09 §9.6)**
-    - Currently unimplemented: `VerificationService.verify_and_advance()` transitions any failed
-      verification straight to `FAILED`, with no retry-count tracking (`Task` has no attempt/retry
-      field) and no failure-feedback call to macro-agent. Fails closed (never a false `DONE`), so not
-      a governance defect, but SPEC-09 §9.6 specifies a retry-before-FAILED mechanism that doesn't
-      exist yet — tracked as `GAP-077` (MEDIUM).
+10. **Verification failure feedback to macro-agent (SPEC-09 §9.6 step 2)**
+    - `GAP-077`'s retry loop is implemented: failed verification transitions `FAILED -> RUNNING`
+      while `execution_attempts < max_retries`. The remaining Phase 2 work is to emit a real
+      failure-feedback message to macro-agent so it can repair and re-land.
 
 ## Blockers to Watch
 

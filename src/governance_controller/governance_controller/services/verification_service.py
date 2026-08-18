@@ -250,4 +250,50 @@ class VerificationService:
             payload=report,
         )
 
+        # SPEC-09 §9.6: after failing verification, retry before marking FAILED
+        # if retries remain. Each failed verification from AGENT_REVIEW counts as
+        # one execution attempt. atomic_transition above moved the task to
+        # FAILED, so a subsequent RUNNING transition will verify the row is in
+        # FAILED and has the just-incremented version.
+        if target_state == TaskState.FAILED:
+            max_retries = getattr(contract.execution, "max_retries", 2)
+            if task.execution_attempts < max_retries:
+                if await StateMachine.atomic_transition_with_fields(
+                    db,
+                    task,
+                    TaskState.RUNNING,
+                    execution_attempts=task.execution_attempts + 1,
+                ):
+                    await AuditService.log(
+                        db=db,
+                        event_type="verification_failed_retry",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "execution_attempts": task.execution_attempts,
+                            "max_retries": max_retries,
+                            "verification_report": report,
+                        },
+                    )
+                    # TODO: emit failure feedback to macro-agent (SPEC-09 §9.6 #2).
+                else:
+                    await AuditService.log(
+                        db=db,
+                        event_type="concurrent_modification",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "expected_state": TaskState.FAILED.value,
+                            "target_state": TaskState.RUNNING.value,
+                            "verification_report": report,
+                        },
+                    )
+                    await db.commit()
+                    raise ValueError(
+                        "Concurrent modification detected: "
+                        "task state changed during verification retry"
+                    )
+
         return report

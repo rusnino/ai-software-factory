@@ -168,6 +168,12 @@ class EventBridge:
                 **cast(dict[str, Any], task.task_contract_json)
             )
             await verifier.verify_and_advance(db, task, contract)
+            # A verification failure with remaining retries transitions the task
+            # back to RUNNING. Don't record the event as processed in that case;
+            # the same landing:completed replay (if any) is harmless because the
+            # task won't be in AGENT_REVIEW until the next landing completes.
+            if task.state == TaskState.RUNNING:  # type: ignore[comparison-overlap]
+                return
 
         # Record the event as processed only after transitions and
         # verification succeed. A missing event_id/event_timestamp means we

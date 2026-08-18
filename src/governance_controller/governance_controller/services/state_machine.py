@@ -32,7 +32,8 @@ class StateMachine:
             TaskState.FAILED,
         },
         TaskState.BLOCKED: {TaskState.RUNNING, TaskState.FAILED},
-        TaskState.FAILED: set(),
+        # Failed verification may return to RUNNING for retry per SPEC-09 §9.6.
+        TaskState.FAILED: {TaskState.RUNNING},
         TaskState.DONE: set(),
     }
 
@@ -127,5 +128,44 @@ class StateMachine:
             task.state = target_state
             task.version = task.version + 1
             task.updated_at = datetime.now(UTC)
+            return True
+        return False
+
+    @classmethod
+    async def atomic_transition_with_fields(
+        cls,
+        db: AsyncSession,
+        task: Task,
+        target_state: TaskState,
+        **field_values: object,
+    ) -> bool:
+        """Atomically transition *task* and update additional fields in one UPDATE."""
+        try:
+            cls._validate(task.state, target_state)
+        except ValueError:
+            return False
+
+        values: dict[str, object] = {
+            "state": target_state.value,
+            "version": task.version + 1,
+            "updated_at": datetime.now(UTC),
+        }
+        values.update(field_values)
+        result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == task.version,  # type: ignore[arg-type]
+                Task.state == task.state.value,  # type: ignore[arg-type]
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount:  # type: ignore[attr-defined]
+            task.state = target_state
+            task.version = task.version + 1
+            task.updated_at = values["updated_at"]  # type: ignore[assignment]
+            for name, value in field_values.items():
+                setattr(task, name, value)
             return True
         return False
