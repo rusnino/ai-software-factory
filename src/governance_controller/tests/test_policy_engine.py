@@ -3,6 +3,7 @@
 import pytest
 
 from governance_controller.constants import ApprovalType
+from governance_controller.schemas import Check, CompletionContract, ScopeCheck
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
@@ -16,13 +17,20 @@ def _make_contract(
     forbidden_paths: list[str] | None = None,
     inputs: list[str] | None = None,
     deliverables: list[str] | None = None,
+    completion_contract: CompletionContract | None = None,
+    uses_docker_socket: bool = False,
+    destructive_shell: bool = False,
 ) -> TaskContract:
     data: dict = {
         "task_id": "task-1",
         "project_id": "proj-1",
         "proposed_by": "agent-1",
         "objective": objective,
-        "execution": ExecutionConfig(harness=harness),
+        "execution": ExecutionConfig(
+            harness=harness,
+            uses_docker_socket=uses_docker_socket,
+            destructive_shell=destructive_shell,
+        ),
         "forbidden_paths": forbidden_paths or [],
     }
     if acceptance is not None:
@@ -33,6 +41,8 @@ def _make_contract(
         data["inputs"] = inputs
     if deliverables is not None:
         data["deliverables"] = deliverables
+    if completion_contract is not None:
+        data["completion_contract"] = completion_contract
     return TaskContract(**data)
 
 
@@ -41,13 +51,19 @@ def _make_profile(
     allowed_harnesses: list[str] | None = None,
     forbidden_paths: list[str] | None = None,
     merge_requires_human: bool = True,
+    docker_socket: str = "deny",
+    destructive_shell: str = "deny",
 ) -> ProjectProfile:
     return ProjectProfile(
         project_id="proj-1",
         project_name="Test Project",
         repository={"path": "/tmp/repo"},
         execution={"allowed_harnesses": allowed_harnesses or ["opencode"]},
-        security={"forbidden_paths": forbidden_paths or []},
+        security={
+            "forbidden_paths": forbidden_paths or [],
+            "docker_socket": docker_socket,
+            "destructive_shell": destructive_shell,
+        },
         git={"merge_requires_human": merge_requires_human},
     )
 
@@ -169,6 +185,174 @@ class TestPolicyEngineRejections:
         # A path that shares a prefix but is not under the forbidden directory.
         contract = _make_contract(inputs=["~/.ssh_backup"])
         profile = _make_profile(forbidden_paths=["~/.ssh"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+
+
+class TestPolicyEngineCompletionContractShellAllowlist:
+    def test_safe_completion_contract_command_passes(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="test", command="uv run pytest")],
+                scope_check=ScopeCheck(description="safe check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+
+    def test_docker_socket_command_rejected_when_profile_denies(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="docker",
+                        command="docker -H unix:///var/run/docker.sock ps",
+                    )
+                ],
+                scope_check=ScopeCheck(description="docker check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("docker socket" in v for v in result.violations)
+
+    def test_destructive_command_rejected_when_profile_denies(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="cleanup", command="rm -rf /tmp/build")],
+                scope_check=ScopeCheck(description="cleanup check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive" in v for v in result.violations)
+
+    def test_command_with_redirection_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="log", command="echo ok > /tmp/ok.txt")],
+                scope_check=ScopeCheck(description="log check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("forbidden shell token" in v for v in result.violations)
+
+    def test_command_with_pipe_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="pipe", command="cat file | grep x")],
+                scope_check=ScopeCheck(description="pipe check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("forbidden shell token" in v for v in result.violations)
+
+    def test_command_with_backtick_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="expansion", command="echo `date`")],
+                scope_check=ScopeCheck(description="expansion check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "forbidden shell token" in v or "forbidden pattern" in v
+            for v in result.violations
+        )
+
+    def test_command_with_subshell_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="expansion", command="echo $(date)")],
+                scope_check=ScopeCheck(description="expansion check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "forbidden shell token" in v or "forbidden pattern" in v
+            for v in result.violations
+        )
+
+    def test_sudo_command_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="install", command="sudo apt update")],
+                scope_check=ScopeCheck(description="install check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("privilege escalation" in v for v in result.violations)
+
+    def test_docker_socket_allowed_when_profile_permits(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="docker",
+                        command="docker -H unix:///var/run/docker.sock ps",
+                    )
+                ],
+                scope_check=ScopeCheck(description="docker check"),
+            )
+        )
+        profile = _make_profile(docker_socket="allow")
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+
+    def test_destructive_shell_allowed_when_profile_permits(self) -> None:
+        # ``rm -r`` (without ``-f``) is destructive but not a hard-forbidden
+        # pattern; it is allowed when the project profile permits destructive
+        # shell operations.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="cleanup", command="rm -r /tmp/build")],
+                scope_check=ScopeCheck(description="cleanup check"),
+            )
+        )
+        profile = _make_profile(destructive_shell="allow")
 
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
