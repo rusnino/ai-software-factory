@@ -2,19 +2,9 @@
 
 ## Current State
 
-**REVIEW-013 (a full fresh review, not just re-verification of prior findings) found 1 new `CRITICAL` and 4 new `HIGH` gaps still open — Phase 1 acceptance criteria are not currently met.** Per `reviews/GAPS.md`'s gate rule, this blocks any claim of Phase 1 completeness until they're closed:
+**All gaps found by `REVIEW-013` are now closed per `reviews/GAPS.md`.**
 
-- `GAP-057` (CRITICAL): `PolicyEngine` and `VerificationService`'s forbidden-path checks don't normalize `..` traversal, so a path like `src/../../.ssh/id_rsa` bypasses both the pre-approval policy gate and the post-execution verification gate.
-- `GAP-058` (HIGH): `VerificationService.verify_and_advance()`'s CAS-failure branch raises without committing first — the same defect class `GAP-044` fixed in `approval_service.py`, unfixed in this sibling file.
-- `GAP-059` (HIGH): `PolicyEngine` never checks `TaskContract.execution.timeout_minutes`/`max_retries` against `ProjectProfile.execution.timeout_minutes`.
-- `GAP-060` (HIGH): `POST /tasks` leaks an unhandled 500 (raw `IntegrityError`) on a duplicate `task_id` instead of `409 Conflict`.
-- `GAP-061` (HIGH): `uvicorn` is the Dockerfile's `CMD` but is absent from `pyproject.toml`/`uv.lock` — `docker compose up`'s API container cannot start. Live-reproduced.
-
-See `reviews/REVIEW-013-full-fresh-review.md` for full detail, live-reproduction evidence, and the remaining `MEDIUM`/`LOW` findings (unauthenticated/unbounded `POST /events` ingestion, orphaned `opentasks_service.py`, and others).
-
-`GAP-031` has been corrected to `CLOSED` in this round — its originally-reported data-loss defect was fixed by `GAP-044`'s commit (`3e93928`), confirmed independently by three reviewers; the ledger status was simply never updated. A distinct residual (uncaught `RuntimeError` from executor-start failure still surfaces as a bare 500) is now tracked separately as `GAP-064`.
-
-Test status: **175 passed**, `ruff` clean, `mypy --strict` clean. (Tooling is clean; none of the new findings are tooling-detectable — they require live reproduction or manual code reading.)
+Test status: **185 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
@@ -66,9 +56,9 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Handle conflict recovery events.
 
 3. **Reconciliation (SPEC-03 §3.9)**
-   - Build a periodic job that compares live Plane state, Controller DB state, and opentasks runtime graph.
+   - Build a periodic job that compares live Plane state and Controller DB state.
    - Detect divergence, raise human alert, and auto-correct only projection fields.
-   - *Deferred to Phase 2 because both Plane and opentasks integrations are still stubs in Phase 1.*
+   - *Deferred to Phase 2 because the Plane integration is still a stub in Phase 1.*
 
 4. **Durable execution**
    - Evaluate Temporal or Celery for retry/collect workflows.
