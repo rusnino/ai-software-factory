@@ -95,6 +95,8 @@ Derived from SPEC-01 through SPEC-10 and ADR-001.
 | RISK-10 | Naive webhook translation treats bulk/state changes as approvals | Translation conditions in SPEC-04 §4.3a + revert mechanism | SPEC-04 |
 | RISK-11 | Pre-execution approval chain incompatible with workflow-per-task model if Temporal is used as Governance core | Temporal rejected for Governance on Phase 1; revisit only as Execution layer component in Phase 3+ | ADR-001 |
 | RISK-12 | Temporal/OPA migration risks deferred (workflow determinism, versioning, audit retention gap, OPA latency, Rego learning curve) | Revisit in Phase 3+ with explicit risk re-evaluation; OPA acceptable as Phase 2 Policy Engine backend | ADR-001 |
+| RISK-13 | Long-running or GUI-touching opentasks may exceed a single bounded harness session before losing task state | Evaluated AMAP-ML/LongHorizon-Harness as an optional additional `AgentHarness` adapter (SPEC-06 §6.4); not adopted for Phase 1/2, pre-1.0 maturity risk noted; revisit Phase 3+ | docs/research-longhorizon-harness.md |
+| RISK-14 | Governance Controller's `VerificationService` executes agent-controlled `CompletionContract.command` strings via unsandboxed shell subprocess, with no allowlist and no cross-check against SPEC-08 §8.7 forbidden operations | Not yet mitigated; tracked as `GAP-024` (HIGH) in `reviews/GAPS.md` — needs command allowlisting/sandboxing before Phase 1 sign-off | SPEC-08, reviews/REVIEW-004-full-codebase-review.md |
 
 ## Open Questions
 

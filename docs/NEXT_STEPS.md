@@ -2,12 +2,19 @@
 
 ## Current State
 
-Phase 1 Governance Controller is **complete and fully reviewed** in `src/governance_controller/`.
-All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
-`reviews/REVIEW-001-phase-1-governance-controller.md` and
-`reviews/REVIEW-002-gap-closure-verification.md` are now `CLOSED` in `reviews/GAPS.md`.
+**Phase 1 is not done.** A fourth, fresh review (`reviews/REVIEW-004-full-codebase-review.md`) found a
+`CRITICAL` gap: `session.commit()` is never called anywhere in `governance_controller`, so no `Task`,
+`Approval`, or `AuditLog` row survives past the HTTP request that created it against real PostgreSQL —
+tests didn't catch this because the test fixture shares one already-open transaction across all requests.
+This alone means the Controller does not yet durably store anything, contradicting SPEC-03 §3.1/§3.8 and
+`AGENTS.md`'s "Governance Controller is authoritative." REVIEW-004 also found several `HIGH` gaps (a
+concurrent-approval race that can double-trigger macro-agent execution; `PolicyEngine` never validates
+`CompletionContract.command` content against SPEC-08's forbidden operations; the Telegram adapter has no
+webhook auth and hardcodes `actor`; `EventBridge` has no idempotency/replay protection per SPEC-05 §5.4) plus
+many `MEDIUM`/`LOW` items — all tracked as `GAP-022` through `GAP-042` in `reviews/GAPS.md`. **Do not treat
+the "134 passed, ruff clean" test status below as evidence of production readiness** — see GAP-022 for why.
 
-Final test status: **134 passed**, ruff clean.
+Test status: **134 passed**, ruff clean (this is real, just not sufficient — see above).
 
 Implemented components:
 
@@ -89,3 +96,5 @@ Priority: integrate with real external systems and harden execution orchestratio
 - Intake Adapter (non-Plane task ingestion).
 - Semantic Reviewer.
 - Production hardening (metrics, tracing, HA).
+- Evaluate LongHorizon-Harness (or similar durable-execution wrappers) as an optional `AgentHarness`
+  adapter for long-running/GUI-touching opentasks — see `docs/research-longhorizon-harness.md`.

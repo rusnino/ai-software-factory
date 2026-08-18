@@ -24,8 +24,13 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 
 ### Phase 1 Acceptance Criteria
 
-- [x] Controller stores task independently of macro-agent.
-- [x] Task cannot execute without durable human approval.
+**`REVIEW-004` found that `session.commit()` is never called anywhere in `governance_controller` — every
+write is discarded when the per-request DB session closes (see `reviews/GAPS.md` GAP-022, CRITICAL). Every
+checked item below describes correct *in-request* logic; none of it survives past one HTTP request against
+real PostgreSQL today, so treat every `[x]` here as provisional until GAP-022 closes.**
+
+- [ ] Controller stores task independently of macro-agent. [^phase1-durability]
+- [ ] Task cannot execute without durable human approval. [^phase1-durability]
 - [x] Controller starts macro-agent only after policy check.
 - [x] Controller correlates its execution ID with macro-agent run/team IDs.
 - [ ] At least two distinct agent harnesses participate in one execution. [^phase1-harnesses]
@@ -45,7 +50,8 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 [^phase1-git-cascade]: A deterministic landing stub with branch validation exists. Real git worktree/stream flow and cascade landing require git integration deferred to Phase 2/3.
 [^phase1-messaging]: Agent messaging is out of scope for the Phase 1 Governance Controller PoC; handled by macro-agent runtime.
 [^phase1-reviewer]: Reviewer verdict workflow is deferred to Phase 3 (Semantic Reviewer). Phase 1 enforces HUMAN_REVIEW gate before DONE.
-[^phase1-verification]: `VerificationService` exists and is driven by `CompletionContract` when present, but it is not invoked from `ApprovalService`, any API route, or the `AGENT_REVIEW -> HUMAN_REVIEW` transition — nothing in the live request path calls it. The `required`/`optional` `Check` commands it does read are not actually executed (status is hardcoded `"passed"`). So this criterion is not yet an enforced invariant, just an unwired component; see `reviews/GAPS.md` GAP-006 and `reviews/REVIEW-002-gap-closure-verification.md`.
+[^phase1-verification]: Updated by `REVIEW-004`: `VerificationService` is now genuinely invoked by `EventBridge.handle()` on `landing:completed`, executes `required`/`optional` `Check` commands via real subprocess with real exit-code comparison, and gates `AGENT_REVIEW -> HUMAN_REVIEW` vs `FAILED` on the result (GAP-006, closed, confirmed by live reproduction in `reviews/REVIEW-003-round2-gap-verification.md`). Left unchecked because (a) no automated test exercises this specific integration path (GAP-021, open) and (b) `VerificationService`'s own `forbidden_path_check` still has a subpath-matching bug (GAP-020, open).
+[^phase1-durability]: `REVIEW-004` (`reviews/GAPS.md` GAP-022, CRITICAL): `session.commit()` is never called anywhere in the codebase, so no `Task`, `Approval`, or `AuditLog` row survives past the request that created it against real PostgreSQL. Masked in tests because the test fixture shares one already-open transaction across all requests in a test. Both items above will be re-checkable once GAP-022 closes.
 
 ### Stop Condition
 
