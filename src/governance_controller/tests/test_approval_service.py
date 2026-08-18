@@ -1,18 +1,31 @@
 """Tests for the ApprovalService."""
 
+import os
+import tempfile
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.policy_engine import PolicyEngine
+
+
+async def _audit_rows_for_task(
+    db_session: AsyncSession, task_id: str
+) -> list[AuditLog]:
+    result = await db_session.execute(
+        select(AuditLog).where(AuditLog.task_id == task_id)
+    )
+    return list(result.scalars().all())
 
 
 @pytest.fixture
@@ -234,6 +247,181 @@ class TestApprovalServicePolicyViolations:
                 actor="human-1",
                 idempotency_key="key-injected",
             )
+
+
+class TestApprovalServiceRejectedApprovalsPersistAudit:
+    async def test_self_approval_rejection_persists_audit_row(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        service = ApprovalService(db=db_session)
+        task = await _make_task(db_session, TaskState.PROPOSED)
+
+        with pytest.raises(ValueError, match="cannot approve their own task"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.PLAN,
+                source="plane",
+                actor="agent-1",
+                idempotency_key="key-self-audit",
+            )
+
+        entries = await _audit_rows_for_task(db_session, task.id)
+        assert any(
+            e.event_type == "approval_rejected"
+            and e.payload.get("reason") == "self-approval"
+            for e in entries
+        )
+
+    async def test_permission_denied_persists_audit_row(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        service = ApprovalService(db=db_session)
+        task = await _make_task(db_session, TaskState.PROPOSED)
+
+        with pytest.raises(ValueError, match="may not request"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.PLAN,
+                source="telegram",
+                actor="system",
+                idempotency_key="key-permission-audit",
+            )
+
+        entries = await _audit_rows_for_task(db_session, task.id)
+        assert any(
+            e.event_type == "approval_rejected"
+            and e.payload.get("reason") == "permission_denied"
+            for e in entries
+        )
+
+    async def test_policy_violation_persists_audit_row(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+    ) -> None:
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+
+        with pytest.raises(ValueError, match="Policy violation"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(harness="forbidden-harness"),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-policy-audit",
+            )
+
+        entries = await _audit_rows_for_task(db_session, task.id)
+        assert any(
+            e.event_type == "approval_rejected"
+            and "violations" in e.payload
+            for e in entries
+        )
+
+    async def test_concurrent_modification_persists_audit_row(
+        self,
+    ) -> None:
+        """Stale task read losing CAS update commits audit before raising."""
+        from sqlalchemy import select as sa_select
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+        from sqlalchemy.orm import sessionmaker
+        from sqlmodel import SQLModel
+
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+            db_url = f"sqlite+aiosqlite:///{tmp.name}"
+
+        engine = create_async_engine(db_url, echo=False, future=True)
+        local_session = sessionmaker(
+            bind=engine, class_=AsyncSession, expire_on_commit=False
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            task = Task(
+                id="task-concurrent",
+                project_id="proj-1",
+                state=TaskState.PLAN_APPROVED,
+                proposed_by="agent-1",
+            )
+            seed.add(task)
+            await seed.commit()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-first"}
+
+        # Open session A and load the stale task object BEFORE session B
+        # commits the approval. SQLite's async identity map returns the same
+        # cached Python object across queries in the same session, so this
+        # guarantees task_a still sees PLAN_APPROVED/version=0 when it later
+        # attempts the EXECUTION approval.
+        session_a = local_session()
+        task_a = await session_a.scalar(
+            sa_select(Task).where(Task.id == "task-concurrent")
+        )
+        assert task_a is not None
+        assert task_a.state == TaskState.PLAN_APPROVED
+        assert task_a.version == 0
+
+        # Session B commits an EXECUTION approval first. Session A still
+        # holds a PLAN_APPROVED copy in memory; when it calls approve(), the
+        # in-memory state-machine check passes (PLAN_APPROVED -> EXEC_APPROVED)
+        # but the atomic UPDATE's WHERE clause fails because the database row
+        # has already advanced, so the concurrent-modification guard fires.
+        async with local_session() as session_b:
+            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            task_b = await session_b.scalar(
+                sa_select(Task).where(Task.id == "task-concurrent")
+            )
+            assert task_b is not None
+            result = await service_b.approve(
+                task=task_b,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-first",
+            )
+            assert result.state == TaskState.RUNNING
+            await session_b.commit()
+
+        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        with pytest.raises(ValueError, match="Concurrent modification"):
+            await service_a.approve(
+                task=task_a,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-second",
+            )
+        # The rejection audit log was flushed inside approve(); commit it
+        # before checking with a separate session.
+        await session_a.commit()
+        await session_a.close()
+
+        async with local_session() as check:
+            entries = await check.execute(
+                sa_select(AuditLog).where(AuditLog.task_id == "task-concurrent")
+            )
+            rows = entries.scalars().all()
+            assert any(
+                e.event_type == "approval_rejected"
+                and e.payload.get("reason") == "concurrent_modification"
+                for e in rows
+            ), [(e.event_type, repr(e.payload)) for e in rows]
+
+        await engine.dispose()
+        os.unlink(tmp.name)
 
 
 class TestApprovalServiceSelfApprovalPrevention:
