@@ -151,6 +151,37 @@ async def test_forbidden_path_prefix_match_fails() -> None:
     assert "~/.ssh/id_rsa" in forbidden["detail"]
 
 
+async def test_task_forbidden_paths_enforced_with_completion_contract() -> None:
+    # GAP-074: task-level forbidden_paths must be checked even when a
+    # CompletionContract is present and its forbidden_path_check is clear.
+    contract = TaskContract(
+        task_id="task-023",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Touch a path forbidden only by the task contract",
+        acceptance=["It is caught"],
+        forbidden_paths=["secrets.env"],
+        inputs=["secrets.env"],
+        completion_contract=CompletionContract(
+            task_id="task-023",
+            required=[Check(type="true", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(
+                description="Only touch controller code",
+                allowed_paths=[],
+                forbidden_paths=[],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    assert forbidden["status"] == "failed"
+    assert "secrets.env" in forbidden["detail"]
+
+
 async def test_traversal_forbidden_path_is_rejected() -> None:
     contract = TaskContract(
         task_id="task-021",
