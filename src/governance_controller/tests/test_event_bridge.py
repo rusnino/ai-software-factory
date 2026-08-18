@@ -322,3 +322,63 @@ class TestEventBridgeTransitions:
             for c in verification_failed.payload["checks"]
         }
         assert checks["required:always_fail"]["status"] == "failed"
+
+    async def test_landing_completed_passing_completion_contract_moves_to_human_review(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-passing-contract",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            task_contract_json=TaskContract(
+                task_id="task-passing-contract",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Exercise success path through EventBridge",
+                acceptance=["Task ends in HUMAN_REVIEW when required check passes"],
+                completion_contract=CompletionContract(
+                    task_id="task-passing-contract",
+                    required=[
+                        Check(
+                            type="always_pass",
+                            command="exit 0",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("landing:completed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.HUMAN_REVIEW
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert any(
+            e.event_type == "verification_passed"
+            for e in entries
+        )
+        verification_passed = next(
+            e for e in entries if e.event_type == "verification_passed"
+        )
+        assert verification_passed.actor == "system"
+        assert verification_passed.source == "verification_service"
+        checks = {
+            c["name"]: c
+            for c in verification_passed.payload["checks"]
+        }
+        assert checks["required:always_pass"]["status"] == "passed"
