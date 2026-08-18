@@ -13,6 +13,7 @@ class ProjectExecutionConfig(BaseModel):
     allowed_harnesses: list[str] = ["opencode"]
     sandbox: str = "worktree"
     timeout_minutes: int = 60
+    max_retries: int = 2
     max_parallel_agents: int = 3
 
 

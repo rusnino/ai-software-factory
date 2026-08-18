@@ -342,6 +342,18 @@ class PolicyEngine:
                 "Unrestricted network access is denied by project profile"
             )
 
+        # 4b. Execution resource caps from project profile.
+        if execution.timeout_minutes > profile.execution.timeout_minutes:
+            violations.append(
+                f"Task timeout_minutes ({execution.timeout_minutes}) "
+                f"exceeds project cap ({profile.execution.timeout_minutes})"
+            )
+        if execution.max_retries > profile.execution.max_retries:
+            violations.append(
+                f"Task max_retries ({execution.max_retries}) "
+                f"exceeds project cap ({profile.execution.max_retries})"
+            )
+
         # 5. Completion-contract command allowlist. Any shell command scheduled
         #    to run during verification must be reviewed for forbidden tokens
         #    and destructive operations.
