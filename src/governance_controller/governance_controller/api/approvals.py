@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.constants import ApprovalType
@@ -43,10 +43,15 @@ async def submit_approval(
     payload: ApprovalRequest,
     db: AsyncSession = Depends(get_db),
     approval_service: ApprovalService = Depends(get_approval_service),
+    idempotency_key: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
 ) -> ApprovalResponse:
     """Single authoritative approval endpoint.
 
-    Validates policy, advances state, and records the approval.
+    Validates policy, advances state, and records the approval. Supports an
+    optional ``Idempotency-Key`` header; when absent, a deterministic fallback
+    key is derived from ``(task_id, approval_type, actor, timestamp)``.
     """
     task_service = TaskService(db)
 
@@ -73,12 +78,13 @@ async def submit_approval(
             detail=f"Stored task contract is invalid: {exc}",
         ) from exc
 
-    idempotency_key = _make_idempotency_key(
-        payload.task_id,
-        payload.approval_type,
-        payload.actor,
-        payload.timestamp,
-    )
+    if idempotency_key is None:
+        idempotency_key = _make_idempotency_key(
+            payload.task_id,
+            payload.approval_type,
+            payload.actor,
+            payload.timestamp,
+        )
 
     try:
         updated_task = await approval_service.approve(

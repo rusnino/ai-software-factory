@@ -138,14 +138,10 @@ class ApprovalService:
                 f"Policy violation(s): {', '.join(policy_result.violations)}"
             )
 
-        # 2. Idempotency: return existing task state if the same actor already
-        #    approved this task/type.
+        # 2. Idempotency: return existing task state if this exact key was
+        #    already processed.
         existing = await self.db.scalar(
-            select(Approval).where(
-                Approval.task_id == task.id,
-                Approval.approval_type == approval_type,
-                Approval.actor == actor,
-            )
+            select(Approval).where(Approval.idempotency_key == idempotency_key)
         )
         if existing is not None:
             await AuditService.log(
@@ -156,6 +152,7 @@ class ApprovalService:
                 source=source,
                 payload={
                     "approval_type": approval_type.value,
+                    "idempotency_key": idempotency_key,
                     "previous_state": task.state.value,
                     "new_state": task.state.value,
                 },
@@ -201,6 +198,7 @@ class ApprovalService:
             source=source,
             payload={
                 "approval_type": approval_type.value,
+                "idempotency_key": idempotency_key,
                 "previous_state": previous_state.value,
                 "new_state": target_state.value,
             },

@@ -152,6 +152,7 @@ class TestApprovalServiceIdempotency:
         )
         assert first.state == TaskState.PLAN_APPROVED
 
+        # Same idempotency key: must be a no-op and not create a second row.
         second = await service.approve(
             task=task,
             contract=contract,
@@ -159,7 +160,7 @@ class TestApprovalServiceIdempotency:
             approval_type=ApprovalType.PLAN,
             source="telegram",
             actor="human-1",
-            idempotency_key="key-plan-2",
+            idempotency_key="key-plan-1",
         )
 
         assert second.state == TaskState.PLAN_APPROVED
@@ -168,6 +169,7 @@ class TestApprovalServiceIdempotency:
             Approval.__table__.select().where(Approval.task_id == task.id)
         )
         assert len(approvals.scalars().all()) == 1
+
 
 
 class TestApprovalServicePolicyViolations:
