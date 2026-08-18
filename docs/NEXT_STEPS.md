@@ -2,9 +2,17 @@
 
 ## Current State
 
-**All gaps found by `REVIEW-013`/`REVIEW-014` are now closed per `reviews/GAPS.md`.** `GAP-062`'s body-size middleware now caps actual bytes read from the ASGI stream, not just the declared `Content-Length` header.
+**REVIEW-016 (a full fresh review) found a new `CRITICAL` gap that overrides everything below: the system has never been verified to work against real PostgreSQL, and in fact does not.**
 
-Test status: **186 passed**, `ruff` clean, `mypy --strict` clean.
+- `GAP-078` (CRITICAL): every `datetime` column across all 5 models is `TIMESTAMP WITHOUT TIME ZONE`, but every `utc_now()`/`datetime.now(UTC)` call in the codebase produces a timezone-*aware* value. `asyncpg` rejects this outright. **Live-reproduced against a real Postgres container: `POST /tasks` — task creation, the single most basic write in the system — fails on its first audit-log insert.** Every write path shares the same models, so this is not a narrow bug; it means the Controller has never actually worked against the database `CLAUDE.md`/`docker-compose.yml` mandate as the Phase 1 target. It went undetected through 15 prior review rounds because the entire test suite (186 tests) and every prior round's live reproduction ran exclusively against SQLite, which tolerates the tz-naive/tz-aware mismatch that Postgres does not.
+- `GAP-079` (HIGH): `TaskService.create()`'s project-profile upsert is a TOCTOU race; a losing concurrent request's task is silently dropped and misreported as "already exists."
+- `GAP-080` (HIGH): `get_by_id_for_update()`'s row lock (a no-op on SQLite, real on Postgres) is held across the live macro-agent HTTP call in `POST /approvals`, contradicting the codebase's own fail-fast CAS design and creating a pool-exhaustion path under a hung macro-agent.
+- `GAP-074` (HIGH): `TaskContract.forbidden_paths` (SPEC-03 §3.5) is never read by `PolicyEngine` and is silently dropped by `VerificationService` whenever a `CompletionContract` is attached.
+- `GAP-073` (MEDIUM): the `GAP-062` body-size limit only applies to `POST /events`, not `POST /tasks`/`POST /approvals`, which share the identical unbounded-body exposure.
+
+See `reviews/REVIEW-016-full-fresh-review.md` and `reviews/GAPS.md` for full detail. Per the ledger's gate rule, Phase 1 cannot be described as complete while these `CRITICAL`/`HIGH` rows are `OPEN`.
+
+Test status: **186 passed** (SQLite only — see `GAP-078`; this number does not demonstrate Postgres correctness), `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
@@ -75,6 +83,23 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Authentication/authorization middleware.
    - Secret injection via environment or vault, never in prompts/YAML.
 
+8. **Meta Orchestrator integration** (SPEC-10 §10.2 assigns this to Phase 2, not Phase 3+)
+   - OpenCode + BMAD + OpenSpec integration.
+   - Evaluate sudocode-ai/sudocode's Spec/Issue graph model and OpenSpec integration before building
+     idea-decomposition tooling from scratch (its execution engine is out of scope; that's
+     macro-agent's job) — see `docs/research-alexngai-ecosystem-and-sudocode.md`.
+
+9. **Intake Adapter** (SPEC-10 §10.2 assigns this to Phase 2, not Phase 3+)
+   - Telegram/Email/API intake, feeding the Idea Ingestion Service.
+   - Human Triage queue in Plane.
+
+10. **Verification failure retry (SPEC-09 §9.6)**
+    - Currently unimplemented: `VerificationService.verify_and_advance()` transitions any failed
+      verification straight to `FAILED`, with no retry-count tracking (`Task` has no attempt/retry
+      field) and no failure-feedback call to macro-agent. Fails closed (never a false `DONE`), so not
+      a governance defect, but SPEC-09 §9.6 specifies a retry-before-FAILED mechanism that doesn't
+      exist yet — tracked as `GAP-077` (MEDIUM).
+
 ## Blockers to Watch
 
 - macro-agent API stability and `/runs` contract.
@@ -84,10 +109,6 @@ Priority: integrate with real external systems and harden execution orchestratio
 ## Deferred to Phase 3+
 
 - Full harness matrix (Claude Code, Codex, Aider) with runtime selection.
-- Meta Orchestrator integration — evaluate sudocode-ai/sudocode's Spec/Issue graph model and OpenSpec
-  integration before building idea-decomposition tooling from scratch (its execution engine is out of
-  scope; that's macro-agent's job) — see `docs/research-alexngai-ecosystem-and-sudocode.md`.
-- Intake Adapter (non-Plane task ingestion).
 - Semantic Reviewer.
 - Production hardening (metrics, tracing, HA).
 - Evaluate LongHorizon-Harness (or similar durable-execution wrappers) as an optional `AgentHarness`
