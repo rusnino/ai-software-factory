@@ -68,19 +68,6 @@ class TaskService:
             select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
         )
 
-    async def get_by_id_for_update(self, task_id: str) -> Task | None:
-        """Return the Task with the given primary key, locked for update.
-
-        .. deprecated::
-            Prefer :meth:`get_by_id`. Approval concurrency is handled by
-            ``StateMachine.atomic_transition()`` rather than a long-held row
-            lock, so callers should not acquire ``FOR UPDATE`` locks.
-        """
-        result = await self.db.execute(
-            select(Task).where(Task.id == task_id).with_for_update()  # type: ignore[arg-type]
-        )
-        return result.scalar_one_or_none()
-
     async def _upsert_project_profile(
         self,
         project_profile: ProjectProfile,

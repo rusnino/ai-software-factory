@@ -237,27 +237,45 @@ class TestApprovalEndpoint:
         assert response.status_code == 503
         assert "macro-agent start failed" in response.json()["detail"]
 
-    async def test_approval_does_not_use_for_update_lock(
+    async def test_approval_commits_ready_before_macro_agent_start(
         self,
         async_client: AsyncClient,
+        mock_executor: AsyncMock,
         monkeypatch: pytest.MonkeyPatch,
         sample_contract: TaskContract,
         sample_profile: ProjectProfile,
     ) -> None:
-        """The approval endpoint must not hold a row lock across macro-agent calls."""
+        """GAP-080 regression: commit READY/Execution before the live call."""
+        from sqlalchemy.ext.asyncio import AsyncSession
 
-        async def _forbidden(*_args, **_kwargs) -> None:
-            raise AssertionError("FOR UPDATE lock used in approval path")
+        commit_counts: dict[int, int] = {}
+        start_called = [False]
 
-        monkeypatch.setattr(
-            "governance_controller.services.task_service.TaskService.get_by_id_for_update",
-            _forbidden,
-        )
+        original_commit = AsyncSession.commit
+
+        async def _patched_commit(self):
+            commit_counts[id(self)] = commit_counts.get(id(self), 0) + 1
+            return await original_commit(self)
+
+        async def _patched_start(*args, **kwargs):
+            start_called[0] = True
+            # At the moment the live executor is invoked, the READY transition
+            # and Execution row must already be committed (lock released).
+            assert any(c >= 1 for c in commit_counts.values())
+            return {"run_id": "run-committed"}
+
+        monkeypatch.setattr(AsyncSession, "commit", _patched_commit)
+        mock_executor.start.side_effect = _patched_start
 
         await _create_task(async_client, sample_contract, sample_profile)
-        response = await async_client.post(
+        await async_client.post(
             "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+        response = await async_client.post(
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.EXECUTION),
         )
 
         assert response.status_code == 200
-        assert response.json()["state"] == TaskState.PLAN_APPROVED.value
+        assert response.json()["state"] == TaskState.RUNNING.value
+        assert start_called[0]

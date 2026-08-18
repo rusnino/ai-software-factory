@@ -295,7 +295,13 @@ class ApprovalService:
         source: str,
         previous_state: TaskState,
     ) -> Task:
-        """Move task to READY, start macro-agent, record Execution, go RUNNING."""
+        """Move task to READY, start macro-agent, record Execution, go RUNNING.
+
+        The ``READY`` transition and ``Execution`` row are committed *before*
+        the live macro-agent HTTP call so that no database row lock is held
+        across that outbound request. This keeps the fail-fast CAS semantics
+        intact and prevents a slow/hung macro-agent from pinning the task row.
+        """
         # Atomically advance EXEC_APPROVED -> READY. If another caller already
         # moved the task, the UPDATE affects 0 rows and we fail loudly.
         if not await StateMachine.atomic_transition(
@@ -343,6 +349,10 @@ class ApprovalService:
         )
         self.db.add(execution)
         await self.db.flush()
+
+        # CRITICAL: commit here so the row lock from the READY UPDATE is
+        # released before the live, potentially slow macro-agent call.
+        await self.db.commit()
 
         try:
             result = await self.executor.start(

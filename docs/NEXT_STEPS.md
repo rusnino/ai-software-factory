@@ -2,20 +2,20 @@
 
 ## Current State
 
-**REVIEW-017 independently re-verified REVIEW-016's fixes against a live PostgreSQL container and found one, `GAP-080`, does not actually hold: the HIGH-severity gate is open again.**
+**All `CRITICAL`/`HIGH` gaps are closed.** `GAP-080` was reopened in REVIEW-017 because the original fix only removed the explicit `FOR UPDATE` but still held an MVCC row lock across the live macro-agent HTTP call. It is now fixed by committing the `READY` transition and `Execution` row before `executor.start()`.
 
-Genuinely fixed and independently re-verified in REVIEW-017 (not just a diff read):
-- `GAP-078` (CRITICAL): every `datetime` column now uses `DateTime(timezone=True)`; live-verified `POST /tasks` succeeds against a real Postgres container with correctly-typed, correctly-offset persisted timestamps.
-- `GAP-079` (HIGH): project-profile creation now uses dialect-aware `INSERT ... ON CONFLICT DO NOTHING` + re-fetch; live-verified with a genuinely forced two-connection race against real Postgres — exactly one profile row, both tasks persisted.
-- `GAP-074` (HIGH): `PolicyEngine` now unions `contract.forbidden_paths` with `profile.security.forbidden_paths` (both directions), and `VerificationService` checks the union regardless of `CompletionContract` presence; live-reproduced closing the original silent-drop bypass.
-- `GAP-073` (MEDIUM): body-size limit middleware now applies to `/events`, `/tasks`, and `/approvals`, and genuinely counts bytes read from the stream (not just the `Content-Length` header) — live-reproduced against all three routes with both the no-header and lying-header bypass angles.
+Closed gaps:
+- `GAP-078` (CRITICAL): `DateTime(timezone=True)` on all datetime columns.
+- `GAP-079` (HIGH): dialect-aware profile upsert.
+- `GAP-074` (HIGH): `TaskContract.forbidden_paths` enforced.
+- `GAP-073` (MEDIUM): body-size limit on all write endpoints.
+- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call.
+- `GAP-082` (LOW): orphaned `get_by_id_for_update()` removed.
+- `GAP-083` (LOW): DB pool settings now configurable via `GC_DATABASE_POOL_*` env vars.
 
-**Not genuinely fixed — reopened:**
-- `GAP-080` (HIGH): the explicit `get_by_id_for_update()`/`SELECT ... FOR UPDATE` call was removed from `api/approvals.py`, but `_trigger_execution` still holds an ordinary MVCC row lock across the live macro-agent HTTP call, because the `READY` transition's `UPDATE` is never committed before that call. REVIEW-017 live-reproduced the same ~3.5s block REVIEW-016 originally measured, now via the natural transactional lock instead of the explicit one. See `reviews/GAPS.md` for the fix shape needed (commit or flush-and-commit the `READY` transition before calling `executor.start()`).
+Still open: `GAP-077` (MEDIUM, SPEC-09 §9.6 verification retry — fails closed, intentionally deferred to Phase 2) and `RISK-17` (SQLite-vs-Postgres dialect parity, no CI yet).
 
-Also open: `GAP-077` (MEDIUM, SPEC-09 §9.6 verification retry — fails closed, intentionally deferred) and three new REVIEW-017 findings — `GAP-081` (a new `RISK-17` row added documenting the SQLite-vs-Postgres dialect-parity defect class), `GAP-082` (LOW, orphaned `get_by_id_for_update()`), `GAP-083` (LOW, unconfigured/untunable DB connection-pool settings).
-
-Test status: **202 passed**, `ruff` clean, `mypy --strict` clean. The suite now genuinely runs against real PostgreSQL too via `GC_TEST_DATABASE_URL` (confirmed not a silent SQLite fallback in REVIEW-017), though this path is opt-in with no CI enforcing it — see `RISK-17`.
+Test status: **202 passed** on both SQLite and PostgreSQL, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 

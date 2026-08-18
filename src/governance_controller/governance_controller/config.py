@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     # Dev-only default; production must inject a real DATABASE_URL.
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/governance"
+    database_pool_size: int = 10
+    database_max_overflow: int = 20
+    database_pool_timeout: int = 30
+    database_pool_pre_ping: bool = True
     macro_agent_base_url: str = "http://localhost:3000"
     macro_agent_timeout_seconds: float = 30.0
     log_level: str = "info"
