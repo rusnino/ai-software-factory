@@ -20,8 +20,8 @@ services:
     build: .
     environment:
       # Dev-only local database URL.
-      DATABASE_URL: postgresql+asyncpg://controller:controller@db:5432/controller
-      LOG_LEVEL: info
+      GC_DATABASE_URL: postgresql+asyncpg://controller:controller@db:5432/controller
+      GC_LOG_LEVEL: info
     ports:
       - "8000:8000"
     depends_on:
