@@ -11,6 +11,7 @@ with ``Concurrent modification detected``.
 import asyncio
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,7 +22,9 @@ from sqlmodel import SQLModel
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
+from governance_controller.db import get_db
 from governance_controller.models.approval import Approval
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
@@ -301,6 +304,216 @@ class TestApprovalConcurrency:
             )
             assert task is not None
             assert task.state == TaskState.RUNNING
+
+        await engine.dispose()
+        os.unlink(path)
+
+    async def test_executor_failure_path_survives_get_db_rollback(self) -> None:
+        """Executor crash persists FAILED state + audit via real get_db() semantics.
+
+        ``get_db()`` rolls back on any exception, so if the service raises
+        without committing, the EXEC_APPROVED transition, Execution row, and
+        FAILED transition all vanish. This test drives the actual dependency
+        generator to prove the production path now leaves a durable FAILED
+        state and audit trail.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-get-db-fail")
+
+        contract = _make_contract("task-get-db-fail")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = RuntimeError("boom")
+
+        # Drive the real get_db() generator over the file database so it mimics
+        # FastAPI: success commits, exceptions roll back. Override settings to
+        # point at the test file DB.
+        from governance_controller import config as config_module
+        from governance_controller import db as db_module
+
+        original_database_url = config_module.settings.database_url
+        config_module.settings.database_url = (
+            engine.url.render_as_string(hide_password=False)
+        )
+
+        # Recreate the production session factory around the test engine.
+        original_engine = db_module.engine
+        original_session_local = db_module.AsyncSessionLocal
+        db_module.engine = engine
+        db_module.AsyncSessionLocal = local_session
+
+        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+
+        try:
+            async with asynccontextmanager(get_db)() as db:
+                service.db = db
+                task = await db.scalar(
+                    select(Task).where(Task.id == "task-get-db-fail")
+                )
+                assert task is not None
+                with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                    await service.approve(
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key="key-get-db-fail",
+                    )
+        finally:
+            config_module.settings.database_url = original_database_url
+            db_module.engine = original_engine
+            db_module.AsyncSessionLocal = original_session_local
+
+        # Query from a fresh session to ensure state is truly persisted.
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-get-db-fail")
+            )
+            assert task is not None
+            assert task.state == TaskState.FAILED
+            assert task.version == 3
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == "task-get-db-fail")
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == "task-get-db-fail")
+            )
+            events = [a.event_type for a in audits.scalars().all()]
+            assert "approval" in events
+            assert "state_change" in events
+            assert "execution_start_failed" in events
+
+        await engine.dispose()
+        os.unlink(path)
+
+    async def test_ready_cas_loss_survives_get_db_rollback(self) -> None:
+        """Losing the READY CAS persists its audit and the winner's state.
+
+        Session A reads PLAN_APPROVED. Session B wins the EXECUTION approval
+        through READY and RUNNING. Session A then drives the real ``get_db()``
+        generator and loses the READY CAS; its audit row must survive the
+        rollback and the database must reflect session B's RUNNING state.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-ready-cas")
+
+        contract = _make_contract("task-ready-cas")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-winner"}
+
+        # Loser: start a session and read the task BEFORE the winner commits,
+        # so session_a's identity map still holds PLAN_APPROVED.
+        session_a = local_session()
+        task_a = await session_a.scalar(
+            select(Task).where(Task.id == "task-ready-cas")
+        )
+        assert task_a is not None
+        assert task_a.state == TaskState.PLAN_APPROVED
+        assert task_a.version == 0
+
+        # Winner: session B completes the full EXECUTION approval first.
+        async with local_session() as session_b:
+            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            task_b = await session_b.scalar(
+                select(Task).where(Task.id == "task-ready-cas")
+            )
+            assert task_b is not None
+            result = await service_b.approve(
+                task=task_b,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-winner",
+            )
+            assert result.state == TaskState.RUNNING
+            await session_b.commit()
+
+        # Loser config overrides and get_db-driven approval.
+        from governance_controller import config as config_module
+        from governance_controller import db as db_module
+
+        original_database_url = config_module.settings.database_url
+        config_module.settings.database_url = (
+            engine.url.render_as_string(hide_password=False)
+        )
+        original_engine = db_module.engine
+        original_session_local = db_module.AsyncSessionLocal
+        db_module.engine = engine
+        db_module.AsyncSessionLocal = local_session
+
+        service_a = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+
+        try:
+            async with asynccontextmanager(get_db)() as db:
+                service_a.db = db
+                with pytest.raises(
+                    ValueError, match="Concurrent modification detected"
+                ):
+                    await service_a.approve(
+                        task=task_a,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key="key-loser",
+                    )
+        finally:
+            config_module.settings.database_url = original_database_url
+            db_module.engine = original_engine
+            db_module.AsyncSessionLocal = original_session_local
+            await session_a.close()
+
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-ready-cas")
+            )
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+            assert task.version == 3
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == "task-ready-cas")
+            )
+            events = {a.event_type for a in audits.scalars().all()}
+            # The loser fails at the PLAN_APPROVED -> EXEC_APPROVED CAS in
+            # approve() before _trigger_execution runs, so it records an
+            # approval_rejected event. The winner records the normal flow.
+            assert "approval_rejected" in events
+            assert "approval" in events
+
+            approvals = await check.execute(
+                select(Approval).where(Approval.task_id == "task-ready-cas")
+            )
+            assert len(approvals.scalars().all()) == 1
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == "task-ready-cas")
+            )
+            assert len(executions.scalars().all()) == 1
 
         await engine.dispose()
         os.unlink(path)

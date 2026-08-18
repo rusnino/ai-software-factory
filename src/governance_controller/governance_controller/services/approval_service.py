@@ -313,6 +313,7 @@ class ApprovalService:
                     "target_state": TaskState.READY.value,
                 },
             )
+            await self.db.commit()
             raise ValueError(
                 "Concurrent modification detected: "
                 "task state changed during execution trigger"
@@ -386,6 +387,7 @@ class ApprovalService:
                         "target_state": TaskState.FAILED.value,
                     },
                 )
+            await self.db.commit()
             raise RuntimeError(f"macro-agent start failed: {exc}") from exc
 
         execution.macro_agent_run_id = result["run_id"]
@@ -395,6 +397,20 @@ class ApprovalService:
         if not await StateMachine.atomic_transition(
             self.db, task, TaskState.RUNNING
         ):
+            await AuditService.log(
+                db=self.db,
+                event_type="concurrent_modification",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,
+                payload={
+                    "approval_type": ApprovalType.EXECUTION.value,
+                    "expected_state": TaskState.READY.value,
+                    "target_state": TaskState.RUNNING.value,
+                },
+            )
+            await self.db.commit()
             raise ValueError(
                 "Concurrent modification detected: task state changed before RUNNING"
             )
