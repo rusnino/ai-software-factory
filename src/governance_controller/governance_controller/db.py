@@ -24,6 +24,16 @@ async def init_db() -> None:
         await conn.run_sync(SQLModel.metadata.create_all)
 
 
+async def ensure_sqlite_tables() -> None:
+    """Create all tables for in-memory SQLite on the async connection."""
+    if not settings.database_url.startswith("sqlite"):
+        return
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+
 async def get_db() -> AsyncGenerator[AsyncSession]:
+    if settings.database_url.startswith("sqlite"):
+        await ensure_sqlite_tables()
     async with AsyncSessionLocal() as session:
         yield session
