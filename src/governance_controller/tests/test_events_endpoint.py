@@ -177,6 +177,23 @@ async def test_post_event_rejects_oversized_body(
     assert response.status_code == 413
 
 
+async def test_post_event_rejects_oversized_body_without_content_length(
+    async_client: AsyncClient,
+) -> None:
+    """Middleware must cap actual bytes received, not just the Content-Length header."""
+    import json as _json
+
+    body = _json.dumps({"type": "x", "payload": {"x": "y" * (70 * 1024)}}).encode()
+
+    response = await async_client.post(
+        "/events",
+        content=body,
+        headers={"transfer-encoding": "chunked"},
+    )
+
+    assert response.status_code == 413
+
+
 async def test_post_event_invalid_transition_returns_204_and_logs_error(
     async_client: AsyncClient,
     client_db_session: AsyncSession,
