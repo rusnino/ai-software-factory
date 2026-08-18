@@ -40,7 +40,7 @@ Git + CI + Reviewer + Human Review → Done
 | `requirements/` | Requirements traceability matrix |
 | `docs/` | Supporting docs, diagrams, deferred-risk notes |
 | `reviews/` | Review findings (`REVIEW-NNN-*.md`) and the cross-review gap ledger (`GAPS.md`) — see `AGENTS.md` § Review Findings and Gap Tracking |
-| `src/governance_controller/` | Phase 1 Governance Controller (FastAPI/SQLModel/PostgreSQL); its own `tests/` live inside this subproject, not at repo root. See `reviews/GAPS.md` before assuming this is production-ready — a `CRITICAL` durability gap (GAP-022) is open as of this writing. |
+| `src/governance_controller/` | Phase 1 Governance Controller (FastAPI/SQLModel/PostgreSQL); its own `tests/` live inside this subproject, not at repo root. See `reviews/GAPS.md` for the current gap ledger. |
 | `tmp/` | Generated archives, diagrams, scratch files (ignored by git) |
 
 ## Documentation
