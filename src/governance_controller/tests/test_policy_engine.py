@@ -14,6 +14,8 @@ def _make_contract(
     acceptance: list[str] | None = None,
     harness: str = "opencode",
     forbidden_paths: list[str] | None = None,
+    inputs: list[str] | None = None,
+    deliverables: list[str] | None = None,
 ) -> TaskContract:
     data: dict = {
         "task_id": "task-1",
@@ -27,6 +29,10 @@ def _make_contract(
         data["acceptance"] = acceptance
     else:
         data["acceptance"] = ["feature X passes tests"]
+    if inputs is not None:
+        data["inputs"] = inputs
+    if deliverables is not None:
+        data["deliverables"] = deliverables
     return TaskContract(**data)
 
 
@@ -93,14 +99,25 @@ class TestPolicyEngineRejections:
         assert result.allowed is False
         assert any(expected_message in v for v in result.violations)
 
-    def test_forbidden_path_conflict_rejected(self) -> None:
+    def test_forbidden_path_agreement_is_allowed(self) -> None:
+        # The task and profile both forbid a path: this is not a conflict.
         contract = _make_contract(forbidden_paths=["/etc/shadow", "/secrets"])
+        profile = _make_profile(forbidden_paths=["/etc/shadow", "/root"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+        assert result.violations == []
+
+    def test_touched_forbidden_path_is_rejected(self) -> None:
+        # The task declares an input that the profile forbids.
+        contract = _make_contract(inputs=["/etc/shadow", "README.md"])
         profile = _make_profile(forbidden_paths=["/etc/shadow", "/root"])
 
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
         assert any(
-            "Forbidden path conflict: /etc/shadow" in v
+            "Task touches forbidden path: /etc/shadow" in v
             for v in result.violations
         )

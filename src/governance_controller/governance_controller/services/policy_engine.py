@@ -52,12 +52,14 @@ class PolicyEngine:
                 f"Harness '{requested_harness}' is not in the allowed harness list"
             )
 
-        # 3. Forbidden path conflicts
-        contract_forbidden = set(contract.forbidden_paths)
+        # 3. Forbidden path enforcement: any input or deliverable that the task
+        #    explicitly touches must not match a path forbidden by the project
+        #    profile. Agreeing with the profile on a forbidden path is fine.
         profile_forbidden = set(profile.security.forbidden_paths)
-        conflicts = sorted(contract_forbidden & profile_forbidden)
+        touched_paths = set(contract.inputs + contract.deliverables)
+        conflicts = sorted(touched_paths & profile_forbidden)
         for path in conflicts:
-            violations.append(f"Forbidden path conflict: {path}")
+            violations.append(f"Task touches forbidden path: {path}")
 
         # 4. Required human approval is embedded via approval_type gating.
         # Approval type-driven checks are handled by the state machine and
