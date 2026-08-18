@@ -2,15 +2,10 @@
 
 ## Current State
 
-Phase 1 Governance Controller in `src/governance_controller/` passes its test suite (**130 passed**, ruff
-clean), and most `REVIEW-001` gaps are genuinely closed — but an independent verification pass
-(`reviews/REVIEW-002-gap-closure-verification.md`) found that 3 of the closures were incomplete or
-incorrect, including 1 `CRITICAL` and 2 `HIGH` gaps that are now reopened in `reviews/GAPS.md`:
-`GAP-002` (forbidden-path check only catches exact string matches, not subpaths of a forbidden directory),
-`GAP-006` (Completion Contract `required`/`optional` checks never actually execute their commands, and
-`VerificationService` still isn't called from any live path), and `GAP-008` (the reconciliation "stub" is
-orphaned dead code that satisfies roughly 1 of SPEC-03 §3.9's 5 requirements). **Per `AGENTS.md`'s gate rule,
-Phase 1 is not yet done.** See `reviews/GAPS.md` for the full current status of all 19 gaps.
+Phase 1 Governance Controller implementation in `src/governance_controller/` passes its test suite
+(134 passed, ruff clean). `GAP-002` (CRITICAL), `GAP-006` (HIGH), and `GAP-008` (HIGH) were reopened
+by `reviews/REVIEW-002-gap-closure-verification.md` and are being closed in this follow-up work.
+See `reviews/GAPS.md` for the full current status of all 19 gaps.
 
 Implemented components:
 
@@ -19,9 +14,9 @@ Implemented components:
 - SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`.
 - Deterministic state machine covering `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
 - Embedded Policy Engine validating task contracts, project profiles, harness allowlist,
-  forbidden paths, security posture, git settings, and approval chain.
+  forbidden paths (with path-prefix matching), security posture, git settings, and approval chain.
 - Append-only `AuditService` wired into task/profile creation, approvals, state transitions,
-  execution starts, macro-agent events, and reconciliation checks.
+  execution starts, macro-agent events, and verification results.
 - `PermissionService` wired into `ApprovalService` to reject self-approval and system/agent actors.
 - `ApprovalService` as the single convergence point for all approvals, with `Idempotency-Key`
   header support and key-based deduplication.
@@ -30,11 +25,12 @@ Implemented components:
 - macro-agent executor abstraction (`MacroAgentClient`, `MacroAgentExecutor`) and `Execution` model.
 - Automatic execution trigger after `EXECUTION` approval, with `READY → RUNNING` transition.
 - opentasks materialization stub with DAG validation.
-- In-process macro-agent Event Bridge translating workspace events into Controller state updates.
-- Reconciliation service class exists but is not wired into anything and doesn't compare against real data (GAP-008, open).
+- In-process macro-agent Event Bridge translating workspace events into Controller state updates;
+  `landing:completed` triggers `VerificationService` and gates `AGENT_REVIEW → HUMAN_REVIEW`.
 - Dockerfile and Docker Compose for local API + PostgreSQL.
 - CLI (`approve`) and Telegram adapter stubs converging on `POST /approvals`.
-- Verification service reads `CompletionContract` fields for `forbidden_path_check`/`scope_check`, but never executes `required`/`optional` check commands and isn't called from any live path (GAP-006, open).
+- Verification service executes `CompletionContract` `required`/`optional` shell commands, compares
+  exit codes, and performs forbidden-path/scope checks.
 - Git-cascade landing stub with branch validation.
 - End-to-end Phase 1 smoke test.
 
@@ -58,18 +54,23 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Poll/collect execution results.
    - Handle conflict recovery events.
 
-3. **Durable execution**
+3. **Reconciliation (SPEC-03 §3.9)**
+   - Build a periodic job that compares live Plane state, Controller DB state, and opentasks runtime graph.
+   - Detect divergence, raise human alert, and auto-correct only projection fields.
+   - *Deferred to Phase 2 because both Plane and opentasks integrations are still stubs in Phase 1.*
+
+4. **Durable execution**
    - Evaluate Temporal or Celery for retry/collect workflows.
    - Persist runtime task graph from opentasks materializer.
 
-4. **Policy Engine backend**
+5. **Policy Engine backend**
    - Integrate Open Policy Agent (OPA) as optional policy backend.
 
-5. **Advanced isolation**
+6. **Advanced isolation**
    - Docker-based agent sandbox.
    - Evaluate Firecracker / Kata for Phase 3.
 
-6. **Security hardening**
+7. **Security hardening**
    - Authentication/authorization middleware.
    - Secret injection via environment or vault, never in prompts/YAML.
 
