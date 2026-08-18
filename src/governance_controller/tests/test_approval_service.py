@@ -22,8 +22,17 @@ def fake_executor() -> MacroAgentExecutor:
     return executor
 
 
-def _make_task(state: TaskState = TaskState.PROPOSED) -> Task:
-    return Task(id="task-1", project_id="proj-1", state=state, proposed_by="agent-1")
+async def _make_task(
+    db: AsyncSession,
+    state: TaskState = TaskState.PROPOSED,
+    task_id: str = "task-1",
+) -> Task:
+    task = Task(
+        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
+    )
+    db.add(task)
+    await db.flush()
+    return task
 
 
 def _make_contract(
@@ -72,8 +81,9 @@ class TestApprovalServiceStateTransitions:
     async def test_plan_approval_advances_state_to_plan_approved(
         self,
         service: ApprovalService,
+        db_session: AsyncSession,
     ) -> None:
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -92,9 +102,10 @@ class TestApprovalServiceStateTransitions:
     async def test_execution_approval_starts_run_and_advances_to_running(
         self,
         service: ApprovalService,
+        db_session: AsyncSession,
         fake_executor: MacroAgentExecutor,
     ) -> None:
-        task = _make_task(TaskState.PLAN_APPROVED)
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -114,8 +125,9 @@ class TestApprovalServiceStateTransitions:
     async def test_merge_approval_advances_state_to_done(
         self,
         service: ApprovalService,
+        db_session: AsyncSession,
     ) -> None:
-        task = _make_task(TaskState.HUMAN_REVIEW)
+        task = await _make_task(db_session, TaskState.HUMAN_REVIEW)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -136,8 +148,9 @@ class TestApprovalServiceIdempotency:
     async def test_idempotent_second_approval_returns_same_state(
         self,
         service: ApprovalService,
+        db_session: AsyncSession,
     ) -> None:
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -176,8 +189,9 @@ class TestApprovalServicePolicyViolations:
     async def test_policy_violation_raises_value_error(
         self,
         service: ApprovalService,
+        db_session: AsyncSession,
     ) -> None:
-        task = _make_task(TaskState.PLAN_APPROVED)
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract(harness="forbidden-harness")
         profile = _make_profile()
 
@@ -208,7 +222,7 @@ class TestApprovalServicePolicyViolations:
                 )()
 
         service = ApprovalService(db=db_session, policy_engine=AlwaysDeny)
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
 
         with pytest.raises(ValueError, match="injected-deny"):
             await service.approve(
@@ -228,7 +242,7 @@ class TestApprovalServiceSelfApprovalPrevention:
         db_session: AsyncSession,
     ) -> None:
         service = ApprovalService(db=db_session)
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         # Simulate the proposer attempting to approve their own task.
         with pytest.raises(ValueError, match="cannot approve their own task"):
             await service.approve(
@@ -246,7 +260,7 @@ class TestApprovalServiceSelfApprovalPrevention:
         db_session: AsyncSession,
     ) -> None:
         service = ApprovalService(db=db_session)
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         for forbidden_actor in ("system", "agent"):
             with pytest.raises(ValueError, match="may not request"):
                 await service.approve(

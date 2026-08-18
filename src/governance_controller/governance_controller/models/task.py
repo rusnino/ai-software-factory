@@ -19,6 +19,7 @@ class Task(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     state: TaskState = Field(default=TaskState.PROPOSED)
+    version: int = Field(default=0)
     project_id: str
     proposed_by: str
     task_contract_json: dict = Field(

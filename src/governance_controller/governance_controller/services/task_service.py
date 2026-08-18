@@ -92,6 +92,13 @@ class TaskService:
         """Return the Task with the given primary key, or None."""
         return await self.db.scalar(select(Task).where(Task.id == task_id))
 
+    async def get_by_id_for_update(self, task_id: str) -> Task | None:
+        """Return the Task with the given primary key, locked for update."""
+        result = await self.db.execute(
+            select(Task).where(Task.id == task_id).with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def get_profile_by_project_id(
         self, project_id: str
     ) -> ProjectProfile | None:

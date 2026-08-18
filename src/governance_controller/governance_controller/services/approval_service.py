@@ -159,11 +159,37 @@ class ApprovalService:
             )
             return task
 
-        # 3. Determine target state and advance state machine.
+        # 3. Refetch the task version under the row lock (if the caller passed
+        #    a detached task) and confirm it hasn't changed since they read it.
+        locked_task = await self.db.scalar(
+            select(Task).where(Task.id == task.id).with_for_update()
+        )
+        if locked_task is None:
+            raise ValueError(f"Task {task.id} not found")
+        if locked_task.version != task.version:
+            await AuditService.log(
+                db=self.db,
+                event_type="approval_rejected",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": approval_type.value,
+                    "reason": "concurrent_modification",
+                    "expected_version": task.version,
+                    "actual_version": locked_task.version,
+                },
+            )
+            raise ValueError(
+                "Concurrent modification detected: task state changed during approval"
+            )
+
+        # 4. Determine target state and advance state machine.
         previous_state = task.state
         target_state = _APPROVAL_TARGET_STATES[approval_type]
         StateMachine.transition(task, target_state)
         task.updated_at = datetime.now(UTC)
+        task.version = task.version + 1
 
         await AuditService.log(
             db=self.db,
@@ -178,7 +204,7 @@ class ApprovalService:
             },
         )
 
-        # 4. Record approval.
+        # 5. Record approval.
         approval = Approval(
             task_id=task.id,
             approval_type=approval_type,
