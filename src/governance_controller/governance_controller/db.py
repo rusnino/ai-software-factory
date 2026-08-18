@@ -36,4 +36,9 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
     if settings.database_url.startswith("sqlite"):
         await ensure_sqlite_tables()
     async with AsyncSessionLocal() as session:
-        yield session
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
