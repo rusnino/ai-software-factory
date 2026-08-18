@@ -12,10 +12,20 @@ from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
 
 
-def _make_event(event_type: str, task_id: str | None) -> dict:
+def _make_event(
+    event_type: str,
+    task_id: str | None,
+    *,
+    event_id: str | None = "evt-1",
+    event_timestamp: str | None = "2026-08-18T00:00:00+00:00",
+) -> dict:
     metadata: dict = {}
     if task_id is not None:
         metadata["controller_task_id"] = task_id
+    if event_id is not None:
+        metadata["event_id"] = event_id
+    if event_timestamp is not None:
+        metadata["event_timestamp"] = event_timestamp
     return {"type": event_type, "metadata": metadata, "payload": {"foo": "bar"}}
 
 
@@ -164,10 +174,60 @@ class TestEventBridgeTransitions:
             select(AuditLog).where(AuditLog.task_id == task.id)
         )
         entries = rows.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].event_type == "macro_agent_landing:completed"
+
+    async def test_missing_event_id_or_timestamp_is_not_deduplicated(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-4b",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("landing:completed", task.id, event_id=None)
+        await EventBridge.handle(db_session, event)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.AGENT_REVIEW
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
         assert len(entries) == 2
         assert all(
             e.event_type == "macro_agent_landing:completed" for e in entries
         )
+
+    async def test_distinct_event_id_is_not_deduplicated(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        task = Task(
+            id="task-4c",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event1 = _make_event("landing:completed", task.id, event_id="evt-a")
+        event2 = _make_event("landing:completed", task.id, event_id="evt-b")
+        await EventBridge.handle(db_session, event1)
+        await EventBridge.handle(db_session, event2)
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert len(entries) == 2
 
     async def test_invalid_transition_for_current_state_is_logged_but_state_unchanged(
         self,
