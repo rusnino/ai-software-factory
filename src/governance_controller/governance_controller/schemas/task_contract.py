@@ -6,6 +6,12 @@ from governance_controller.schemas.completion_contract import CompletionContract
 
 
 class ExecutionConfig(BaseModel):
+    """Task-level execution request.
+
+    NOTE: this is distinct from ``ProjectProfile``'s
+    ``ProjectExecutionConfig``, which describes project-level constraints.
+    """
+
     team: str = "default"
     harness: str = "opencode"
     role: str = "worker"

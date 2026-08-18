@@ -9,6 +9,7 @@ from .completion_contract import (
 from .execution import ExecutionResponse
 from .project_profile import (
     GitConfig,
+    ProjectExecutionConfig,
     ProjectProfile,
     RepositoryConfig,
     SecurityConfig,
@@ -26,6 +27,7 @@ __all__ = [
     "ExecutionResponse",
     "ForbiddenPathCheck",
     "GitConfig",
+    "ProjectExecutionConfig",
     "ProjectProfile",
     "RepositoryConfig",
     "ScopeCheck",

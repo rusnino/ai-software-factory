@@ -3,7 +3,13 @@ from typing import Any
 from pydantic import BaseModel
 
 
-class ExecutionConfig(BaseModel):
+class ProjectExecutionConfig(BaseModel):
+    """Project-level execution constraints.
+
+    NOTE: this is distinct from ``TaskContract``'s ``ExecutionConfig``,
+    which describes the execution request for a single task.
+    """
+
     allowed_harnesses: list[str] = ["opencode"]
     sandbox: str = "worktree"
     timeout_minutes: int = 60
@@ -36,6 +42,6 @@ class ProjectProfile(BaseModel):
     repository: RepositoryConfig
     security: SecurityConfig = SecurityConfig()
     git: GitConfig = GitConfig()
-    execution: ExecutionConfig = ExecutionConfig()
+    execution: ProjectExecutionConfig = ProjectExecutionConfig()
     llm: dict[str, Any] = {}
     audit: dict[str, Any] = {}

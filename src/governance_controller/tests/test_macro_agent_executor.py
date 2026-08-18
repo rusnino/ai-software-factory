@@ -41,6 +41,10 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
             "harness": "opencode",
             "objective": "Implement the feature",
             "acceptance": ["Tests pass", "Code merged"],
+            "timeout_minutes": 60,
+            "max_retries": 2,
+            "sandbox": "worktree",
+            "max_parallel_agents": 3,
             "metadata": {
                 "controller_task_id": "task-1",
                 "controller_execution_id": "exec-1",

@@ -248,7 +248,7 @@ class ApprovalService:
 
         if approval_type == ApprovalType.EXECUTION:
             return await self._trigger_execution(
-                task, contract, actor, source, previous_state
+                task, contract, profile, actor, source, previous_state
             )
 
         return task
@@ -292,6 +292,7 @@ class ApprovalService:
         self,
         task: Task,
         contract: TaskContract,
+        profile: ProjectProfile,
         actor: str,
         source: str,
         previous_state: TaskState,
@@ -345,7 +346,12 @@ class ApprovalService:
         await self.db.flush()
 
         try:
-            result = await self.executor.start(contract, execution.id)
+            result = await self.executor.start(
+                contract,
+                execution.id,
+                sandbox=profile.execution.sandbox,
+                max_parallel_agents=profile.execution.max_parallel_agents,
+            )
         except Exception as exc:  # pragma: no cover - broad error shield
             if await StateMachine.atomic_transition(
                 self.db, task, TaskState.FAILED
