@@ -2,10 +2,12 @@
 
 ## Current State
 
-Phase 1 Governance Controller implementation in `src/governance_controller/` passes its test suite
-(134 passed, ruff clean). `GAP-002` (CRITICAL), `GAP-006` (HIGH), and `GAP-008` (HIGH) were reopened
-by `reviews/REVIEW-002-gap-closure-verification.md` and are being closed in this follow-up work.
-See `reviews/GAPS.md` for the full current status of all 19 gaps.
+Phase 1 Governance Controller is **complete and fully reviewed** in `src/governance_controller/`.
+All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
+`reviews/REVIEW-001-phase-1-governance-controller.md` and
+`reviews/REVIEW-002-gap-closure-verification.md` are now `CLOSED` in `reviews/GAPS.md`.
+
+Final test status: **134 passed**, ruff clean.
 
 Implemented components:
 
