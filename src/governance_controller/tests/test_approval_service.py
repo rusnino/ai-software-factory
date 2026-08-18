@@ -1,7 +1,5 @@
 """Tests for the ApprovalService."""
 
-import os
-import tempfile
 from unittest.mock import AsyncMock
 
 import pytest
@@ -327,22 +325,12 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
 
     async def test_concurrent_modification_persists_audit_row(
         self,
+        isolated_db: tuple,
     ) -> None:
         """Stale task read losing CAS update commits audit before raising."""
         from sqlalchemy import select as sa_select
-        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-        from sqlalchemy.orm import sessionmaker
-        from sqlmodel import SQLModel
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            db_url = f"sqlite+aiosqlite:///{tmp.name}"
-
-        engine = create_async_engine(db_url, echo=False, future=True)
-        local_session = sessionmaker(
-            bind=engine, class_=AsyncSession, expire_on_commit=False
-        )
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             task = Task(
@@ -358,10 +346,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         fake_executor.start.return_value = {"run_id": "run-first"}
 
         # Open session A and load the stale task object BEFORE session B
-        # commits the approval. SQLite's async identity map returns the same
-        # cached Python object across queries in the same session, so this
-        # guarantees task_a still sees PLAN_APPROVED/version=0 when it later
-        # attempts the EXECUTION approval.
+        # commits the approval.
         session_a = local_session()
         task_a = await session_a.scalar(
             sa_select(Task).where(Task.id == "task-concurrent")
@@ -419,9 +404,6 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
                 and e.payload.get("reason") == "concurrent_modification"
                 for e in rows
             ), [(e.event_type, repr(e.payload)) for e in rows]
-
-        await engine.dispose()
-        os.unlink(tmp.name)
 
 
 class TestApprovalServiceSelfApprovalPrevention:

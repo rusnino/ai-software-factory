@@ -1,13 +1,9 @@
 """Tests for the POST /events endpoint."""
 
-import os
-import tempfile
-
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.constants import TaskState
 from governance_controller.db import get_db
@@ -69,7 +65,10 @@ async def test_post_event_transitions_task(
     assert task.state == TaskState.AGENT_REVIEW
 
 
-async def test_post_event_409_on_lost_cas() -> None:
+async def test_post_event_409_on_lost_cas(
+    isolated_db: tuple,
+    patched_db,
+) -> None:
     """A race through the HTTP endpoint returns 409 and does not dead-letter.
 
     Two separate sessions are used: session A reads the task, session B
@@ -77,17 +76,11 @@ async def test_post_event_409_on_lost_cas() -> None:
     request loses the CAS and gets HTTP 409. The event_id is not recorded as
     processed, so a retry can eventually succeed.
     """
-    from sqlmodel import SQLModel
-
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        db_url = f"sqlite+aiosqlite:///{tmp.name}"
-    engine = create_async_engine(db_url, echo=False, future=True)
-    local_session = sessionmaker(
-        bind=engine, class_=AsyncSession, expire_on_commit=False
+    from governance_controller.adapters.macro_agent.event_bridge import (
+        EventBridge,
     )
 
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+    engine, local_session = isolated_db
 
     async with local_session() as seed:
         task = Task(
@@ -112,9 +105,6 @@ async def test_post_event_409_on_lost_cas() -> None:
             select(Task).where(Task.id == "event-task-2")
         )
         assert task_b is not None
-        from governance_controller.adapters.macro_agent.event_bridge import (
-            EventBridge,
-        )
 
         await EventBridge.handle(
             session_b,
@@ -152,8 +142,6 @@ async def test_post_event_409_on_lost_cas() -> None:
     assert rows.scalar_one_or_none() is None
 
     await session_a.close()
-    await engine.dispose()
-    os.unlink(tmp.name)
 
 
 async def test_post_event_rejects_missing_type(

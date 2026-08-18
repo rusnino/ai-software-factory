@@ -3,9 +3,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.db import get_db
 from governance_controller.models.audit_log import AuditLog
@@ -361,7 +359,11 @@ async def test_verification_commands_merge_with_completion_contract() -> None:
 class TestVerificationConcurrency:
     """Regression tests for verification CAS and audit durability."""
 
-    async def test_cas_loss_commits_audit_before_raise(self) -> None:
+    async def test_cas_loss_commits_audit_before_raise(
+        self,
+        isolated_db: tuple,
+        patched_db,
+    ) -> None:
         """A failed verify_and_advance CAS still persists its audit row.
 
         The production code's atomic_transition returns False on a stale read.
@@ -370,23 +372,9 @@ class TestVerificationConcurrency:
         the propagated ValueError. This test drives the real ``get_db()`` path
         to prove the audit row survives.
         """
-        import os
-        import tempfile
-
-        from governance_controller import config as config_module
-        from governance_controller import db as db_module
         from governance_controller.constants import TaskState
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-            db_url = f"sqlite+aiosqlite:///{tmp.name}"
-
-        engine = create_async_engine(db_url, echo=False, future=True)
-        local_session = sessionmaker(
-            bind=engine, class_=AsyncSession, expire_on_commit=False
-        )
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             task = Task(
@@ -411,40 +399,28 @@ class TestVerificationConcurrency:
         ) -> bool:
             return False
 
-        original_database_url = config_module.settings.database_url
-        original_engine = db_module.engine
-        original_session_local = db_module.AsyncSessionLocal
-        config_module.settings.database_url = db_url
-        db_module.engine = engine
-        db_module.AsyncSessionLocal = local_session
+        with patch.object(
+            StateMachine, "atomic_transition", staticmethod(_patched)
+        ):
+            contract = TaskContract(
+                task_id="task-verify-cas",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Verify CAS audit persists",
+                acceptance=["audit survives"],
+            )
 
-        try:
-            with patch.object(
-                StateMachine, "atomic_transition", staticmethod(_patched)
+            with pytest.raises(
+                ValueError, match="Concurrent modification detected"
             ):
-                contract = TaskContract(
-                    task_id="task-verify-cas",
-                    project_id="proj-1",
-                    proposed_by="agent-1",
-                    objective="Verify CAS audit persists",
-                    acceptance=["audit survives"],
-                )
-
-                with pytest.raises(
-                    ValueError, match="Concurrent modification detected"
-                ):
-                    async with asynccontextmanager(get_db)() as db:
-                        task = await db.scalar(
-                            select(Task).where(Task.id == "task-verify-cas")
-                        )
-                        assert task is not None
-                        await VerificationService.verify_and_advance(
-                            db, task, contract
-                        )
-        finally:
-            config_module.settings.database_url = original_database_url
-            db_module.engine = original_engine
-            db_module.AsyncSessionLocal = original_session_local
+                async with asynccontextmanager(get_db)() as db:
+                    task = await db.scalar(
+                        select(Task).where(Task.id == "task-verify-cas")
+                    )
+                    assert task is not None
+                    await VerificationService.verify_and_advance(
+                        db, task, contract
+                    )
 
         async with local_session() as check:
             task = await check.scalar(
@@ -459,6 +435,3 @@ class TestVerificationConcurrency:
             )
             events = {a.event_type for a in audits.scalars().all()}
             assert "concurrent_modification" in events
-
-        await engine.dispose()
-        os.unlink(tmp.name)

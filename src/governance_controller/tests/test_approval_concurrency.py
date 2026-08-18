@@ -1,24 +1,18 @@
 """Concurrency regression tests for approval paths.
 
-SQLite (the default test database) does not reliably exercise true
-interleaved concurrent writes with SQLAlchemy's async SQLite driver, so the
-core guard is verified deterministically: a second session that reads the
-task before the first session commits, then tries to approve after the first
-session has already advanced the task, observes ``rowcount == 0`` and fails
-with ``Concurrent modification detected``.
+The tests use the ``isolated_db`` fixture so they run identically against the
+configured test database (SQLite by default, PostgreSQL via
+``GC_TEST_DATABASE_URL``). The deterministic CAS-loss scenarios exercise the
+production guard without requiring true interleaved concurrency.
 """
 
 import asyncio
-import os
-import tempfile
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlmodel import SQLModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
@@ -66,20 +60,10 @@ async def _seed_task(db: AsyncSession, task_id: str) -> None:
     await db.commit()
 
 
-def _file_db_session_maker():
-    """Return a fresh engine and sessionmaker for a new file-backed SQLite DB."""
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
-        db_url = f"sqlite+aiosqlite:///{tmp.name}"
-    engine = create_async_engine(db_url, echo=False, future=True)
-    local_session = sessionmaker(
-        bind=engine, class_=AsyncSession, expire_on_commit=False
-    )
-    return engine, local_session, tmp.name
-
-
 class TestApprovalConcurrency:
     async def test_second_approval_after_commit_fails_with_concurrent_modification(
         self,
+        isolated_db: tuple,
     ) -> None:
         """A stale read followed by a committed advance must be rejected.
 
@@ -87,10 +71,7 @@ class TestApprovalConcurrency:
         task, session B commits an approval that advances the task, and then
         session A's approval sees rowcount == 0 and raises.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-stale")
@@ -162,21 +143,16 @@ class TestApprovalConcurrency:
             # READY -> RUNNING.
             assert task.version == 3
 
-        await engine.dispose()
-        os.unlink(path)
-
     async def test_executor_failure_advances_to_failed_with_version_3(
         self,
+        isolated_db: tuple,
     ) -> None:
         """If executor.start raises, the task ends at FAILED with version 3.
 
         The CAS increments are PLAN_APPROVED -> EXEC_APPROVED,
         EXEC_APPROVED -> READY, READY -> FAILED, so the final version is 3.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-exec-fail")
@@ -219,11 +195,9 @@ class TestApprovalConcurrency:
             )
             assert len(executions.scalars().all()) == 1
 
-        await engine.dispose()
-        os.unlink(path)
-
     async def test_concurrent_execution_approvals_do_not_double_trigger(
         self,
+        isolated_db: tuple,
     ) -> None:
         """Two approvals racing for the same task must produce exactly one run.
 
@@ -235,10 +209,7 @@ class TestApprovalConcurrency:
         executor can be started a second time. The lock is a test-only
         sequencing device; the production guard is the atomic UPDATE above.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-concurrent")
@@ -307,10 +278,11 @@ class TestApprovalConcurrency:
             assert task is not None
             assert task.state == TaskState.RUNNING
 
-        await engine.dispose()
-        os.unlink(path)
-
-    async def test_executor_failure_path_survives_get_db_rollback(self) -> None:
+    async def test_executor_failure_path_survives_get_db_rollback(
+        self,
+        isolated_db: tuple,
+        patched_db,
+    ) -> None:
         """Executor crash persists FAILED state + audit via real get_db() semantics.
 
         ``get_db()`` rolls back on any exception, so if the service raises
@@ -319,10 +291,7 @@ class TestApprovalConcurrency:
         generator to prove the production path now leaves a durable FAILED
         state and audit trail.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-get-db-fail")
@@ -333,46 +302,24 @@ class TestApprovalConcurrency:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         fake_executor.start.side_effect = RuntimeError("boom")
 
-        # Drive the real get_db() generator over the file database so it mimics
-        # FastAPI: success commits, exceptions roll back. Override settings to
-        # point at the test file DB.
-        from governance_controller import config as config_module
-        from governance_controller import db as db_module
-
-        original_database_url = config_module.settings.database_url
-        config_module.settings.database_url = (
-            engine.url.render_as_string(hide_password=False)
-        )
-
-        # Recreate the production session factory around the test engine.
-        original_engine = db_module.engine
-        original_session_local = db_module.AsyncSessionLocal
-        db_module.engine = engine
-        db_module.AsyncSessionLocal = local_session
-
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
-        try:
-            with pytest.raises(RuntimeError, match="macro-agent start failed"):
-                async with asynccontextmanager(get_db)() as db:
-                    service.db = db
-                    task = await db.scalar(
-                        select(Task).where(Task.id == "task-get-db-fail")
-                    )
-                    assert task is not None
-                    await service.approve(
-                        task=task,
-                        contract=contract,
-                        profile=profile,
-                        approval_type=ApprovalType.EXECUTION,
-                        source="test",
-                        actor="admin",
-                        idempotency_key="key-get-db-fail",
-                    )
-        finally:
-            config_module.settings.database_url = original_database_url
-            db_module.engine = original_engine
-            db_module.AsyncSessionLocal = original_session_local
+        with pytest.raises(RuntimeError, match="macro-agent start failed"):
+            async with asynccontextmanager(get_db)() as db:
+                service.db = db
+                task = await db.scalar(
+                    select(Task).where(Task.id == "task-get-db-fail")
+                )
+                assert task is not None
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-get-db-fail",
+                )
 
         # Query from a fresh session to ensure state is truly persisted.
         async with local_session() as check:
@@ -399,10 +346,11 @@ class TestApprovalConcurrency:
             assert "state_change" in events
             assert "execution_start_failed" in events
 
-        await engine.dispose()
-        os.unlink(path)
-
-    async def test_outer_cas_loss_survives_get_db_rollback(self) -> None:
+    async def test_outer_cas_loss_survives_get_db_rollback(
+        self,
+        isolated_db: tuple,
+        patched_db,
+    ) -> None:
         """Losing the outer ``approve()`` CAS persists its audit and winner state.
 
         Session A reads PLAN_APPROVED. Session B wins the EXECUTION approval
@@ -412,10 +360,7 @@ class TestApprovalConcurrency:
         survive the rollback and the database must reflect session B's RUNNING
         state.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-ready-cas")
@@ -455,19 +400,6 @@ class TestApprovalConcurrency:
             assert result.state == TaskState.RUNNING
             await session_b.commit()
 
-        # Loser config overrides and get_db-driven approval.
-        from governance_controller import config as config_module
-        from governance_controller import db as db_module
-
-        original_database_url = config_module.settings.database_url
-        config_module.settings.database_url = (
-            engine.url.render_as_string(hide_password=False)
-        )
-        original_engine = db_module.engine
-        original_session_local = db_module.AsyncSessionLocal
-        db_module.engine = engine
-        db_module.AsyncSessionLocal = local_session
-
         service_a = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
         try:
@@ -486,9 +418,6 @@ class TestApprovalConcurrency:
                         idempotency_key="key-loser",
                     )
         finally:
-            config_module.settings.database_url = original_database_url
-            db_module.engine = original_engine
-            db_module.AsyncSessionLocal = original_session_local
             await session_a.close()
 
         async with local_session() as check:
@@ -519,12 +448,11 @@ class TestApprovalConcurrency:
             )
             assert len(executions.scalars().all()) == 1
 
-        await engine.dispose()
-        os.unlink(path)
-
     async def test_trigger_execution_ready_cas_loss_commits_before_raise(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        isolated_db: tuple,
+        patched_db,
     ) -> None:
         """Losing the READY CAS inside ``_trigger_execution`` persists audit.
 
@@ -534,10 +462,7 @@ class TestApprovalConcurrency:
         leave the task at ``EXEC_APPROVED`` with a durable
         ``concurrent_modification`` audit row.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-ready-cas-internal")
@@ -562,43 +487,26 @@ class TestApprovalConcurrency:
             StateMachine, "atomic_transition", staticmethod(_patched)
         )
 
-        from governance_controller import config as config_module
-        from governance_controller import db as db_module
-
-        original_database_url = config_module.settings.database_url
-        config_module.settings.database_url = (
-            engine.url.render_as_string(hide_password=False)
-        )
-        original_engine = db_module.engine
-        original_session_local = db_module.AsyncSessionLocal
-        db_module.engine = engine
-        db_module.AsyncSessionLocal = local_session
-
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
-        try:
-            with pytest.raises(
-                ValueError, match="Concurrent modification detected"
-            ):
-                async with asynccontextmanager(get_db)() as db:
-                    service.db = db
-                    task = await db.scalar(
-                        select(Task).where(Task.id == "task-ready-cas-internal")
-                    )
-                    assert task is not None
-                    await service.approve(
-                        task=task,
-                        contract=contract,
-                        profile=profile,
-                        approval_type=ApprovalType.EXECUTION,
-                        source="test",
-                        actor="admin",
-                        idempotency_key="key-ready-cas-internal",
-                    )
-        finally:
-            config_module.settings.database_url = original_database_url
-            db_module.engine = original_engine
-            db_module.AsyncSessionLocal = original_session_local
+        with pytest.raises(
+            ValueError, match="Concurrent modification detected"
+        ):
+            async with asynccontextmanager(get_db)() as db:
+                service.db = db
+                task = await db.scalar(
+                    select(Task).where(Task.id == "task-ready-cas-internal")
+                )
+                assert task is not None
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-ready-cas-internal",
+                )
 
         async with local_session() as check:
             task = await check.scalar(
@@ -622,12 +530,11 @@ class TestApprovalConcurrency:
             )
             assert len(executions.scalars().all()) == 0
 
-        await engine.dispose()
-        os.unlink(path)
-
     async def test_trigger_execution_running_cas_loss_commits_before_raise(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        isolated_db: tuple,
+        patched_db,
     ) -> None:
         """Losing the RUNNING CAS inside ``_trigger_execution`` persists audit.
 
@@ -636,10 +543,7 @@ class TestApprovalConcurrency:
         The commit-before-raise must leave the task at ``READY`` and preserve
         the ``concurrent_modification`` audit row.
         """
-        engine, local_session, path = _file_db_session_maker()
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+        engine, local_session = isolated_db
 
         async with local_session() as seed:
             await _seed_task(seed, "task-running-cas-internal")
@@ -663,45 +567,28 @@ class TestApprovalConcurrency:
             StateMachine, "atomic_transition", staticmethod(_patched)
         )
 
-        from governance_controller import config as config_module
-        from governance_controller import db as db_module
-
-        original_database_url = config_module.settings.database_url
-        config_module.settings.database_url = (
-            engine.url.render_as_string(hide_password=False)
-        )
-        original_engine = db_module.engine
-        original_session_local = db_module.AsyncSessionLocal
-        db_module.engine = engine
-        db_module.AsyncSessionLocal = local_session
-
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
-        try:
-            with pytest.raises(
-                ValueError, match="Concurrent modification detected"
-            ):
-                async with asynccontextmanager(get_db)() as db:
-                    service.db = db
-                    task = await db.scalar(
-                        select(Task).where(
-                            Task.id == "task-running-cas-internal"
-                        )
+        with pytest.raises(
+            ValueError, match="Concurrent modification detected"
+        ):
+            async with asynccontextmanager(get_db)() as db:
+                service.db = db
+                task = await db.scalar(
+                    select(Task).where(
+                        Task.id == "task-running-cas-internal"
                     )
-                    assert task is not None
-                    await service.approve(
-                        task=task,
-                        contract=contract,
-                        profile=profile,
-                        approval_type=ApprovalType.EXECUTION,
-                        source="test",
-                        actor="admin",
-                        idempotency_key="key-running-cas-internal",
-                    )
-        finally:
-            config_module.settings.database_url = original_database_url
-            db_module.engine = original_engine
-            db_module.AsyncSessionLocal = original_session_local
+                )
+                assert task is not None
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-running-cas-internal",
+                )
 
         async with local_session() as check:
             task = await check.scalar(
@@ -726,6 +613,3 @@ class TestApprovalConcurrency:
             rows = executions.scalars().all()
             assert len(rows) == 1
             assert rows[0].state == TaskState.RUNNING
-
-        await engine.dispose()
-        os.unlink(path)
