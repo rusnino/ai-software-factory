@@ -113,6 +113,34 @@ async def test_completion_contract_required_failure_fails_verification() -> None
     assert check["expected_exit"] == 0
 
 
+async def test_forbidden_path_prefix_match_fails() -> None:
+    contract = TaskContract(
+        task_id="task-020",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Touch a subpath of a forbidden directory",
+        acceptance=["It is caught"],
+        inputs=["~/.ssh/id_rsa"],
+        completion_contract=CompletionContract(
+            task_id="task-020",
+            required=[],
+            forbidden_path_check=ForbiddenPathCheck(paths=["~/.ssh"]),
+            scope_check=ScopeCheck(
+                description="Only touch controller code",
+                allowed_paths=[],
+                forbidden_paths=[],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    assert forbidden["status"] == "failed"
+    assert "~/.ssh/id_rsa" in forbidden["detail"]
+
+
 async def test_completion_contract_scope_conflict_fails() -> None:
     contract = TaskContract(
         task_id="task-004",

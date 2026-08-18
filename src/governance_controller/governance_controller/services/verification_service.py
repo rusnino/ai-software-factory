@@ -87,9 +87,15 @@ class VerificationService:
 
             # Forbidden path check driven by the completion contract.
             touched_paths = set(contract.inputs + contract.deliverables)
-            forbidden_touches = touched_paths & set(
-                completion.forbidden_path_check.paths
-            )
+            forbidden_paths = completion.forbidden_path_check.paths
+            forbidden_touches = {
+                p
+                for p in touched_paths
+                if any(
+                    cls._is_prefixed_by(p, forbidden)
+                    for forbidden in forbidden_paths
+                )
+            }
             if forbidden_touches:
                 passed = False
                 checks.append(
