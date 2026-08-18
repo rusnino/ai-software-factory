@@ -2,30 +2,31 @@
 
 ## Current State
 
-**Phase 1 is complete.** All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
-`reviews/REVIEW-005-round3-gap-verification.md` (and earlier reviews) are now `CLOSED` in
-`reviews/GAPS.md`.
+**Phase 1 is not done — a second full-codebase sweep (`reviews/REVIEW-007-full-codebase-review-round2.md`)
+found 5 new `HIGH` gaps** after `REVIEW-006` closed out `GAP-023`/`GAP-024`:
 
-Key fixes since REVIEW-005:
+- `GAP-044`: `get_db()`'s rollback erases the audit trail for **every rejected** `POST /approvals` request
+  (self-approval, permission-denied, policy-violation, concurrent-modification) — not just the GAP-031
+  execution-failure case. Reproduced live.
+- `GAP-045`: `TaskContract.verification.commands` are policy-validated (GAP-024) but **never executed**
+  unless a `completion_contract` is also present — a contract following SPEC-03 §3.5's own example gets
+  silently fake-verified.
+- `GAP-046`: GAP-023's atomic compare-and-swap only protects the three approval-gated transitions;
+  everything downstream (`_trigger_execution`, `VerificationService.verify_and_advance`, `EventBridge`) still
+  mutates `Task.state` unguarded — dormant only because of GAP-047.
+- `GAP-047`: `EventBridge.handle()` has **no live HTTP entry point anywhere** — unlike Telegram/opentasks/
+  git_cascade, this isn't disclosed; `docs/NEXT_STEPS.md`/`SPEC-10` both described it as operating.
+- `GAP-048`: **`docker-compose.yml` doesn't actually work** — `DATABASE_URL`/`LOG_LEVEL` lack the `GC_` prefix
+  `Settings` requires, so the `api` container would crash on startup pointing at a `localhost` Postgres that
+  isn't there. The one documented quick-start path is broken.
 
-- `GAP-023` (HIGH): replaced the dead-code optimistic version guard with an atomic
-  `UPDATE task SET state=..., version=version+1 WHERE id=? AND version=? AND state=?` in
-  `ApprovalService.approve()`. If another approval already advanced the task, rowcount is 0 and the
-  request fails with `Concurrent modification detected` before `MacroAgentExecutor.start()` is invoked.
-  Added deterministic concurrency regression tests (stale-read-after-commit scenario).
-- `GAP-024` (HIGH): `PolicyEngine.evaluate()` now validates `TaskContract.verification["commands"]` using
-  the same shell-allowlist and profile cross-checks as `CompletionContract` commands.
-- `GAP-031` (MEDIUM): `_trigger_execution()` now creates the `Execution` row before calling
-  `executor.start(contract, execution.id)`, so `controller_execution_id` is sent outbound as real traceability
-  metadata per SPEC-05 §5.7.
-- `GAP-032` (MEDIUM): added `role` to `ExecutionConfig` and wired `PolicyEngine` to enforce the harness's
-  `allowed_roles` from the registry against SPEC-06 §6.2.
-- `GAP-021` (MEDIUM): added passing-path (`AGENT_REVIEW` → `HUMAN_REVIEW`) integration test through the
-  real `EventBridge.handle()` path.
-- `GAP-043` (MEDIUM): added tests exercising real `get_db()` commit-on-success and rollback-on-exception
-  behavior.
+Plus `GAP-049` (role enforcement bypassed for unregistered-but-profile-allowed harnesses) and `GAP-050`
+(stale doc references to already-closed gaps), both `MEDIUM`. See `reviews/GAPS.md` for the full ledger
+(53 gaps total). `GAP-031`/`GAP-043` remain `IN_PROGRESS` from REVIEW-006.
 
-Test status: **156 passed**, `ruff` clean, `mypy --strict` clean.
+Test status: **156 passed**, `ruff` clean, `mypy --strict` clean — real and re-confirmed, but (as with every
+prior round) passing tests are not evidence against any of the gaps above, since none of them are caught by
+the checked-in suite.
 
 Implemented components:
 
