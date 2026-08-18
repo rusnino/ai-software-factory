@@ -24,6 +24,7 @@ dependencies = [
     "httpx>=0.27",
     "structlog>=24.4",
     "python-json-logger>=2.0",
+    "typer>=0.27.1",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +64,7 @@ flake8-bugbear.extend-immutable-calls = [
     "fastapi.Depends",
     "fastapi.params.Depends",
 ]
+per-file-ignores = { "governance_controller/cli.py" = ["B008"] }
 
 [tool.mypy]
 python_version = "3.13"
