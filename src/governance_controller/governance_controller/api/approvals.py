@@ -115,6 +115,11 @@ async def submit_approval(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=message,
             ) from exc
+        if "Concurrent modification" in message:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from exc
         if "Policy violation" in message:
             # Reconstruct violations from the ValueError message for the response.
             prefix = "Policy violation(s): "

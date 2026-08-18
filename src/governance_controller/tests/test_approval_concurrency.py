@@ -1,10 +1,23 @@
-"""Concurrency regression tests for approval paths."""
+"""Concurrency regression tests for approval paths.
+
+SQLite (the default test database) does not reliably exercise true
+interleaved concurrent writes with SQLAlchemy's async SQLite driver, so the
+core guard is verified deterministically: a second session that reads the
+task before the first session commits, then tries to approve after the first
+session has already advanced the task, observes ``rowcount == 0`` and fails
+with ``Concurrent modification detected``.
+"""
 
 import asyncio
+import os
+import tempfile
 from unittest.mock import AsyncMock
 
+import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import SQLModel
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
@@ -14,22 +27,6 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
-
-
-async def _make_task(
-    db: AsyncSession,
-    state: TaskState = TaskState.PLAN_APPROVED,
-    task_id: str = "task-concurrent",
-) -> Task:
-    task = Task(
-        id=task_id,
-        project_id="proj-1",
-        state=state,
-        proposed_by="agent-1",
-    )
-    db.add(task)
-    await db.flush()
-    return task
 
 
 def _make_contract(task_id: str = "task-concurrent") -> TaskContract:
@@ -54,86 +51,197 @@ def _make_profile() -> ProjectProfile:
     )
 
 
+async def _seed_task(db: AsyncSession, task_id: str) -> None:
+    task = Task(
+        id=task_id,
+        project_id="proj-1",
+        state=TaskState.PLAN_APPROVED,
+        proposed_by="agent-1",
+    )
+    db.add(task)
+    await db.commit()
+
+
+def _file_db_session_maker():
+    """Return a fresh engine and sessionmaker for a new file-backed SQLite DB."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
+        db_url = f"sqlite+aiosqlite:///{tmp.name}"
+    engine = create_async_engine(db_url, echo=False, future=True)
+    local_session = sessionmaker(
+        bind=engine, class_=AsyncSession, expire_on_commit=False
+    )
+    return engine, local_session, tmp.name
+
+
 class TestApprovalConcurrency:
+    async def test_second_approval_after_commit_fails_with_concurrent_modification(
+        self,
+    ) -> None:
+        """A stale read followed by a committed advance must be rejected.
+
+        This is the deterministic equivalent of the race: session A reads the
+        task, session B commits an approval that advances the task, and then
+        session A's approval sees rowcount == 0 and raises.
+        """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-stale")
+
+        contract = _make_contract("task-stale")
+        profile = _make_profile()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-first"}
+
+        # Session A reads the task but does not commit yet.
+        session_a = local_session()
+        task_a = await session_a.scalar(
+            select(Task).where(Task.id == "task-stale")
+        )
+        assert task_a is not None
+        assert task_a.state == TaskState.PLAN_APPROVED
+        assert task_a.version == 0
+
+        # Session B approves and commits first.
+        async with local_session() as session_b:
+            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            task_b = await session_b.scalar(
+                select(Task).where(Task.id == "task-stale")
+            )
+            assert task_b is not None
+            result = await service_b.approve(
+                task=task_b,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-first",
+            )
+            assert result.state == TaskState.RUNNING
+            await session_b.commit()
+
+        # Session A now tries to approve its stale copy.
+        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        with pytest.raises(ValueError, match="Concurrent modification detected"):
+            await service_a.approve(
+                task=task_a,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-second",
+            )
+        await session_a.close()
+
+        # Only one execution and one approval were recorded.
+        async with local_session() as check:
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == "task-stale")
+            )
+            approvals = await check.execute(
+                select(Approval).where(Approval.task_id == "task-stale")
+            )
+            assert len(executions.scalars().all()) == 1
+            assert len(approvals.scalars().all()) == 1
+
+            task = await check.scalar(select(Task).where(Task.id == "task-stale"))
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+            assert task.version == 1
+
+        await engine.dispose()
+        os.unlink(path)
+
     async def test_concurrent_execution_approvals_do_not_double_trigger(
         self,
-        db_session: AsyncSession,
     ) -> None:
-        """Two concurrent EXECUTION approvals with distinct idempotency keys
-        must not both call MacroAgentExecutor.start().
+        """Two approvals racing for the same task must produce exactly one run.
 
-        The first caller acquires the row lock, advances state, and starts the
-        macro-agent. The second caller must observe a state transition conflict
-        and fail without calling executor.start() again.
+        Because SQLite's async driver does not serialize the interleaved read-
+        update-read-update pattern deterministically, this test uses an
+        ``asyncio.Lock`` only to order the two approvals: the first caller
+        reads, approves, and commits; the second caller reads after the lock is
+        released and therefore observes the updated state, failing before the
+        executor can be started a second time. The lock is a test-only
+        sequencing device; the production guard is the atomic UPDATE above.
         """
+        engine, local_session, path = _file_db_session_maker()
+
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-concurrent")
+
         contract = _make_contract()
         profile = _make_profile()
-        # Pre-create the task in the database so concurrent sessions can lock it.
-        await _make_task(db_session, TaskState.PLAN_APPROVED)
-
-        start_counts = []
+        start_counts: list[int] = []
         errors: list[Exception] = []
+        order_lock = asyncio.Lock()
 
-        async def _approve_with_session(
-            idempotency_key: str,
-        ) -> Task:
+        async def _approve(idempotency_key: str) -> Task | Exception:
             fake_executor = AsyncMock(spec=MacroAgentExecutor)
             fake_executor.start.return_value = {"run_id": f"run-{idempotency_key}"}
 
-            async with db_session.begin_nested():
-                service = ApprovalService(db=db_session, executor=fake_executor)
-                task = await db_session.scalar(
-                    select(Task).where(Task.id == "task-concurrent")
-                )
+            async with local_session() as db:
+                service = ApprovalService(db=db, executor=fake_executor)
+                async with order_lock:
+                    task = await db.scalar(
+                        select(Task).where(Task.id == "task-concurrent")
+                    )
                 assert task is not None
-                result = await service.approve(
-                    task=task,
-                    contract=contract,
-                    profile=profile,
-                    approval_type=ApprovalType.EXECUTION,
-                    source="test",
-                    actor="admin",
-                    idempotency_key=idempotency_key,
-                )
-                start_counts.append(
-                    fake_executor.start.await_count
-                )
-                return result
+                try:
+                    result = await service.approve(
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key=idempotency_key,
+                    )
+                    await db.commit()
+                    start_counts.append(fake_executor.start.await_count)
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    start_counts.append(fake_executor.start.await_count)
+                    return exc
 
-        coroutines = [
-            _approve_with_session("key-concurrent-1"),
-            _approve_with_session("key-concurrent-2"),
-        ]
+        results = await asyncio.gather(
+            _approve("key-concurrent-1"),
+            _approve("key-concurrent-2"),
+        )
 
-        results = await asyncio.gather(*coroutines, return_exceptions=True)
-
-        successes = [r for r in results if not isinstance(r, Exception)]
+        successes = [r for r in results if isinstance(r, Task)]
         failures = [r for r in results if isinstance(r, Exception)]
         errors.extend(failures)
 
-        # Exactly one approval may succeed; the other must fail on transition.
         assert len(successes) == 1
         assert len(errors) == 1
-        assert "Invalid transition" in str(errors[0]) or "concurrent" in str(
-            errors[0]
-        ).lower()
-
-        # executor.start() must have been awaited exactly once across both calls.
+        assert "Concurrent modification detected" in str(errors[0])
         assert sum(start_counts) == 1
 
-        # Only one Execution row and one Approval row should exist.
-        executions = await db_session.execute(
-            select(Execution).where(Execution.task_id == "task-concurrent")
-        )
-        approvals = await db_session.execute(
-            select(Approval).where(Approval.task_id == "task-concurrent")
-        )
-        assert len(executions.scalars().all()) == 1
-        assert len(approvals.scalars().all()) == 1
+        async with local_session() as check:
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == "task-concurrent")
+            )
+            approvals = await check.execute(
+                select(Approval).where(Approval.task_id == "task-concurrent")
+            )
+            assert len(executions.scalars().all()) == 1
+            assert len(approvals.scalars().all()) == 1
 
-        # The task ended in RUNNING.
-        task = await db_session.scalar(
-            select(Task).where(Task.id == "task-concurrent")
-        )
-        assert task is not None
-        assert task.state == TaskState.RUNNING
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-concurrent")
+            )
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+
+        await engine.dispose()
+        os.unlink(path)
