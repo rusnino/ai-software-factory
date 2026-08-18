@@ -9,6 +9,20 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.task import TaskCreateRequest, TaskResponse
 from governance_controller.services.task_service import TaskService
 
+
+def _is_task_id_duplicate_error(exc: IntegrityError) -> bool:
+    """Return True if *exc* is a conflict on the ``task`` table.
+
+    ``IntegrityError`` can be raised by other tables (e.g. a race on
+    ``project_profiles``). The response must only claim a duplicate task id
+    when the conflict actually involves the task table.
+    """
+    orig = getattr(exc, "orig", None)
+    if orig is not None and getattr(orig, "table_name", None) == "task":
+        return True
+    msg = str(orig) if orig else str(exc)
+    return "task." in msg and "UNIQUE" in msg.upper()
+
 router = APIRouter(tags=["tasks"])
 
 
@@ -37,9 +51,14 @@ async def create_task(
         )
     except IntegrityError as exc:
         await db.rollback()
+        if _is_task_id_duplicate_error(exc):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Task with id {payload.task_contract.task_id} already exists",
+            ) from exc
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Task with id {payload.task_contract.task_id} already exists",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unexpected database conflict while creating task",
         ) from exc
     return _task_response(task)
 

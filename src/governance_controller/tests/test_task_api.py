@@ -3,6 +3,7 @@
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 
 from governance_controller.constants import TaskState
 from governance_controller.db import get_db
@@ -114,3 +115,34 @@ class TestTaskApi:
         assert second.status_code == 409
         body = second.json()
         assert "already exists" in body["detail"]
+
+    async def test_profile_race_not_misreported_as_task_duplicate(
+        self,
+        async_client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """A project-profile IntegrityError must not say "task already exists"."""
+        from governance_controller.services.task_service import TaskService
+
+        async def _failing_create(*_args, **_kwargs) -> None:
+            raise IntegrityError(
+                "(sqlite3.IntegrityError) "
+                "UNIQUE constraint failed: project_profiles.project_id",
+                params=None,
+                orig=Exception(
+                    "UNIQUE constraint failed: project_profiles.project_id"
+                ),
+            )
+
+        monkeypatch.setattr(TaskService, "create", _failing_create)
+
+        payload = {
+            "task_contract": sample_contract.model_dump(),
+            "project_profile": sample_profile.model_dump(),
+        }
+        response = await async_client.post("/tasks", json=payload)
+
+        assert response.status_code != 409
+        assert "already exists" not in response.text
