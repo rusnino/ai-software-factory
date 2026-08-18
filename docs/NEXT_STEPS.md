@@ -36,7 +36,6 @@ Implemented components:
 - macro-agent executor abstraction (`MacroAgentClient`, `MacroAgentExecutor`) and `Execution` model,
   with explicit configurable HTTP timeout and outbound traceability metadata per SPEC-05 §5.7.
 - Automatic execution trigger after `EXECUTION` approval, with `READY → RUNNING` transition.
-- opentasks materialization stub with DAG validation.
 - In-process macro-agent Event Bridge translating workspace events into Controller state updates;
   `landing:completed` triggers `VerificationService` and gates `AGENT_REVIEW → HUMAN_REVIEW`, with
   event-level idempotency.
