@@ -17,4 +17,9 @@ RUN uv sync --frozen --no-dev
 
 EXPOSE 8000
 
+# Run the API as a non-root user.
+RUN groupadd -r controller && useradd -r -g controller -d /app controller
+RUN chown -R controller:controller /app
+USER controller
+
 CMD ["uvicorn", "governance_controller.main:app", "--host", "0.0.0.0", "--port", "8000"]
