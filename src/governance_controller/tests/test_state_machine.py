@@ -81,12 +81,12 @@ class TestStateMachineValidTransitions:
         result = StateMachine.transition(task, TaskState.RUNNING)
         assert result.state == TaskState.RUNNING
 
-    def test_human_review_to_running(self) -> None:
+    def test_human_review_to_running_is_forbidden(self) -> None:
         task = Task(
             id="task-1", project_id="proj-1", state=TaskState.HUMAN_REVIEW
         )
-        result = StateMachine.transition(task, TaskState.RUNNING)
-        assert result.state == TaskState.RUNNING
+        with pytest.raises(ValueError, match="HUMAN_REVIEW -> RUNNING"):
+            StateMachine.transition(task, TaskState.RUNNING)
 
 
 class TestStateMachineInvalidTransitions:
