@@ -16,6 +16,11 @@ from governance_controller.services.task_service import TaskService
 router = APIRouter(tags=["approvals"])
 
 
+def get_approval_service(db: AsyncSession = Depends(get_db)) -> ApprovalService:
+    """Build the approval service; override in tests to inject mocks."""
+    return ApprovalService(db=db)
+
+
 def _make_idempotency_key(
     task_id: str, approval_type: ApprovalType, actor: str, timestamp: str
 ) -> str:
@@ -37,6 +42,7 @@ def _make_idempotency_key(
 async def submit_approval(
     payload: ApprovalRequest,
     db: AsyncSession = Depends(get_db),
+    approval_service: ApprovalService = Depends(get_approval_service),
 ) -> ApprovalResponse:
     """Single authoritative approval endpoint.
 
@@ -73,8 +79,6 @@ async def submit_approval(
         payload.actor,
         payload.timestamp,
     )
-
-    approval_service = ApprovalService(db)
 
     try:
         updated_task = await approval_service.approve(

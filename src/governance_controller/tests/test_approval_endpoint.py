@@ -1,14 +1,20 @@
 """Tests for the approvals REST API endpoint."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
+from fastapi import Depends
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+from governance_controller.api.approvals import get_approval_service
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.schemas import ProjectProfile, RepositoryConfig, TaskContract
+from governance_controller.services.approval_service import ApprovalService
 
 
 @pytest.fixture
@@ -30,12 +36,21 @@ def sample_profile() -> ProjectProfile:
     )
 
 
+@pytest.fixture
+def mock_executor() -> AsyncMock:
+    return AsyncMock(spec=MacroAgentExecutor)
+
+
 @pytest_asyncio.fixture
-async def async_client(client_db_session) -> AsyncClient:
+async def async_client(client_db_session, mock_executor) -> AsyncClient:
     async def _override_get_db():
         yield client_db_session
 
+    def _override_get_approval_service(db=Depends(get_db)) -> ApprovalService:
+        return ApprovalService(db=db, executor=mock_executor)
+
     app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_approval_service] = _override_get_approval_service
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
@@ -43,6 +58,7 @@ async def async_client(client_db_session) -> AsyncClient:
             yield client
     finally:
         app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(get_approval_service, None)
 
 
 async def _create_task(
@@ -107,9 +123,12 @@ class TestApprovalEndpoint:
     async def test_approval_execution_advances_state(
         self,
         async_client: AsyncClient,
+        mock_executor: AsyncMock,
         sample_contract: TaskContract,
         sample_profile: ProjectProfile,
     ) -> None:
+        mock_executor.start.return_value = {"run_id": "run-123"}
+
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
             "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
@@ -122,8 +141,9 @@ class TestApprovalEndpoint:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["state"] == TaskState.EXEC_APPROVED.value
+        assert body["state"] == TaskState.RUNNING.value
         assert body["approved"] is True
+        mock_executor.start.assert_awaited_once()
 
     async def test_approval_merge_advances_to_done(
         self,
