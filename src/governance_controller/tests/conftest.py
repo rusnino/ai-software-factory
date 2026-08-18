@@ -9,13 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
-from governance_controller.db import (
-    AsyncSessionLocal,
-    init_db,
-)
-from governance_controller.db import (
-    engine as default_engine,
-)
+from governance_controller.db import engine as default_engine
+from governance_controller.db import init_db
 
 _TEST_DB_URL_ENV = "GC_TEST_DATABASE_URL"
 _TEST_DB_URL_DEFAULT = "sqlite+aiosqlite:///:memory:"
@@ -40,14 +35,6 @@ def test_database_url() -> str:
 
 @pytest_asyncio.fixture
 async def db_session() -> AsyncGenerator[AsyncSession]:
-    if await _postgres_available():
-        await init_db()
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                yield session
-            await session.rollback()
-        return
-
     test_db_url = _test_database_url()
     test_engine = create_async_engine(test_db_url, echo=False, future=True)
     test_session_local = sessionmaker(
@@ -55,12 +42,20 @@ async def db_session() -> AsyncGenerator[AsyncSession]:
         class_=AsyncSession,
         expire_on_commit=False,
     )
-    async with test_engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
+
+    if test_db_url.startswith("sqlite"):
+        async with test_engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.create_all)
+    else:
+        await init_db()
 
     async with test_session_local() as session:
-        async with session.begin():
-            yield session
+        # Provide a session without an active begin() context so that code
+        # that commits (e.g. rejection audit logging) does not close a
+        # transactional context and break subsequent fixture operations.
+        yield session
+        # Rollback for tests that did not commit; committed tests leave the
+        # transaction closed, so rollback becomes a no-op.
         await session.rollback()
 
     await test_engine.dispose()
@@ -99,10 +94,15 @@ async def client_db_session(
         monkeypatch.setattr(
             "governance_controller.db.get_db", _make_override()
         )
-        async with session.begin():
-            yield session
+        # Provide a session without an active begin() context so that code
+        # that commits (e.g. rejection audit logging) does not close a
+        # transactional context and break subsequent fixture operations.
+        yield session
+        # Rollback for tests that did not commit; committed tests leave the
+        # transaction closed, so rollback becomes a no-op.
         await session.rollback()
 
     await test_engine.dispose()
     os.unlink(tmp.name)
+
 
