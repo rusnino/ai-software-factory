@@ -77,6 +77,36 @@ class TestPolicyEngineRejections:
             for v in result.violations
         )
 
+    def test_security_posture_violations_rejected(self) -> None:
+        contract = _make_contract()
+        contract.execution.uses_docker_socket = True
+        contract.execution.destructive_shell = True
+        contract.execution.spawn_subagents = True
+        contract.execution.network_access = "unrestricted"
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("Docker socket" in v for v in result.violations)
+        assert any("Destructive shell" in v for v in result.violations)
+        assert any("subagents" in v for v in result.violations)
+        assert any("Unrestricted network" in v for v in result.violations)
+
+    def test_git_settings_enforced_for_merge(self) -> None:
+        contract = _make_contract()
+        contract.execution.force_push = True
+        contract.execution.signed_commits = False
+        profile = _make_profile()
+        profile.git.force_push = "deny"
+        profile.git.signed_commits = "required"
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.MERGE)
+
+        assert result.allowed is False
+        assert any("Force push" in v for v in result.violations)
+        assert any("Signed commits" in v for v in result.violations)
+
     @pytest.mark.parametrize(
         ("objective", "acceptance", "expected_message"),
         [

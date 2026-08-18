@@ -10,6 +10,12 @@ class ExecutionConfig(BaseModel):
     harness: str = "opencode"
     timeout_minutes: int = 60
     max_retries: int = 2
+    uses_docker_socket: bool = False
+    destructive_shell: bool = False
+    spawn_subagents: bool = False
+    network_access: str = "restricted"  # "restricted" or "unrestricted"
+    force_push: bool = False
+    signed_commits: bool = False
 
 
 class TaskContract(BaseModel):

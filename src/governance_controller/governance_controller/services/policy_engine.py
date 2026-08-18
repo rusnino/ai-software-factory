@@ -61,9 +61,26 @@ class PolicyEngine:
         for path in conflicts:
             violations.append(f"Task touches forbidden path: {path}")
 
-        # 4. Required human approval is embedded via approval_type gating.
-        # Approval type-driven checks are handled by the state machine and
-        # approval service mappings, so no explicit rule is needed here.
+        # 4. Security posture enforcement from project profile.
+        security = profile.security
+        execution = contract.execution
+        if security.docker_socket == "deny" and execution.uses_docker_socket:
+            violations.append("Docker socket access is denied by project profile")
+        if security.destructive_shell == "deny" and execution.destructive_shell:
+            violations.append(
+                "Destructive shell commands are denied by project profile"
+            )
+        if security.spawn_subagents == "deny" and execution.spawn_subagents:
+            violations.append("Spawning subagents is denied by project profile")
+        if (
+            security.network == "restricted"
+            and execution.network_access == "unrestricted"
+        ):
+            violations.append(
+                "Unrestricted network access is denied by project profile"
+            )
+
+        # 5. Approval type-driven checks.
         cls._check_approval_type_rules(contract, profile, approval_type, violations)
 
         return PolicyResult(allowed=not violations, violations=violations)
@@ -77,6 +94,16 @@ class PolicyEngine:
         violations: list[str],
     ) -> None:
         """Apply any approval-type-specific policy rules."""
+        git = profile.git
+        execution = contract.execution
+
         # Merge approval: require git.merge_requires_human to be enabled.
-        if approval_type == ApprovalType.MERGE and not profile.git.merge_requires_human:
+        if approval_type == ApprovalType.MERGE and not git.merge_requires_human:
             violations.append("Merge approval requires human merge gate in profile")
+
+        # Merge approval: respect force_push and signed_commit project settings.
+        if approval_type == ApprovalType.MERGE:
+            if git.force_push == "deny" and execution.force_push:
+                violations.append("Force push is denied by project profile")
+            if git.signed_commits == "required" and not execution.signed_commits:
+                violations.append("Signed commits are required by project profile")
