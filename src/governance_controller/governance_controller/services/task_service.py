@@ -7,6 +7,7 @@ from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.audit_service import AuditService
 
 
 class TaskService:
@@ -42,8 +43,30 @@ class TaskService:
                     profile_json=project_profile_json,
                 )
             )
+            await AuditService.log(
+                db=self.db,
+                event_type="project_profile_created",
+                task_id=task_contract.task_id,
+                actor=task_contract.proposed_by,
+                source="task_service",
+                payload={
+                    "project_id": project_profile.project_id,
+                    "profile_version": project_profile.profile_version,
+                },
+            )
         else:
             existing.profile_json = project_profile_json
+            await AuditService.log(
+                db=self.db,
+                event_type="project_profile_updated",
+                task_id=task_contract.task_id,
+                actor=task_contract.proposed_by,
+                source="task_service",
+                payload={
+                    "project_id": project_profile.project_id,
+                    "profile_version": project_profile.profile_version,
+                },
+            )
 
         task = Task(
             id=task_contract.task_id,
@@ -53,6 +76,16 @@ class TaskService:
         )
         self.db.add(task)
         await self.db.flush()
+
+        await AuditService.log(
+            db=self.db,
+            event_type="task_created",
+            task_id=task.id,
+            actor=task.proposed_by,
+            source="task_service",
+            payload={"project_id": task.project_id},
+        )
+
         return task
 
     async def get_by_id(self, task_id: str) -> Task | None:
