@@ -1,5 +1,34 @@
-"""Embedded policy engine for task approvals."""
+"""Embedded policy engine for task approvals.
 
+Command-shell allowlist
+-----------------------
+CompletionContract checks run system commands during verification, so PolicyEngine
+validates every ``Check.command`` before approval. The checks below are applied in
+``_check_completion_contract_commands``:
+
+1. Reject shell metacharacters/operators that can change semantics or chain
+   arbitrary commands: ``;``, ``&``, ``|``, ``&&``, ``||``, ``>``, ``<``, ``>>``,
+   ``<<``, ``*`` (glob), ``?`` (glob), backticks, ``$(...)``, and ``${...}``.
+2. Reject sub-shell / process substitution patterns: ``$(``, ``${``, backticks.
+3. Reject privilege escalation: ``sudo``, ``su -``, ``doas``.
+4. Reject common destructive file-system operations: ``rm -rf``, ``rm -fr``,
+   ``rm --no-preserve-root``, ``dd if=... of=...`` with device-ish targets,
+   ``mkfs.*``, ``>`` redirections that could truncate files.
+5. Reject commands that require Docker socket access (``docker.sock``,
+   ``/var/run/docker.sock``) unless the project profile permits it.
+6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell`` in
+   the ExecutionConfig unless the corresponding project profile security field
+   explicitly allows it.
+
+This is an explicit allowlist approach: if a command matches any forbidden pattern,
+approval is denied with a human-readable violation. Commands that are meant to be
+high-privilege must be declared by the task proposer and allowed by the project
+profile before they can pass policy.
+"""
+
+from __future__ import annotations
+
+import re
 from dataclasses import dataclass
 
 from governance_controller.constants import ApprovalType
@@ -13,6 +42,52 @@ class PolicyResult:
 
     allowed: bool
     violations: list[str]
+
+
+# Forbidden shell tokens/operators/metacharacters. These can alter command
+# semantics, chain arbitrary commands, glob widely, or perform redirections.
+_FORBIDDEN_SHELL_TOKENS: set[str] = {
+    ";",
+    "&",
+    "|",
+    "&&",
+    "||",
+    ">",
+    "<",
+    ">>",
+    "<<",
+    "*",
+    "?",
+    "`",
+    "$(",
+    "${",
+    "}",
+}
+
+# Privilege-escalation substrings.
+_FORBIDDEN_PRIVILEGE_SUBSTRINGS: tuple[str, ...] = ("sudo", "su -", "doas")
+
+# Destructive file-system substrings / patterns.
+_FORBIDDEN_DESTRUCTIVE_SUBSTRINGS: tuple[str, ...] = (
+    "rm -rf",
+    "rm -fr",
+    "rm --no-preserve-root",
+    "mkfs.",
+    "dd if=",
+)
+
+# Docker-socket access substrings.
+_FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS: tuple[str, ...] = (
+    "docker.sock",
+    "/var/run/docker.sock",
+)
+
+
+_FORBIDDEN_COMMAND_PATTERNS: list[re.Pattern[str]] = [
+    # Sub-shell / process substitution
+    re.compile(r"\$\s*\("),
+    re.compile(r"`[^`]*`"),
+]
 
 
 def _normalize_path(path: str) -> str:
@@ -41,6 +116,106 @@ def _forbidden_path_conflicts(
                 conflicts.add(touched)
                 break
     return conflicts
+
+
+def _contains_forbidden_shell_token(command: str) -> bool:
+    """Return True if *command* contains a forbidden shell token/operator."""
+    # Check the raw command string for exact token presence; this catches
+    # simple redirections, globs, and command chaining.
+    return any(token in command for token in _FORBIDDEN_SHELL_TOKENS)
+
+
+def _has_forbidden_pattern(command: str) -> bool:
+    """Return True if *command* matches a forbidden regex pattern."""
+    return any(pattern.search(command) for pattern in _FORBIDDEN_COMMAND_PATTERNS)
+
+
+def _has_forbidden_substrings(command: str, substrings: tuple[str, ...]) -> bool:
+    """Return True if any forbidden substring is present (case-insensitive)."""
+    lowered = command.lower()
+    return any(sub in lowered for sub in substrings)
+
+
+def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
+    """Return (ok, violations) for a single Check.command string."""
+    local_violations: list[str] = []
+
+    if _contains_forbidden_shell_token(command):
+        local_violations.append(
+            f"Command contains forbidden shell token/operator: {command!r}"
+        )
+
+    if _has_forbidden_pattern(command):
+        local_violations.append(
+            f"Command contains forbidden pattern (sub-shell/backticks): {command!r}"
+        )
+
+    if _has_forbidden_substrings(command, _FORBIDDEN_PRIVILEGE_SUBSTRINGS):
+        local_violations.append(
+            f"Command contains privilege escalation: {command!r}"
+        )
+
+    if _has_forbidden_substrings(command, _FORBIDDEN_DESTRUCTIVE_SUBSTRINGS):
+        local_violations.append(
+            f"Command contains destructive shell operation: {command!r}"
+        )
+
+    return not local_violations, local_violations
+
+
+def _validate_completion_contract_commands(
+    contract: TaskContract,
+    profile: ProjectProfile,
+) -> list[str]:
+    """Validate all CompletionContract commands for forbidden shell patterns.
+
+    Also cross-checks commands that imply docker-socket or destructive-shell
+    usage against the project profile's security posture.
+    """
+    violations: list[str] = []
+    completion = contract.completion_contract
+    if completion is None:
+        return violations
+
+    for check in list(completion.required) + list(completion.optional):
+        ok, check_violations = _normalize_and_validate_command(check.command)
+        if not ok:
+            violations.extend(check_violations)
+            continue
+
+        # Cross-check inferred docker-socket usage against profile.
+        if _has_forbidden_substrings(
+            check.command, _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
+        ) and profile.security.docker_socket == "deny":
+            violations.append(
+                "Command references docker socket but profile denies "
+                f"docker_socket: {check.command!r}"
+            )
+
+        # Cross-check inferred destructive shell usage against profile.
+        if (
+            _is_destructive_command(check.command)
+            and profile.security.destructive_shell == "deny"
+        ):
+            violations.append(
+                "Command is destructive but profile denies "
+                f"destructive_shell: {check.command!r}"
+            )
+
+    return violations
+
+
+def _is_destructive_command(command: str) -> bool:
+    """Return True if *command* looks like a destructive file operation."""
+    lowered = command.lower()
+    # Classic recursive removal.
+    if "rm -r" in lowered or "rm -f" in lowered:
+        return True
+    # Formatting or direct block-device writes.
+    if "mkfs." in lowered or "dd if=" in lowered:
+        return True
+    # Explicit output redirection that can truncate files.
+    return ">" in command
 
 
 class PolicyEngine:
@@ -109,7 +284,12 @@ class PolicyEngine:
                 "Unrestricted network access is denied by project profile"
             )
 
-        # 5. Approval type-driven checks.
+        # 5. Completion-contract command allowlist. Any shell command scheduled
+        #    to run during verification must be reviewed for forbidden tokens
+        #    and destructive operations.
+        violations.extend(_validate_completion_contract_commands(contract, profile))
+
+        # 6. Approval type-driven checks.
         cls._check_approval_type_rules(contract, profile, approval_type, violations)
 
         return PolicyResult(allowed=not violations, violations=violations)

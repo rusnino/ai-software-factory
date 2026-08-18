@@ -46,6 +46,35 @@ class VerificationService:
             result["stderr"] = stderr.decode(errors="replace")
         return result
 
+    @staticmethod
+    def _verification_commands_from_contract(contract: TaskContract) -> list[Check]:
+        """Return extra verification checks declared in ``TaskContract.verification``.
+
+        SPEC-03 §3.5 allows ``verification.commands`` to be a list of shell
+        command strings. These are translated into ``Check`` objects and merged
+        with the CompletionContract checks so that verification commands from
+        the task contract are also executed.
+        """
+        verification = contract.verification
+        if not verification:
+            return []
+
+        commands = verification.get("commands", [])
+        if not isinstance(commands, list):
+            return []
+
+        converted: list[Check] = []
+        for idx, command in enumerate(commands):
+            if isinstance(command, str):
+                converted.append(
+                    Check(
+                        type=f"contract_verification_{idx}",
+                        command=command,
+                        expect_exit=0,
+                    )
+                )
+        return converted
+
     @classmethod
     async def verify_execution(
         cls,
@@ -56,7 +85,9 @@ class VerificationService:
         If a CompletionContract is present, required/optional commands are
         executed via ``asyncio.create_subprocess_shell`` and their exit codes
         compared to ``Check.expect_exit``. Static forbidden-path and scope
-        checks are always performed.
+        checks are always performed. Verification commands declared in
+        ``TaskContract.verification`` (SPEC-03 §3.5) are merged with the
+        CompletionContract ``required`` checks.
 
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
@@ -66,7 +97,10 @@ class VerificationService:
 
         completion = contract.completion_contract
         if completion is not None:
-            for check in completion.required:
+            contract_verification_checks = cls._verification_commands_from_contract(
+                contract
+            )
+            for check in completion.required + contract_verification_checks:
                 result = await cls._run_check(check)
                 checks.append(result)
                 if result["status"] == "failed":
