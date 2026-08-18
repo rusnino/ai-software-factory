@@ -16,12 +16,15 @@ def _is_task_id_duplicate_error(exc: IntegrityError) -> bool:
     ``IntegrityError`` can be raised by other tables (e.g. a race on
     ``project_profiles``). The response must only claim a duplicate task id
     when the conflict actually involves the task table.
+
+    Drivers differ in what metadata they expose on the exception. SQLite sets
+    ``orig.table_name``; asyncpg exposes the constraint name in the message.
     """
     orig = getattr(exc, "orig", None)
     if orig is not None and getattr(orig, "table_name", None) == "task":
         return True
     msg = str(orig) if orig else str(exc)
-    return "task." in msg and "UNIQUE" in msg.upper()
+    return ("task_pkey" in msg or "task." in msg) and "UNIQUE" in msg.upper()
 
 router = APIRouter(tags=["tasks"])
 
