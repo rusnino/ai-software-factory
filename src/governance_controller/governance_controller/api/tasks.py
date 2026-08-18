@@ -1,6 +1,7 @@
 """Task REST API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.db import get_db
@@ -29,10 +30,17 @@ async def create_task(
 ) -> TaskResponse:
     """Create a governed task from a task contract and project profile."""
     service = TaskService(db)
-    task = await service.create(
-        task_contract=payload.task_contract,
-        project_profile=payload.project_profile,
-    )
+    try:
+        task = await service.create(
+            task_contract=payload.task_contract,
+            project_profile=payload.project_profile,
+        )
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task with id {payload.task_contract.task_id} already exists",
+        ) from exc
     return _task_response(task)
 
 

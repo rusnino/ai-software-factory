@@ -94,3 +94,23 @@ class TestTaskApi:
         assert response.status_code == 404
         body = response.json()
         assert body["detail"] == "Task does-not-exist not found"
+
+    async def test_create_task_duplicate_returns_409(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        payload = {
+            "task_contract": sample_contract.model_dump(),
+            "project_profile": sample_profile.model_dump(),
+        }
+
+        first = await async_client.post("/tasks", json=payload)
+        assert first.status_code == 201
+
+        second = await async_client.post("/tasks", json=payload)
+
+        assert second.status_code == 409
+        body = second.json()
+        assert "already exists" in body["detail"]
