@@ -1,6 +1,6 @@
 """Tests for macro-agent client and executor abstraction."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -96,3 +96,20 @@ async def test_http_error_raises_exception(
 
     with pytest.raises(httpx.HTTPStatusError):
         await client.start({"task_id": "task-1"})
+
+
+@pytest.mark.asyncio
+async def test_client_uses_configurable_timeout(
+    httpx_mock: pytest_httpx.HTTPXMock,
+) -> None:
+    httpx_mock.add_response(json={"run_id": "run-abc"})
+
+    with patch(
+        "governance_controller.adapters.macro_agent.client.settings"
+    ) as mock_settings:
+        mock_settings.macro_agent_timeout_seconds = 12.5
+        client = MacroAgentClient(base_url="https://example.com")
+        await client.start({"task_id": "task-1"})
+
+    request = httpx_mock.get_request()
+    assert request is not None

@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # Dev-only default; production must inject a real DATABASE_URL.
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/governance"
     macro_agent_base_url: str = "http://localhost:3000"
+    macro_agent_timeout_seconds: float = 30.0
 
     # Telegram webhook authentication. The secret token is sent by Telegram in
     # the ``X-Telegram-Bot-Api-Secret-Token`` header when webhooks are
