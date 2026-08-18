@@ -236,3 +236,28 @@ class TestApprovalEndpoint:
 
         assert response.status_code == 503
         assert "macro-agent start failed" in response.json()["detail"]
+
+    async def test_approval_does_not_use_for_update_lock(
+        self,
+        async_client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """The approval endpoint must not hold a row lock across macro-agent calls."""
+
+        async def _forbidden(*_args, **_kwargs) -> None:
+            raise AssertionError("FOR UPDATE lock used in approval path")
+
+        monkeypatch.setattr(
+            "governance_controller.services.task_service.TaskService.get_by_id_for_update",
+            _forbidden,
+        )
+
+        await _create_task(async_client, sample_contract, sample_profile)
+        response = await async_client.post(
+            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == TaskState.PLAN_APPROVED.value
