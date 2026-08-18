@@ -16,8 +16,17 @@ from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.audit_service import AuditService
 
 
-def _make_task(state: TaskState = TaskState.PROPOSED) -> Task:
-    return Task(id="task-1", project_id="proj-1", state=state, proposed_by="agent-1")
+async def _make_task(
+    db: AsyncSession,
+    state: TaskState = TaskState.PROPOSED,
+    task_id: str = "task-1",
+) -> Task:
+    task = Task(
+        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
+    )
+    db.add(task)
+    await db.flush()
+    return task
 
 
 def _make_contract(harness: str = "opencode") -> TaskContract:
@@ -134,7 +143,7 @@ class TestApprovalServiceAuditIntegration:
         self, db_session: AsyncSession
     ) -> None:
         service = ApprovalService(db=db_session)
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()
         profile = _make_profile()
 

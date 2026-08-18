@@ -60,7 +60,7 @@ async def submit_approval(
     """
     task_service = TaskService(db)
 
-    task = await task_service.get_by_id(payload.task_id)
+    task = await task_service.get_by_id_for_update(payload.task_id)
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

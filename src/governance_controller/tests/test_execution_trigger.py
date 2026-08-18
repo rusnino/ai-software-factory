@@ -15,10 +15,17 @@ from governance_controller.schemas.task_contract import ExecutionConfig, TaskCon
 from governance_controller.services.approval_service import ApprovalService
 
 
-def _make_task(state: TaskState = TaskState.PLAN_APPROVED) -> Task:
-    return Task(
-        id="task-exec", project_id="proj-1", state=state, proposed_by="agent-1"
+async def _make_task(
+    db: AsyncSession,
+    state: TaskState = TaskState.PLAN_APPROVED,
+    task_id: str = "task-exec",
+) -> Task:
+    task = Task(
+        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
     )
+    db.add(task)
+    await db.flush()
+    return task
 
 
 def _make_contract(
@@ -60,7 +67,7 @@ class TestExecutionTrigger:
         fake_executor.start.return_value = {"run_id": "run-abc-123"}
         service = ApprovalService(db=db_session, executor=fake_executor)
 
-        task = _make_task(TaskState.PLAN_APPROVED)
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -92,7 +99,7 @@ class TestExecutionTrigger:
         fake_executor.start.side_effect = RuntimeError("macro-agent unavailable")
         service = ApprovalService(db=db_session, executor=fake_executor)
 
-        task = _make_task(TaskState.PLAN_APPROVED)
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
         profile = _make_profile()
 
@@ -121,7 +128,7 @@ class TestExecutionTrigger:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         service = ApprovalService(db=db_session, executor=fake_executor)
 
-        task = _make_task(TaskState.PROPOSED)
+        task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()
         profile = _make_profile()
 
