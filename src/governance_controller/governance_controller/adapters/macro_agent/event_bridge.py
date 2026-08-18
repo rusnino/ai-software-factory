@@ -1,6 +1,5 @@
 """Translate macro-agent workspace events into Controller state updates."""
 
-from contextlib import suppress
 from typing import Any
 
 from sqlalchemy import select
@@ -71,9 +70,16 @@ class EventBridge:
             )
             return
 
+        transition_error: str | None = None
         if target_state is not None and task.state != target_state:
-            with suppress(ValueError):
+            try:
                 StateMachine.transition(task, target_state)
+            except ValueError as exc:
+                transition_error = str(exc)
+
+        payload: dict[str, Any] = {"event": event}
+        if transition_error is not None:
+            payload["transition_error"] = transition_error
 
         await AuditService.log(
             db=db,
@@ -81,5 +87,5 @@ class EventBridge:
             task_id=task_id,
             actor="macro-agent",
             source="macro-agent",
-            payload=event,
+            payload=payload,
         )

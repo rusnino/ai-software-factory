@@ -54,7 +54,8 @@ class TestEventBridgeTransitions:
         entries = rows.scalars().all()
         assert len(entries) == 1
         assert entries[0].event_type == "macro_agent_landing:completed"
-        assert entries[0].payload == event
+        assert entries[0].payload["event"] == event
+        assert "transition_error" not in entries[0].payload
 
     async def test_conflict_created_transitions_running_to_blocked(
         self,
@@ -105,7 +106,8 @@ class TestEventBridgeTransitions:
         entries = rows.scalars().all()
         assert len(entries) == 1
         assert entries[0].event_type == "macro_agent_other"
-        assert entries[0].payload == event
+        assert entries[0].payload["event"] == event
+        assert "transition_error" not in entries[0].payload
 
     async def test_missing_task_id_does_not_raise_and_logs_other_event(
         self,
@@ -192,3 +194,4 @@ class TestEventBridgeTransitions:
         entries = rows.scalars().all()
         assert len(entries) == 1
         assert entries[0].event_type == "macro_agent_landing:completed"
+        assert "transition_error" in entries[0].payload
