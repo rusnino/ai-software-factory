@@ -212,3 +212,27 @@ class TestApprovalEndpoint:
         response = await async_client.post("/approvals", json=payload)
 
         assert response.status_code == 400
+
+    async def test_executor_start_failure_returns_503(
+        self,
+        async_client: AsyncClient,
+        mock_executor: AsyncMock,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        mock_executor.start.side_effect = RuntimeError(
+            "macro-agent start failed: connection refused"
+        )
+
+        await _create_task(async_client, sample_contract, sample_profile)
+        await async_client.post(
+            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+
+        response = await async_client.post(
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.EXECUTION),
+        )
+
+        assert response.status_code == 503
+        assert "macro-agent start failed" in response.json()["detail"]
