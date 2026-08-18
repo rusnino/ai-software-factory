@@ -153,25 +153,21 @@ class TestApprovalConcurrency:
             task = await check.scalar(select(Task).where(Task.id == "task-stale"))
             assert task is not None
             assert task.state == TaskState.RUNNING
-            # Successful EXECUTION approval performs 5 CAS increments:
+            # Successful EXECUTION approval performs 3 CAS increments:
             # PLAN_APPROVED -> EXEC_APPROVED, EXEC_APPROVED -> READY,
-            # READY -> RUNNING (logged as state_change), plus the executor
-            # state updates and final READY -> RUNNING atomic_transition.
-            # The task starts at version 0, so the final version is 5.
-            assert task.version == 5
+            # READY -> RUNNING.
+            assert task.version == 3
 
         await engine.dispose()
         os.unlink(path)
 
-    async def test_executor_failure_advances_to_failed_with_version_5(
+    async def test_executor_failure_advances_to_failed_with_version_3(
         self,
     ) -> None:
-        """If executor.start raises, the task ends at FAILED with version 5.
+        """If executor.start raises, the task ends at FAILED with version 3.
 
         The CAS increments are PLAN_APPROVED -> EXEC_APPROVED,
-        EXEC_APPROVED -> READY, READY -> FAILED. Additional internal
-        state-change updates (e.g. execution row state) add two more version
-        bumps, so the final version is 5.
+        EXEC_APPROVED -> READY, READY -> FAILED, so the final version is 3.
         """
         engine, local_session, path = _file_db_session_maker()
 
@@ -211,7 +207,7 @@ class TestApprovalConcurrency:
             )
             assert task is not None
             assert task.state == TaskState.FAILED
-            assert task.version == 5
+            assert task.version == 3
 
             executions = await check.execute(
                 select(Execution).where(Execution.task_id == "task-exec-fail")
