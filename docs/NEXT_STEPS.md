@@ -2,31 +2,9 @@
 
 ## Current State
 
-**Phase 1 is not done — a second full-codebase sweep (`reviews/REVIEW-007-full-codebase-review-round2.md`)
-found 5 new `HIGH` gaps** after `REVIEW-006` closed out `GAP-023`/`GAP-024`:
+**All gaps found by `REVIEW-006` and `REVIEW-007` are now closed per `reviews/GAPS.md`.**
 
-- `GAP-044`: `get_db()`'s rollback erases the audit trail for **every rejected** `POST /approvals` request
-  (self-approval, permission-denied, policy-violation, concurrent-modification) — not just the GAP-031
-  execution-failure case. Reproduced live.
-- `GAP-045`: `TaskContract.verification.commands` are policy-validated (GAP-024) but **never executed**
-  unless a `completion_contract` is also present — a contract following SPEC-03 §3.5's own example gets
-  silently fake-verified.
-- `GAP-046`: GAP-023's atomic compare-and-swap only protects the three approval-gated transitions;
-  everything downstream (`_trigger_execution`, `VerificationService.verify_and_advance`, `EventBridge`) still
-  mutates `Task.state` unguarded — dormant only because of GAP-047.
-- `GAP-047`: `EventBridge.handle()` has **no live HTTP entry point anywhere** — unlike Telegram/opentasks/
-  git_cascade, this isn't disclosed; `docs/NEXT_STEPS.md`/`SPEC-10` both described it as operating.
-- `GAP-048`: **`docker-compose.yml` doesn't actually work** — `DATABASE_URL`/`LOG_LEVEL` lack the `GC_` prefix
-  `Settings` requires, so the `api` container would crash on startup pointing at a `localhost` Postgres that
-  isn't there. The one documented quick-start path is broken.
-
-Plus `GAP-049` (role enforcement bypassed for unregistered-but-profile-allowed harnesses) and `GAP-050`
-(stale doc references to already-closed gaps), both `MEDIUM`. See `reviews/GAPS.md` for the full ledger
-(53 gaps total). `GAP-031`/`GAP-043` remain `IN_PROGRESS` from REVIEW-006.
-
-Test status: **156 passed**, `ruff` clean, `mypy --strict` clean — real and re-confirmed, but (as with every
-prior round) passing tests are not evidence against any of the gaps above, since none of them are caught by
-the checked-in suite.
+Test status: **166 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
