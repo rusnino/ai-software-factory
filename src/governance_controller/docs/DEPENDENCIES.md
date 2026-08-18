@@ -14,7 +14,7 @@ must be documented.
 | `sqlmodel` | ORM/model layer unifying Pydantic and SQLAlchemy for `Task`, `Execution`, `Approval`, `AuditLog`. |
 | `asyncpg` | Async PostgreSQL driver used by SQLAlchemy in production. |
 | `httpx` | Async HTTP client for macro-agent executor and Telegram/Plane adapters. |
-| `structlog` | Structured, typed logging; renders the audit trail and application logs. |
+| `structlog` | Structured, typed logging; renders the audit trail. Application-level request/response logs are emitted by FastAPI/uvicorn; `structlog` is not used for those. |
 | `typer` | CLI framework for the `governance-controller` command-line tool. |
 
 ## Development dependencies

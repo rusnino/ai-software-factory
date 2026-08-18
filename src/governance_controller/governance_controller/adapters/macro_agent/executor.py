@@ -16,14 +16,21 @@ class MacroAgentExecutor:
         self,
         task_contract: TaskContract,
         controller_execution_id: str,
+        sandbox: str = "worktree",
+        max_parallel_agents: int = 3,
     ) -> dict[str, Any]:
         """Start a macro-agent run for the given task contract."""
+        execution = task_contract.execution
         payload: dict[str, object] = {
             "task_id": task_contract.task_id,
-            "team": task_contract.execution.team,
-            "harness": task_contract.execution.harness,
+            "team": execution.team,
+            "harness": execution.harness,
             "objective": task_contract.objective,
             "acceptance": task_contract.acceptance,
+            "timeout_minutes": execution.timeout_minutes,
+            "max_retries": execution.max_retries,
+            "sandbox": sandbox,
+            "max_parallel_agents": max_parallel_agents,
             "metadata": {
                 "controller_task_id": task_contract.task_id,
                 "controller_execution_id": controller_execution_id,

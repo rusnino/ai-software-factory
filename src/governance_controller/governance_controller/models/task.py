@@ -21,7 +21,9 @@ class Task(SQLModel, table=True):
     state: TaskState = Field(default=TaskState.PROPOSED)
     version: int = Field(
         default=0,
-        sa_column=Column("version", Integer, default=0, nullable=False),
+        sa_column=Column(
+            "version", Integer, default=0, nullable=False, server_default="0"
+        ),
     )
     project_id: str
     proposed_by: str
