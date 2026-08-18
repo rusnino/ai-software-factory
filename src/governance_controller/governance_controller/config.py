@@ -13,5 +13,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/governance"
     macro_agent_base_url: str = "http://localhost:3000"
 
+    # Telegram webhook authentication. The secret token is sent by Telegram in
+    # the ``X-Telegram-Bot-Api-Secret-Token`` header when webhooks are
+    # configured with a secret_token. Set to a non-empty value and route the
+    # header to ``TelegramAdapter`` to validate that updates come from Telegram.
+    telegram_webhook_secret_token: str = ""
+
 
 settings = Settings()

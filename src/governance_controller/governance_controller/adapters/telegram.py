@@ -1,26 +1,82 @@
-"""Telegram inbound approval adapter stub.
+"""Telegram inbound approval adapter.
 
 This adapter translates Telegram update payloads into Controller approval
 requests. It performs no polling/long-polling; it is intended to be invoked
 from a webhook handler or future polling loop.
+
+Webhook authentication is defensive: callers must pass the secret token
+header if one is configured. Missing/invalid tokens produce a ``403`` so
+that unauthenticated updates cannot reach ``POST /approvals``.
 """
 
 from datetime import UTC, datetime
 
 import httpx
 
+from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
 from governance_controller.schemas.approval import ApprovalRequest
 
 
+class TelegramWebhookAuthError(Exception):
+    """Raised when a Telegram update fails webhook authentication."""
+
+
 class TelegramAdapter:
-    """Stub adapter for inbound Telegram /approve commands."""
+    """Inbound Telegram /approve command adapter with sender attribution."""
 
-    def __init__(self, base_url: str = "http://localhost:8000") -> None:
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000",
+        secret_token: str | None = None,
+    ) -> None:
         self.base_url = base_url
+        configured_secret = secret_token or settings.telegram_webhook_secret_token
+        self.secret_token = configured_secret if configured_secret else None
 
-    async def process_update(self, update: dict) -> dict:
+    def authenticate_update(
+        self, *, secret_token_header: str | None = None
+    ) -> None:
+        """Validate the Telegram secret-token header when configured.
+
+        Telegram sends the configured ``secret_token`` in the
+        ``X-Telegram-Bot-Api-Secret-Token`` header. If the adapter has a
+        non-empty secret configured, only updates presenting the exact same
+        value are accepted. Raises ``TelegramWebhookAuthError`` when
+        authentication fails.
+        """
+        if self.secret_token is None:
+            return
+        if secret_token_header != self.secret_token:
+            raise TelegramWebhookAuthError("Invalid or missing Telegram secret token")
+
+    @staticmethod
+    def derive_actor(message: dict) -> str:
+        """Derive an actor identifier from a Telegram ``message.from`` dict.
+
+        Prefer the human-readable ``username``; fall back to the numeric
+        ``id`` so approvals remain attributable even when a username is not
+        set. The literal ``telegram-user`` fallback remains only for payloads
+        that contain no ``from`` field.
+        """
+        sender = message.get("from", {})
+        username = sender.get("username")
+        if username and isinstance(username, str):
+            return f"telegram:{username}"
+        user_id = sender.get("id")
+        if user_id is not None and str(user_id):
+            return f"telegram:{user_id}"
+        return "telegram-user"
+
+    async def process_update(
+        self,
+        update: dict,
+        *,
+        secret_token_header: str | None = None,
+    ) -> dict:
         """Process a Telegram update and return a status dict."""
+        self.authenticate_update(secret_token_header=secret_token_header)
+
         message = update.get("message", {})
         text = message.get("text", "")
 
@@ -43,7 +99,7 @@ class TelegramAdapter:
             task_id=task_id,
             approval_type=approval_type,
             source="telegram",
-            actor="telegram-user",
+            actor=self.derive_actor(message),
             timestamp=datetime.now(UTC).isoformat(),
         )
 
