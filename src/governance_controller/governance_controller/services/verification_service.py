@@ -82,12 +82,13 @@ class VerificationService:
     ) -> dict[str, object]:
         """Run all verification checks for *contract* and return a report.
 
-        If a CompletionContract is present, required/optional commands are
-        executed via ``asyncio.create_subprocess_shell`` and their exit codes
-        compared to ``Check.expect_exit``. Static forbidden-path and scope
-        checks are always performed. Verification commands declared in
-        ``TaskContract.verification`` (SPEC-03 §3.5) are merged with the
-        CompletionContract ``required`` checks.
+        Verification commands declared in ``TaskContract.verification``
+        (SPEC-03 §3.5) are always executed. If a CompletionContract is also
+        present, its required/optional commands are executed via
+        ``asyncio.create_subprocess_shell`` and their exit codes compared to
+        ``Check.expect_exit``. Static forbidden-path and scope checks are
+        performed when a CompletionContract is present; otherwise the task
+        contract's own ``forbidden_paths`` are checked.
 
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
