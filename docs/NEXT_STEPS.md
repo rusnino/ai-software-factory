@@ -2,27 +2,30 @@
 
 ## Current State
 
-**Phase 1 is not done.** `reviews/REVIEW-005-round3-gap-verification.md` found that 2 of the 6 claimed
-`HIGH` fixes above don't actually work, reopening `GAP-023` and `GAP-024` (plus downgrading `GAP-031`/
-`GAP-032` and opening a new test-coverage gap, `GAP-043`):
+**Phase 1 is complete.** All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
+`reviews/REVIEW-005-round3-gap-verification.md` (and earlier reviews) are now `CLOSED` in
+`reviews/GAPS.md`.
 
-- `GAP-022` (CRITICAL) genuinely fixed — `get_db()` commit/rollback proven correct by direct reproduction
-  against real session semantics (not just the test suite, which still can't exercise this path — `GAP-043`).
-- `GAP-023` (HIGH) **not actually fixed** — the "optimistic version guard" is dead code: `AsyncSessionLocal`'s
-  `expire_on_commit=False` plus a missing `populate_existing=True`/`session.refresh()` means the re-fetch
-  under lock returns the *same cached object* already held by the caller, so the version-mismatch branch can
-  never fire. `.with_for_update()` is also a silent no-op on SQLite. Concurrent approvals can still
-  double-trigger `MacroAgentExecutor.start()`.
-- `GAP-024` (HIGH) **partially fixed** — `PolicyEngine` now genuinely validates `CompletionContract.command`
-  content (catches a contract that lies about `destructive_shell`). But `TaskContract.verification.commands`
-  — the exact field this gap named — is wired into `VerificationService` with **zero** `PolicyEngine`
-  validation, a live, untested bypass to the same class of unmitigated shell execution.
-- `GAP-025`, `GAP-026`, `GAP-020`, `GAP-028`, `GAP-029`, `GAP-030`, `GAP-033`, `GAP-034`, `GAP-038`, `GAP-040`
-  are genuinely closed, confirmed by live reproduction/test runs, not just commit messages.
+Key fixes since REVIEW-005:
 
-Test status: **142 passed**, `ruff` clean, `mypy --strict` clean — all independently confirmed accurate, but
-**not sufficient evidence of correctness for GAP-023/024** specifically (see REVIEW-005 for why: the tests
-covering both pass for reasons unrelated to the mechanisms they claim to validate).
+- `GAP-023` (HIGH): replaced the dead-code optimistic version guard with an atomic
+  `UPDATE task SET state=..., version=version+1 WHERE id=? AND version=? AND state=?` in
+  `ApprovalService.approve()`. If another approval already advanced the task, rowcount is 0 and the
+  request fails with `Concurrent modification detected` before `MacroAgentExecutor.start()` is invoked.
+  Added deterministic concurrency regression tests (stale-read-after-commit scenario).
+- `GAP-024` (HIGH): `PolicyEngine.evaluate()` now validates `TaskContract.verification["commands"]` using
+  the same shell-allowlist and profile cross-checks as `CompletionContract` commands.
+- `GAP-031` (MEDIUM): `_trigger_execution()` now creates the `Execution` row before calling
+  `executor.start(contract, execution.id)`, so `controller_execution_id` is sent outbound as real traceability
+  metadata per SPEC-05 §5.7.
+- `GAP-032` (MEDIUM): added `role` to `ExecutionConfig` and wired `PolicyEngine` to enforce the harness's
+  `allowed_roles` from the registry against SPEC-06 §6.2.
+- `GAP-021` (MEDIUM): added passing-path (`AGENT_REVIEW` → `HUMAN_REVIEW`) integration test through the
+  real `EventBridge.handle()` path.
+- `GAP-043` (MEDIUM): added tests exercising real `get_db()` commit-on-success and rollback-on-exception
+  behavior.
+
+Test status: **156 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
