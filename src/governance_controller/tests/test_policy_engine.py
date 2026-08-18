@@ -195,6 +195,22 @@ class TestPolicyEngineRejections:
 
         assert result.allowed is True
 
+    def test_traversal_forbidden_path_is_rejected(self) -> None:
+        # A relative path with .. segments must resolve before prefix checks.
+        contract = _make_contract(
+            inputs=["src/../../srv/production/secrets.env"],
+            deliverables=[],
+        )
+        profile = _make_profile(forbidden_paths=["/srv/production"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path: src/../../srv/production/secrets.env" in v
+            for v in result.violations
+        )
+
 
 class TestPolicyEngineCompletionContractShellAllowlist:
     def test_safe_completion_contract_command_passes(self) -> None:

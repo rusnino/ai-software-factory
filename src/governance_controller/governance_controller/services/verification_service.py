@@ -17,6 +17,7 @@ from governance_controller.schemas.completion_contract import Check
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.state_machine import StateMachine
+from governance_controller.utils.paths import normalize_path
 
 
 class VerificationService:
@@ -206,9 +207,11 @@ class VerificationService:
     @staticmethod
     def _is_prefixed_by(path: str, prefix: str) -> bool:
         """Return True if *path* equals *prefix* or is under it."""
-        path = path.rstrip("/")
-        prefix = prefix.rstrip("/")
-        return path == prefix or path.startswith(prefix + "/")
+        normalized_path = normalize_path(path)
+        normalized_prefix = normalize_path(prefix)
+        return normalized_path == normalized_prefix or normalized_path.startswith(
+            normalized_prefix + "/"
+        )
 
     @classmethod
     async def verify_and_advance(
