@@ -84,3 +84,13 @@ class TestTaskApi:
         body = response.json()
         assert body["id"] == "api-task-1"
         assert body["state"] == TaskState.PROPOSED.value
+
+    async def test_get_task_nonexistent_returns_404(
+        self,
+        async_client: AsyncClient,
+    ) -> None:
+        response = await async_client.get("/tasks/does-not-exist")
+
+        assert response.status_code == 404
+        body = response.json()
+        assert body["detail"] == "Task does-not-exist not found"
