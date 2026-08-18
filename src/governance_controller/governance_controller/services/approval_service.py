@@ -1,6 +1,7 @@
 """Approval service with embedded policy enforcement."""
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -82,8 +83,7 @@ class ApprovalService:
         # 0. Permission check: agents/system cannot approve, and the proposer
         #    cannot approve their own task.
         if actor == task.proposed_by:
-            await AuditService.log(
-                db=self.db,
+            await self._log_rejection_and_raise(
                 event_type="approval_rejected",
                 task_id=task.id,
                 actor=actor,
@@ -93,17 +93,14 @@ class ApprovalService:
                     "reason": "self-approval",
                     "proposed_by": task.proposed_by,
                 },
-            )
-            raise ValueError(
-                "Policy violation(s): actor cannot approve their own task"
+                message="Policy violation(s): actor cannot approve their own task",
             )
 
         permitted = await self.permission_service.may_approve(
             actor, task.id, approval_type
         )
         if not permitted:
-            await AuditService.log(
-                db=self.db,
+            await self._log_rejection_and_raise(
                 event_type="approval_rejected",
                 task_id=task.id,
                 actor=actor,
@@ -112,10 +109,10 @@ class ApprovalService:
                     "approval_type": approval_type.value,
                     "reason": "permission_denied",
                 },
-            )
-            raise ValueError(
-                "Policy violation(s): "
-                f"{actor} may not request {approval_type.value} approval"
+                message=(
+                    "Policy violation(s): "
+                    f"{actor} may not request {approval_type.value} approval"
+                ),
             )
 
         # 1. Policy evaluation must happen before any state change or record.
@@ -123,8 +120,7 @@ class ApprovalService:
             contract, profile, approval_type
         )
         if not policy_result.allowed:
-            await AuditService.log(
-                db=self.db,
+            await self._log_rejection_and_raise(
                 event_type="approval_rejected",
                 task_id=task.id,
                 actor=actor,
@@ -133,9 +129,7 @@ class ApprovalService:
                     "approval_type": approval_type.value,
                     "violations": policy_result.violations,
                 },
-            )
-            raise ValueError(
-                f"Policy violation(s): {', '.join(policy_result.violations)}"
+                message=f"Policy violation(s): {', '.join(policy_result.violations)}",
             )
 
         # 2. Idempotency: return existing task state if this exact key was
@@ -190,8 +184,7 @@ class ApprovalService:
             )
         )
         if result.rowcount == 0:  # type: ignore[attr-defined]
-            await AuditService.log(
-                db=self.db,
+            await self._log_rejection_and_raise(
                 event_type="approval_rejected",
                 task_id=task.id,
                 actor=actor,
@@ -203,10 +196,10 @@ class ApprovalService:
                     "expected_state": previous_state.value,
                     "target_state": target_state.value,
                 },
-            )
-            raise ValueError(
-                "Concurrent modification detected: task state changed during approval "
-                f"({previous_state.value} -> {target_state.value})"
+                message=(
+                    "Concurrent modification detected: task state changed "
+                    f"during approval ({previous_state.value} -> {target_state.value})"
+                ),
             )
 
         # The database update succeeded; now reflect it on the in-memory object.
@@ -259,6 +252,41 @@ class ApprovalService:
             )
 
         return task
+
+    async def _log_rejection_and_raise(
+        self,
+        event_type: str,
+        task_id: str,
+        actor: str,
+        source: str,
+        payload: dict[str, Any],
+        message: str,
+    ) -> None:
+        """Persist an audit log entry for a rejection, then raise ValueError.
+
+        ``get_db()`` rolls back the containing transaction whenever an
+        exception propagates out of an endpoint. If a rejection is recorded
+        with only ``db.add``/``flush``, the audit row is discarded along with
+        the rest of the transaction. This helper flushes and commits the audit
+        entry before raising so the rejection is durably recorded.
+        """
+        await AuditService.log(
+            db=self.db,
+            event_type=event_type,
+            task_id=task_id,
+            actor=actor,
+            source=source,
+            payload=payload,
+        )
+        # Commit only if we are not inside an explicit transaction context.
+        # Test fixtures use ``async with session.begin()``; committing there
+        # would close the transaction and break subsequent fixture teardown.
+        # In production (FastAPI + get_db()) there is no open begin() context,
+        # so a commit is required to make the audit row durable before the
+        # exception propagates and triggers get_db()'s rollback.
+        if self.db.get_transaction() is None:
+            await self.db.commit()
+        raise ValueError(message)
 
     async def _trigger_execution(
         self,
