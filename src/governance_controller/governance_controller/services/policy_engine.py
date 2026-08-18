@@ -307,6 +307,10 @@ class PolicyEngine:
                     f"Role '{requested_role}' is not allowed by harness "
                     f"'{requested_harness}'"
                 )
+        else:
+            violations.append(
+                f"Harness '{requested_harness}' is not registered; cannot validate role"
+            )
 
         # 3. Forbidden path enforcement: any input or deliverable that the task
         #    explicitly touches must not be inside a path forbidden by the

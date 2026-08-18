@@ -486,3 +486,18 @@ class TestPolicyEngineRoleAllowlist:
             )
         finally:
             del registry._providers["aider"]
+
+    def test_unregistered_harness_allowed_by_profile_is_rejected(self) -> None:
+        # A harness may appear in the project profile's allowed_harnesses list
+        # without being registered locally. It must be denied because we cannot
+        # validate its allowed roles.
+        contract = _make_contract(harness="aider")
+        profile = _make_profile(allowed_harnesses=["aider"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "Harness 'aider' is not registered; cannot validate role" in v
+            for v in result.violations
+        )
