@@ -58,12 +58,18 @@ def _make_profile(
     merge_requires_human: bool = True,
     docker_socket: str = "deny",
     destructive_shell: str = "deny",
+    timeout_minutes: int = 60,
+    max_retries: int = 2,
 ) -> ProjectProfile:
     return ProjectProfile(
         project_id="proj-1",
         project_name="Test Project",
         repository={"path": "/tmp/repo"},
-        execution={"allowed_harnesses": allowed_harnesses or ["opencode"]},
+        execution={
+            "allowed_harnesses": allowed_harnesses or ["opencode"],
+            "timeout_minutes": timeout_minutes,
+            "max_retries": max_retries,
+        },
         security={
             "forbidden_paths": forbidden_paths or [],
             "docker_socket": docker_socket,
@@ -113,6 +119,32 @@ class TestPolicyEngineRejections:
         assert any("Destructive shell" in v for v in result.violations)
         assert any("subagents" in v for v in result.violations)
         assert any("Unrestricted network" in v for v in result.violations)
+
+    def test_timeout_minutes_above_profile_cap_rejected(self) -> None:
+        contract = _make_contract()
+        contract.execution.timeout_minutes = 120
+        profile = _make_profile(timeout_minutes=60)
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "timeout_minutes (120) exceeds project cap (60)" in v
+            for v in result.violations
+        )
+
+    def test_max_retries_above_profile_cap_rejected(self) -> None:
+        contract = _make_contract()
+        contract.execution.max_retries = 5
+        profile = _make_profile(max_retries=2)
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "max_retries (5) exceeds project cap (2)" in v
+            for v in result.violations
+        )
 
     def test_git_settings_enforced_for_merge(self) -> None:
         contract = _make_contract()
