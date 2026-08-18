@@ -8,6 +8,7 @@ from governance_controller.schemas.completion_contract import CompletionContract
 class ExecutionConfig(BaseModel):
     team: str = "default"
     harness: str = "opencode"
+    role: str = "worker"
     timeout_minutes: int = 60
     max_retries: int = 2
     uses_docker_socket: bool = False
