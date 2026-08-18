@@ -2,9 +2,7 @@
 
 ## Current State
 
-**No `CRITICAL`/`HIGH` gap remains open in `reviews/GAPS.md`** — confirmed by `reviews/REVIEW-010-round7-gap-verification.md`, which independently reproduced `GAP-044`'s fourth attempt (the last open `HIGH` item: `_trigger_execution`'s failure paths now commit before raising, so the `EXEC_APPROVED` transition, `Execution` row, and audit trail all survive a real `get_db()` rollback — proven for all four failure branches, not just read from the diff) and `GAP-054`. This is the first time across the ten-review series that the gate rule's `CRITICAL`/`HIGH` bar is genuinely clear.
-
-One new `MEDIUM` finding, `GAP-056`: the tests added to protect `GAP-044`/`GAP-054` don't actually exercise `get_db()`'s rollback path (`pytest.raises` is placed inside the session context manager, so it always takes the commit-on-success exit) — proven by reverting each fix individually and confirming the full suite still passes. The underlying code is correct today; this is a regression-protection gap, not a live defect.
+**`reviews/GAPS.md` has no open `CRITICAL` or `HIGH` gaps, and `GAP-056` (the last open `MEDIUM` gap) is now closed.** See `reviews/REVIEW-010-round7-gap-verification.md` for the prior verification that made the gate rule clear.
 
 Test status: **173 passed**, `ruff` clean, `mypy --strict` clean.
 
