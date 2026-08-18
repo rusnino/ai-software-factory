@@ -24,6 +24,13 @@
 - [x] Task 20: End-to-End Smoke Test (commit 4902944)
 - [x] Review 1 gap closure (commits 08f1171..31b6dfa)
 - [x] Review 2 gap closure (commits 14d11da..fa94ad5)
+- [x] Review 3 (REVIEW-003) gap closure — round-2 verification, durable commit fix (commit cb7e0ce)
+- [x] Review 4 (REVIEW-004) full fresh review — atomic row lock / version guard for approvals (commits b411b58..e96dedf)
+- [x] Review 5 (REVIEW-005) gap re-fixes — command allowlist, event deduplication, Telegram auth (commits aff57f6..1887c4c)
+- [x] Review 6/7 (REVIEW-006/007) gap fixes — verification commands, downstream atomic CAS, EventBridge route, docker-compose, harness role deny (commits 8c1b8a1..5fce7c4)
+- [x] Review 8/9 (REVIEW-008/009) gap re-fixes — durable rejection audit commit, _trigger_execution commit-before-raise (commits 983c82c..20321f3)
+- [x] Review 10/11/12 (REVIEW-010/011/012) gap re-fix verification — regression tests for _trigger_execution commit-before-raise sites (commits 3f45649..345a6e4)
+- [x] Review 13 (REVIEW-013) full fresh review — path normalization, verification commit, timeout caps, 409/503 mapping, uvicorn dependency, event body limit, remove opentasks stub, log level, missing event types (commits f75c33d..9471d51)
 
 ## Preflight Rulings
 
