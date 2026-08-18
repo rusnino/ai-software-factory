@@ -136,6 +136,12 @@ async def submit_approval(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=message,
         ) from exc
+    except RuntimeError as exc:
+        # Downstream executor (macro-agent) startup failure.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
 
     return ApprovalResponse(
         task_id=updated_task.id,
