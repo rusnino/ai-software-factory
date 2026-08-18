@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from sqlalchemy import Column, DateTime
 from sqlmodel import Field, SQLModel
 
 from governance_controller.constants import TaskState
@@ -19,5 +20,11 @@ class Execution(SQLModel, table=True):
     task_id: str = Field(index=True)
     macro_agent_run_id: str | None = None
     state: TaskState
-    started_at: datetime = Field(default_factory=utc_now)
-    ended_at: datetime | None = None
+    started_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), default=utc_now, nullable=False),
+    )
+    ended_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )

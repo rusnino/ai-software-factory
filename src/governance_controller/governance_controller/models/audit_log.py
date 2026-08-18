@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Column, Index
+from sqlalchemy import Column, DateTime, Index
 from sqlalchemy.dialects.postgresql import JSON
 from sqlmodel import Field, SQLModel
 
@@ -28,7 +28,10 @@ class AuditLog(SQLModel, table=True):
     execution_id: str | None = None
     actor: str
     source: str
-    timestamp: datetime = Field(default_factory=utc_now)
+    timestamp: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), default=utc_now, nullable=False),
+    )
     payload: dict[str, Any] = Field(
         default_factory=dict,
         sa_column=Column("payload", JSON()),

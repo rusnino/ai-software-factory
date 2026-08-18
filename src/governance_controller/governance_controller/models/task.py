@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, Integer
+from sqlalchemy import Column, DateTime, Integer
 from sqlalchemy.dialects.postgresql import JSON
 from sqlmodel import Field, SQLModel
 
@@ -31,5 +31,11 @@ class Task(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column("task_contract_json", JSON()),
     )
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime | None = Field(default=None)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), default=utc_now, nullable=False),
+    )
+    updated_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )

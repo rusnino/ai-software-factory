@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Index
+from sqlalchemy import Column, DateTime, Index
 from sqlmodel import Field, SQLModel
 
 
@@ -28,6 +28,11 @@ class ProcessedEvent(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     task_id: str
     event_type: str
-    event_timestamp: datetime
+    event_timestamp: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
     event_id: str
-    processed_at: datetime = Field(default_factory=utc_now)
+    processed_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), default=utc_now, nullable=False),
+    )
