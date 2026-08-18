@@ -1,7 +1,10 @@
+# Dev-only local orchestration. Credentials are intentionally local defaults;
+# production uses externally injected secrets.
 services:
   db:
     image: postgres:16-alpine
     environment:
+      # Dev-only local credentials.
       POSTGRES_USER: controller
       POSTGRES_PASSWORD: controller
       POSTGRES_DB: controller
@@ -16,6 +19,7 @@ services:
   api:
     build: .
     environment:
+      # Dev-only local database URL.
       DATABASE_URL: postgresql+asyncpg://controller:controller@db:5432/controller
       LOG_LEVEL: info
     ports:

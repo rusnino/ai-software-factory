@@ -9,6 +9,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="GC_")
 
+    # Dev-only default; production must inject a real DATABASE_URL.
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost/governance"
     macro_agent_base_url: str = "http://localhost:3000"
 
