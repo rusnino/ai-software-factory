@@ -121,6 +121,7 @@ class StateMachine:
                 version=task.version + 1,
                 updated_at=datetime.now(UTC),
             )
+            .execution_options(synchronize_session=False)
         )
         if result.rowcount:  # type: ignore[attr-defined]
             task.state = target_state
