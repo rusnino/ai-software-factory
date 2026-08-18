@@ -34,6 +34,32 @@ class StateMachine:
     }
 
     @classmethod
+    def _validate(cls, current_state: TaskState, target_state: TaskState) -> None:
+        """Raise ValueError if *current_state* -> *target_state* is not allowed."""
+        allowed = cls._transitions.get(current_state, set())
+        if target_state not in allowed:
+            raise ValueError(
+                f"Invalid transition: {current_state.value} -> {target_state.value}"
+            )
+
+    @classmethod
+    def validate_transition(
+        cls,
+        current_state: TaskState,
+        target_state: TaskState,
+    ) -> None:
+        """Validate a transition without mutating a task.
+
+        Args:
+            current_state: The state before the transition.
+            target_state: The desired state.
+
+        Raises:
+            ValueError: If the transition is not valid.
+        """
+        cls._validate(current_state, target_state)
+
+    @classmethod
     def transition(cls, task: Task, target_state: TaskState) -> Task:
         """Transition *task* to *target_state* if valid.
 
@@ -47,13 +73,7 @@ class StateMachine:
         Raises:
             ValueError: If the transition is not valid.
         """
-        current_state = task.state
-        allowed = cls._transitions.get(current_state, set())
-
-        if target_state not in allowed:
-            raise ValueError(
-                f"Invalid transition: {current_state.value} -> {target_state.value}"
-            )
+        cls._validate(task.state, target_state)
 
         task.state = target_state
         task.updated_at = datetime.now(UTC)

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column
+from sqlalchemy import Column, Integer
 from sqlalchemy.dialects.postgresql import JSON
 from sqlmodel import Field, SQLModel
 
@@ -19,7 +19,10 @@ class Task(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     state: TaskState = Field(default=TaskState.PROPOSED)
-    version: int = Field(default=0)
+    version: int = Field(
+        default=0,
+        sa_column=Column("version", Integer, default=0, nullable=False),
+    )
     project_id: str
     proposed_by: str
     task_contract_json: dict[str, object] = Field(

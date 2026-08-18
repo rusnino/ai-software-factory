@@ -161,14 +161,35 @@ class ApprovalService:
             )
             return task
 
-        # 3. Refetch the task version under the row lock (if the caller passed
-        #    a detached task) and confirm it hasn't changed since they read it.
-        locked_task = await self.db.scalar(
-            select(Task).where(Task.id == task.id).with_for_update()  # type: ignore[arg-type]
+        # 3. Validate the state machine transition in-memory first, but do NOT
+        #    mutate the task object yet. The actual state advance is done by an
+        #    atomic UPDATE with a version/pre-state check below.
+        previous_state = task.state
+        target_state = _APPROVAL_TARGET_STATES[approval_type]
+        StateMachine.validate_transition(previous_state, target_state)
+
+        # 4. Atomically advance the task state. The WHERE clause checks the
+        #    expected version and pre-approval state. If another caller already
+        #    advanced the task, rowcount is 0 and we fail without triggering
+        #    the macro-agent. This works on both PostgreSQL (with row locking
+        #    at the database level) and SQLite (which serializes writes).
+        from sqlalchemy import update
+
+        new_version = task.version + 1
+        result = await self.db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == task.version,  # type: ignore[arg-type]
+                Task.state == previous_state.value,  # type: ignore[arg-type]
+            )
+            .values(
+                state=target_state.value,
+                version=new_version,
+                updated_at=datetime.now(UTC),
+            )
         )
-        if locked_task is None:
-            raise ValueError(f"Task {task.id} not found")
-        if locked_task.version != task.version:
+        if result.rowcount == 0:  # type: ignore[attr-defined]
             await AuditService.log(
                 db=self.db,
                 event_type="approval_rejected",
@@ -179,19 +200,19 @@ class ApprovalService:
                     "approval_type": approval_type.value,
                     "reason": "concurrent_modification",
                     "expected_version": task.version,
-                    "actual_version": locked_task.version,
+                    "expected_state": previous_state.value,
+                    "target_state": target_state.value,
                 },
             )
             raise ValueError(
-                "Concurrent modification detected: task state changed during approval"
+                "Concurrent modification detected: task state changed during approval "
+                f"({previous_state.value} -> {target_state.value})"
             )
 
-        # 4. Determine target state and advance state machine.
-        previous_state = task.state
-        target_state = _APPROVAL_TARGET_STATES[approval_type]
-        StateMachine.transition(task, target_state)
+        # The database update succeeded; now reflect it on the in-memory object.
+        task.state = target_state
+        task.version = new_version
         task.updated_at = datetime.now(UTC)
-        task.version = task.version + 1
 
         await AuditService.log(
             db=self.db,
