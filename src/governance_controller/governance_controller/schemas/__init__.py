@@ -1,4 +1,5 @@
 from .approval import ApprovalRequest, ApprovalResponse
+from .audit_log import AuditLogEntry
 from .completion_contract import (
     Check,
     CompletionContract,
@@ -18,6 +19,7 @@ from .task_contract import ExecutionConfig, TaskContract
 __all__ = [
     "ApprovalRequest",
     "ApprovalResponse",
+    "AuditLogEntry",
     "Check",
     "CompletionContract",
     "ExecutionConfig",
