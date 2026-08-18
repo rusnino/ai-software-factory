@@ -315,11 +315,13 @@ class PolicyEngine:
 
         # 3. Forbidden path enforcement: any input or deliverable that the task
         #    explicitly touches must not be inside a path forbidden by the
-        #    project profile. Exact matches are also rejected.
+        #    project profile or by the task contract itself. Exact matches are
+        #    also rejected.
         touched_paths = set(contract.inputs + contract.deliverables)
-        conflicts = _forbidden_path_conflicts(
-            touched_paths, profile.security.forbidden_paths
+        forbidden_paths = list(
+            set(profile.security.forbidden_paths) | set(contract.forbidden_paths)
         )
+        conflicts = _forbidden_path_conflicts(touched_paths, forbidden_paths)
         for path in sorted(conflicts):
             violations.append(f"Task touches forbidden path: {path}")
 

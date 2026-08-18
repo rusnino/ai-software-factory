@@ -243,6 +243,24 @@ class TestPolicyEngineRejections:
             for v in result.violations
         )
 
+    def test_contract_forbidden_paths_enforced_when_profile_empty(self) -> None:
+        # GAP-074: a contract that forbids its own inputs/deliverables must be
+        # rejected even when the project profile has no forbidden paths.
+        contract = _make_contract(
+            forbidden_paths=["/etc/shadow"],
+            inputs=["/etc/shadow", "README.md"],
+            deliverables=["src/feature.py"],
+        )
+        profile = _make_profile(forbidden_paths=[])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path: /etc/shadow" in v
+            for v in result.violations
+        )
+
 
 class TestPolicyEngineCompletionContractShellAllowlist:
     def test_safe_completion_contract_command_passes(self) -> None:

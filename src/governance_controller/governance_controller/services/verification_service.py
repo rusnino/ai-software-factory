@@ -131,28 +131,35 @@ class VerificationService:
                 )
                 # Optional checks do not fail the overall verification.
 
-            # Forbidden path check driven by the completion contract.
-            forbidden_paths = completion.forbidden_path_check.paths
-            forbidden_touches = {
-                p
-                for p in touched_paths
-                if any(
-                    cls._is_prefixed_by(p, forbidden)
-                    for forbidden in forbidden_paths
-                )
-            }
-            if forbidden_touches:
-                passed = False
-                checks.append(
-                    {
-                        "name": "forbidden_paths",
-                        "status": "failed",
-                        "detail": sorted(forbidden_touches),
-                    }
-                )
-            else:
-                checks.append({"name": "forbidden_paths", "status": "passed"})
+        # Forbidden path check: merge task-level forbidden_paths with those from
+        # the CompletionContract (when present). SPEC-03 treats these as the
+        # canonical pairing, so the task-level list is always enforced.
+        forbidden_paths: list[str] = list(contract.forbidden_paths)
+        if completion is not None:
+            forbidden_paths = list(
+                set(forbidden_paths) | set(completion.forbidden_path_check.paths)
+            )
+        forbidden_touches = {
+            p
+            for p in touched_paths
+            if any(
+                cls._is_prefixed_by(p, forbidden)
+                for forbidden in forbidden_paths
+            )
+        }
+        if forbidden_touches:
+            passed = False
+            checks.append(
+                {
+                    "name": "forbidden_paths",
+                    "status": "failed",
+                    "detail": sorted(forbidden_touches),
+                }
+            )
+        else:
+            checks.append({"name": "forbidden_paths", "status": "passed"})
 
+        if completion is not None:
             # Scope check: treat forbidden/allowed paths as prefixes.
             scope_forbidden = completion.scope_check.forbidden_paths
             scope_conflicts = {
@@ -174,29 +181,6 @@ class VerificationService:
                 )
             else:
                 checks.append({"name": "scope", "status": "passed"})
-        else:
-            # Without a CompletionContract, run the contract-level forbidden_paths
-            # static check directly. The proposer-supplied list is used verbatim.
-            forbidden_paths = contract.forbidden_paths
-            forbidden_touches = {
-                p
-                for p in touched_paths
-                if any(
-                    cls._is_prefixed_by(p, forbidden)
-                    for forbidden in forbidden_paths
-                )
-            }
-            if forbidden_touches:
-                passed = False
-                checks.append(
-                    {
-                        "name": "forbidden_paths",
-                        "status": "failed",
-                        "detail": sorted(forbidden_touches),
-                    }
-                )
-            else:
-                checks.append({"name": "forbidden_paths", "status": "passed"})
 
         return {
             "contract_id": contract.task_id,
