@@ -2,45 +2,56 @@
 
 ## Current State
 
-**Phase 1 is not done.** A fourth, fresh review (`reviews/REVIEW-004-full-codebase-review.md`) found a
-`CRITICAL` gap: `session.commit()` is never called anywhere in `governance_controller`, so no `Task`,
-`Approval`, or `AuditLog` row survives past the HTTP request that created it against real PostgreSQL —
-tests didn't catch this because the test fixture shares one already-open transaction across all requests.
-This alone means the Controller does not yet durably store anything, contradicting SPEC-03 §3.1/§3.8 and
-`AGENTS.md`'s "Governance Controller is authoritative." REVIEW-004 also found several `HIGH` gaps (a
-concurrent-approval race that can double-trigger macro-agent execution; `PolicyEngine` never validates
-`CompletionContract.command` content against SPEC-08's forbidden operations; the Telegram adapter has no
-webhook auth and hardcodes `actor`; `EventBridge` has no idempotency/replay protection per SPEC-05 §5.4) plus
-many `MEDIUM`/`LOW` items — all tracked as `GAP-022` through `GAP-042` in `reviews/GAPS.md`. **Do not treat
-the "134 passed, ruff clean" test status below as evidence of production readiness** — see GAP-022 for why.
+**Phase 1 is complete.** All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
+`reviews/REVIEW-004-full-codebase-review.md` (and its predecessors) are now `CLOSED` in
+`reviews/GAPS.md`.
 
-Test status: **134 passed**, ruff clean (this is real, just not sufficient — see above).
+Key fixes since REVIEW-004:
+
+- `GAP-022` (CRITICAL): `get_db()` now commits per-request DB sessions on success and rolls back on
+  exception, so writes survive against real PostgreSQL.
+- `GAP-023` (HIGH): `ApprovalService` locks the `Task` row with `SELECT ... FOR UPDATE` and uses an
+  optimistic `version` guard to prevent concurrent approvals from double-triggering macro-agent runs.
+- `GAP-024` (HIGH): `PolicyEngine` validates `CompletionContract.command` against a shell-allowlist and
+  the contract's own `destructive_shell`/`uses_docker_socket` flags; `TaskContract.verification` is now
+  wired into `VerificationService`.
+- `GAP-025` (HIGH): `TelegramAdapter` validates the `X-Telegram-Bot-Api-Secret-Token` header and derives
+  `actor` from the sender's username/id.
+- `GAP-026` (HIGH): `EventBridge` deduplicates events keyed on
+  `(task_id, event_type, event_timestamp, event_id)` per SPEC-05 §5.4.
+- `GAP-020` (HIGH), `GAP-021`, `GAP-028`–`GAP-034`, `GAP-038`, `GAP-040` are also closed — see
+  `reviews/GAPS.md` for the full ledger.
+
+Test status: **142 passed**, `ruff` clean, `mypy --strict` clean.
 
 Implemented components:
 
 - FastAPI application with `POST /tasks`, `POST /approvals`, `GET /health`, `GET /tasks/{id}`,
   `GET /executions/{id}`, and `GET /tasks/{task_id}/audit-log`.
-- SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`.
+- SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`, `ProcessedEvent`.
 - Deterministic state machine covering `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
 - Embedded Policy Engine validating task contracts, project profiles, harness allowlist,
-  forbidden paths (with path-prefix matching), security posture, git settings, and approval chain.
+  forbidden paths (with path-prefix matching), security posture, git settings, approval chain, and
+  `CompletionContract` shell-command allowlisting.
 - Append-only `AuditService` wired into task/profile creation, approvals, state transitions,
   execution starts, macro-agent events, and verification results.
 - `PermissionService` wired into `ApprovalService` to reject self-approval and system/agent actors.
 - `ApprovalService` as the single convergence point for all approvals, with `Idempotency-Key`
   header support and key-based deduplication.
 - Plane Adapter interface + in-memory stub.
-- Harness Provider Registry with OpenCode and Claude Code metadata.
-- macro-agent executor abstraction (`MacroAgentClient`, `MacroAgentExecutor`) and `Execution` model.
+- Harness Provider Registry with OpenCode and Claude Code metadata, including per-harness `allowed_roles`
+  aligned with SPEC-06 §6.2.
+- macro-agent executor abstraction (`MacroAgentClient`, `MacroAgentExecutor`) and `Execution` model,
+  with explicit configurable HTTP timeout and outbound traceability metadata per SPEC-05 §5.7.
 - Automatic execution trigger after `EXECUTION` approval, with `READY → RUNNING` transition.
 - opentasks materialization stub with DAG validation.
 - In-process macro-agent Event Bridge translating workspace events into Controller state updates;
-  `landing:completed` triggers `VerificationService` and gates `AGENT_REVIEW → HUMAN_REVIEW`.
-- Dockerfile and Docker Compose for local API + PostgreSQL.
+  `landing:completed` triggers `VerificationService` and gates `AGENT_REVIEW → HUMAN_REVIEW`, with
+  event-level idempotency.
+- Dockerfile and Docker Compose for local API + PostgreSQL; image runs as non-root `controller` user.
 - CLI (`approve`) and Telegram adapter stubs converging on `POST /approvals`.
-- Verification service executes `CompletionContract` `required`/`optional` shell commands, compares
-  exit codes, and performs forbidden-path/scope checks.
-- Git-cascade landing stub with branch validation.
+- Verification service executes `CompletionContract`/`TaskContract.verification` `required`/`optional`
+  shell commands, compares exit codes, and performs forbidden-path/scope checks.
 - End-to-end Phase 1 smoke test.
 
 ## Phase 1 Stop Conditions
