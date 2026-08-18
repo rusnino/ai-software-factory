@@ -163,6 +163,44 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
     return not local_violations, local_violations
 
 
+def _validate_command_against_profile(
+    command: str,
+    profile: ProjectProfile,
+) -> list[str]:
+    """Validate a single command and cross-check inferred capabilities.
+
+    Applies ``_normalize_and_validate_command`` plus docker-socket and
+    destructive-shell profile cross-checks, mirroring the enforcement used
+    for CompletionContract commands.
+    """
+    violations: list[str] = []
+    ok, check_violations = _normalize_and_validate_command(command)
+    if not ok:
+        violations.extend(check_violations)
+        return violations
+
+    # Cross-check inferred docker-socket usage against profile.
+    if _has_forbidden_substrings(
+        command, _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
+    ) and profile.security.docker_socket == "deny":
+        violations.append(
+            "Command references docker socket but profile denies "
+            f"docker_socket: {command!r}"
+        )
+
+    # Cross-check inferred destructive shell usage against profile.
+    if (
+        _is_destructive_command(command)
+        and profile.security.destructive_shell == "deny"
+    ):
+        violations.append(
+            "Command is destructive but profile denies "
+            f"destructive_shell: {command!r}"
+        )
+
+    return violations
+
+
 def _validate_completion_contract_commands(
     contract: TaskContract,
     profile: ProjectProfile,
@@ -178,28 +216,33 @@ def _validate_completion_contract_commands(
         return violations
 
     for check in list(completion.required) + list(completion.optional):
-        ok, check_violations = _normalize_and_validate_command(check.command)
-        if not ok:
-            violations.extend(check_violations)
-            continue
+        violations.extend(_validate_command_against_profile(check.command, profile))
 
-        # Cross-check inferred docker-socket usage against profile.
-        if _has_forbidden_substrings(
-            check.command, _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
-        ) and profile.security.docker_socket == "deny":
-            violations.append(
-                "Command references docker socket but profile denies "
-                f"docker_socket: {check.command!r}"
-            )
+    return violations
 
-        # Cross-check inferred destructive shell usage against profile.
-        if (
-            _is_destructive_command(check.command)
-            and profile.security.destructive_shell == "deny"
-        ):
-            violations.append(
-                "Command is destructive but profile denies "
-                f"destructive_shell: {check.command!r}"
+
+def _validate_verification_commands(
+    contract: TaskContract,
+    profile: ProjectProfile,
+) -> list[str]:
+    """Validate ``TaskContract.verification["commands"]`` for shell patterns.
+
+    These commands are merged with CompletionContract checks at verification
+    execution time, so they must pass the same policy gates before approval.
+    """
+    violations: list[str] = []
+    verification = contract.verification
+    if not verification:
+        return violations
+
+    commands = verification.get("commands", [])
+    if not isinstance(commands, list):
+        return violations
+
+    for command in commands:
+        if isinstance(command, str):
+            violations.extend(
+                _validate_command_against_profile(command, profile)
             )
 
     return violations
@@ -288,6 +331,11 @@ class PolicyEngine:
         #    to run during verification must be reviewed for forbidden tokens
         #    and destructive operations.
         violations.extend(_validate_completion_contract_commands(contract, profile))
+
+        # 5b. TaskContract.verification commands allowlist. These commands are
+        #     merged with CompletionContract checks by VerificationService, so
+        #     they are subject to the same policy gates.
+        violations.extend(_validate_verification_commands(contract, profile))
 
         # 6. Approval type-driven checks.
         cls._check_approval_type_rules(contract, profile, approval_type, violations)

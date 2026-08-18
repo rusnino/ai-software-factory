@@ -20,6 +20,7 @@ def _make_contract(
     completion_contract: CompletionContract | None = None,
     uses_docker_socket: bool = False,
     destructive_shell: bool = False,
+    verification: dict | None = None,
 ) -> TaskContract:
     data: dict = {
         "task_id": "task-1",
@@ -43,6 +44,8 @@ def _make_contract(
         data["deliverables"] = deliverables
     if completion_contract is not None:
         data["completion_contract"] = completion_contract
+    if verification is not None:
+        data["verification"] = verification
     return TaskContract(**data)
 
 
@@ -351,6 +354,79 @@ class TestPolicyEngineCompletionContractShellAllowlist:
                 required=[Check(type="cleanup", command="rm -r /tmp/build")],
                 scope_check=ScopeCheck(description="cleanup check"),
             )
+        )
+        profile = _make_profile(destructive_shell="allow")
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+
+
+class TestPolicyEngineVerificationCommandsAllowlist:
+    def test_safe_verification_command_passes(self) -> None:
+        contract = _make_contract(
+            verification={"commands": ["uv run pytest -q"]}
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+
+    def test_malicious_verification_command_rejected(self) -> None:
+        contract = _make_contract(
+            verification={"commands": ["echo ok; rm -rf /"]},
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "forbidden shell token" in v or "destructive shell" in v
+            for v in result.violations
+        )
+
+    def test_verification_sudo_command_rejected(self) -> None:
+        contract = _make_contract(
+            verification={"commands": ["sudo apt update"]},
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("privilege escalation" in v for v in result.violations)
+
+    def test_verification_docker_socket_command_rejected_when_denied(self) -> None:
+        contract = _make_contract(
+            verification={
+                "commands": ["docker -H unix:///var/run/docker.sock ps"]
+            },
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("docker socket" in v for v in result.violations)
+
+    def test_verification_destructive_command_rejected_when_denied(self) -> None:
+        contract = _make_contract(
+            verification={"commands": ["rm -rf /tmp/build"]},
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive" in v for v in result.violations)
+
+    def test_verification_commands_may_be_allowed_by_profile(self) -> None:
+        # A destructive verification command is allowed when the project profile
+        # explicitly permits destructive shell operations.
+        contract = _make_contract(
+            verification={"commands": ["rm -r /tmp/build"]},
         )
         profile = _make_profile(destructive_shell="allow")
 
