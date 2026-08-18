@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from governance_controller.schemas.completion_contract import CompletionContract
+
 
 class ExecutionConfig(BaseModel):
     team: str = "default"
@@ -25,3 +27,4 @@ class TaskContract(BaseModel):
     verification: dict[str, Any] = {}
     forbidden_paths: list[str] = []
     approval_required: bool = True
+    completion_contract: CompletionContract | None = None
