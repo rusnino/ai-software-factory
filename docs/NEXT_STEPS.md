@@ -2,13 +2,23 @@
 
 ## Current State
 
-**`reviews/GAPS.md` has no open gaps at any severity.** `GAP-056` is now closed with regression tests that directly exercise each of the three `_trigger_execution` commit-before-raise branches.
+**REVIEW-013 (a full fresh review, not just re-verification of prior findings) found 1 new `CRITICAL` and 4 new `HIGH` gaps still open — Phase 1 acceptance criteria are not currently met.** Per `reviews/GAPS.md`'s gate rule, this blocks any claim of Phase 1 completeness until they're closed:
 
-Test status: **175 passed**, `ruff` clean, `mypy --strict` clean.
+- `GAP-057` (CRITICAL): `PolicyEngine` and `VerificationService`'s forbidden-path checks don't normalize `..` traversal, so a path like `src/../../.ssh/id_rsa` bypasses both the pre-approval policy gate and the post-execution verification gate.
+- `GAP-058` (HIGH): `VerificationService.verify_and_advance()`'s CAS-failure branch raises without committing first — the same defect class `GAP-044` fixed in `approval_service.py`, unfixed in this sibling file.
+- `GAP-059` (HIGH): `PolicyEngine` never checks `TaskContract.execution.timeout_minutes`/`max_retries` against `ProjectProfile.execution.timeout_minutes`.
+- `GAP-060` (HIGH): `POST /tasks` leaks an unhandled 500 (raw `IntegrityError`) on a duplicate `task_id` instead of `409 Conflict`.
+- `GAP-061` (HIGH): `uvicorn` is the Dockerfile's `CMD` but is absent from `pyproject.toml`/`uv.lock` — `docker compose up`'s API container cannot start. Live-reproduced.
+
+See `reviews/REVIEW-013-full-fresh-review.md` for full detail, live-reproduction evidence, and the remaining `MEDIUM`/`LOW` findings (unauthenticated/unbounded `POST /events` ingestion, orphaned `opentasks_service.py`, and others).
+
+`GAP-031` has been corrected to `CLOSED` in this round — its originally-reported data-loss defect was fixed by `GAP-044`'s commit (`3e93928`), confirmed independently by three reviewers; the ledger status was simply never updated. A distinct residual (uncaught `RuntimeError` from executor-start failure still surfaces as a bare 500) is now tracked separately as `GAP-064`.
+
+Test status: **175 passed**, `ruff` clean, `mypy --strict` clean. (Tooling is clean; none of the new findings are tooling-detectable — they require live reproduction or manual code reading.)
 
 Implemented components:
 
-- FastAPI application with `POST /tasks`, `POST /approvals`, `GET /health`, `GET /tasks/{id}`,
+- FastAPI application with `POST /tasks`, `POST /approvals`, `POST /events`, `GET /health`, `GET /tasks/{id}`,
   `GET /executions/{id}`, and `GET /tasks/{task_id}/audit-log`.
 - SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`, `ProcessedEvent`.
 - Deterministic state machine covering `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
