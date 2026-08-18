@@ -19,7 +19,11 @@ class StateMachine:
             TaskState.BLOCKED,
             TaskState.FAILED,
         },
-        TaskState.AGENT_REVIEW: {TaskState.HUMAN_REVIEW, TaskState.FAILED},
+        TaskState.AGENT_REVIEW: {
+            TaskState.HUMAN_REVIEW,
+            TaskState.BLOCKED,
+            TaskState.FAILED,
+        },
         TaskState.HUMAN_REVIEW: {
             TaskState.DONE,
             TaskState.FAILED,

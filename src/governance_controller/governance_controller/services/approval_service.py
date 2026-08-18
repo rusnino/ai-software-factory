@@ -232,6 +232,20 @@ class ApprovalService:
 
         await AuditService.log(
             db=self.db,
+            event_type="state_change",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            execution_id=execution.id,
+            payload={
+                "previous_state": TaskState.READY.value,
+                "new_state": TaskState.RUNNING.value,
+                "execution_id": execution.id,
+            },
+        )
+
+        await AuditService.log(
+            db=self.db,
             event_type="execution_start",
             task_id=task.id,
             actor=actor,
