@@ -8,7 +8,9 @@ class GitCascadeService:
     _MAX_BRANCH_LENGTH = 100
 
     @classmethod
-    def land(cls, task_id: str, branch: str, target: str = "main") -> dict:
+    def land(
+        cls, task_id: str, branch: str, target: str = "main"
+    ) -> dict[str, object]:
         return {
             "task_id": task_id,
             "branch": branch,

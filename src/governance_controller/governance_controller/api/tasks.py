@@ -4,13 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.db import get_db
+from governance_controller.models.task import Task
 from governance_controller.schemas.task import TaskCreateRequest, TaskResponse
 from governance_controller.services.task_service import TaskService
 
 router = APIRouter(tags=["tasks"])
 
 
-def _task_response(task) -> TaskResponse:
+def _task_response(task: Task) -> TaskResponse:
     return TaskResponse(
         id=task.id,
         state=task.state.value if hasattr(task.state, "value") else str(task.state),

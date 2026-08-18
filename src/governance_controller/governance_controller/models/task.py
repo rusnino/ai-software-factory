@@ -22,7 +22,7 @@ class Task(SQLModel, table=True):
     version: int = Field(default=0)
     project_id: str
     proposed_by: str
-    task_contract_json: dict = Field(
+    task_contract_json: dict[str, object] = Field(
         default_factory=dict,
         sa_column=Column("task_contract_json", JSON()),
     )

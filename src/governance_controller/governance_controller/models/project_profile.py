@@ -11,7 +11,7 @@ class ProjectProfileModel(SQLModel, table=True):
     __tablename__ = "project_profiles"
 
     project_id: str = Field(primary_key=True)
-    profile_json: dict = Field(
+    profile_json: dict[str, object] = Field(
         default_factory=dict,
         sa_column=Column("profile_json", JSON()),
     )

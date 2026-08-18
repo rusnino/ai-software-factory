@@ -18,7 +18,7 @@ async def get_task_audit_log(
     db: AsyncSession = Depends(get_db),
 ) -> list[AuditLogEntry]:
     """Return the append-only audit log for a given task."""
-    task = await db.scalar(select(Task).where(Task.id == task_id))
+    task = await db.scalar(select(Task).where(Task.id == task_id))  # type: ignore[arg-type]
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -27,8 +27,8 @@ async def get_task_audit_log(
 
     result = await db.execute(
         select(AuditLog)
-        .where(AuditLog.task_id == task_id)
-        .order_by(AuditLog.timestamp, AuditLog.id)
+        .where(AuditLog.task_id == task_id)  # type: ignore[arg-type]
+        .order_by(AuditLog.timestamp, AuditLog.id)  # type: ignore[arg-type]
     )
     entries = result.scalars().all()
 

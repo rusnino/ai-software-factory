@@ -1,7 +1,7 @@
 """Translate macro-agent workspace events into Controller state updates."""
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -83,7 +83,7 @@ class EventBridge:
                 select(ProcessedEvent).where(
                     ProcessedEvent.task_id == task_id,
                     ProcessedEvent.event_type == event_type,
-                    ProcessedEvent.event_timestamp == event_timestamp,
+                    ProcessedEvent.event_timestamp == event_timestamp,  # type: ignore[arg-type]
                     ProcessedEvent.event_id == event_id,
                 )
             )
@@ -141,7 +141,9 @@ class EventBridge:
             and task.task_contract_json
         ):
             verifier = verification_service or VerificationService()
-            contract = TaskContract(**task.task_contract_json)
+            contract = TaskContract(
+                **cast(dict[str, Any], task.task_contract_json)
+            )
             await verifier.verify_and_advance(db, task, contract)
 
         # Record the event as processed before applying state changes or
@@ -215,10 +217,10 @@ class EventBridge:
             # alive after a duplicate is handled by the caller.
             existing = await db.execute(
                 select(ProcessedEvent).where(
-                    ProcessedEvent.task_id == task_id,
-                    ProcessedEvent.event_type == event_type,
-                    ProcessedEvent.event_timestamp == event_timestamp,
-                    ProcessedEvent.event_id == event_id,
+                    ProcessedEvent.task_id == task_id,  # type: ignore[arg-type]
+                    ProcessedEvent.event_type == event_type,  # type: ignore[arg-type]
+                    ProcessedEvent.event_timestamp == event_timestamp,  # type: ignore[arg-type]
+                    ProcessedEvent.event_id == event_id,  # type: ignore[arg-type]
                 )
             )
             if existing.scalar_one_or_none() is None:

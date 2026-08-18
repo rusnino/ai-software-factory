@@ -17,8 +17,10 @@ class HealthResponse(BaseModel):
     version: str = "0.1.0"
 
 
-@router.get("/health")
-async def health_check(db: AsyncSession = Depends(get_db)) -> HealthResponse:
+@router.get("/health", response_model=None)
+async def health_check(
+    db: AsyncSession = Depends(get_db),
+) -> HealthResponse | JSONResponse:
     """Return API and database connectivity status."""
     try:
         await db.execute(text("select 1"))

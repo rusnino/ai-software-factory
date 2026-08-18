@@ -23,7 +23,7 @@ class VerificationService:
     """Execute completion-contract checks and drive the AGENT_REVIEW gate."""
 
     @staticmethod
-    async def _run_check(check: Check) -> dict:
+    async def _run_check(check: Check) -> dict[str, object]:
         """Run a single Check command and return a result dict."""
         proc = await asyncio.create_subprocess_shell(
             check.command,
@@ -34,7 +34,7 @@ class VerificationService:
         actual_exit = proc.returncode or 0
         status = "passed" if actual_exit == check.expect_exit else "failed"
 
-        result: dict = {
+        result: dict[str, object] = {
             "name": f"required:{check.type}",
             "status": status,
             "command": check.command,
@@ -79,7 +79,7 @@ class VerificationService:
     async def verify_execution(
         cls,
         contract: TaskContract,
-    ) -> dict:
+    ) -> dict[str, object]:
         """Run all verification checks for *contract* and return a report.
 
         If a CompletionContract is present, required/optional commands are
@@ -92,7 +92,7 @@ class VerificationService:
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
         """
-        checks: list[dict] = []
+        checks: list[dict[str, object]] = []
         passed = True
 
         completion = contract.completion_contract
@@ -196,7 +196,7 @@ class VerificationService:
         db: AsyncSession,
         task: Task,
         contract: TaskContract,
-    ) -> dict:
+    ) -> dict[str, object]:
         """Verify *contract* and advance *task* out of ``AGENT_REVIEW``.
 
         The task must already be in ``AGENT_REVIEW``. On success it transitions

@@ -10,6 +10,7 @@ that unauthenticated updates cannot reach ``POST /approvals``.
 """
 
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import httpx
 
@@ -51,7 +52,7 @@ class TelegramAdapter:
             raise TelegramWebhookAuthError("Invalid or missing Telegram secret token")
 
     @staticmethod
-    def derive_actor(message: dict) -> str:
+    def derive_actor(message: dict[str, Any]) -> str:
         """Derive an actor identifier from a Telegram ``message.from`` dict.
 
         Prefer the human-readable ``username``; fall back to the numeric
@@ -59,7 +60,7 @@ class TelegramAdapter:
         set. The literal ``telegram-user`` fallback remains only for payloads
         that contain no ``from`` field.
         """
-        sender = message.get("from", {})
+        sender = cast(dict[str, Any], message.get("from", {}))
         username = sender.get("username")
         if username and isinstance(username, str):
             return f"telegram:{username}"
@@ -70,15 +71,15 @@ class TelegramAdapter:
 
     async def process_update(
         self,
-        update: dict,
+        update: dict[str, Any],
         *,
         secret_token_header: str | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Process a Telegram update and return a status dict."""
         self.authenticate_update(secret_token_header=secret_token_header)
 
-        message = update.get("message", {})
-        text = message.get("text", "")
+        message = cast(dict[str, Any], update.get("message", {}) or {})
+        text = cast(str, message.get("text", "") or "")
 
         if not text.startswith("/approve"):
             return {"status": "ignored"}

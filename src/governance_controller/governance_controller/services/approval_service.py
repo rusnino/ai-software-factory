@@ -141,7 +141,9 @@ class ApprovalService:
         # 2. Idempotency: return existing task state if this exact key was
         #    already processed.
         existing = await self.db.scalar(
-            select(Approval).where(Approval.idempotency_key == idempotency_key)
+            select(Approval).where(
+                Approval.idempotency_key == idempotency_key  # type: ignore[arg-type]
+            )
         )
         if existing is not None:
             await AuditService.log(
@@ -162,7 +164,7 @@ class ApprovalService:
         # 3. Refetch the task version under the row lock (if the caller passed
         #    a detached task) and confirm it hasn't changed since they read it.
         locked_task = await self.db.scalar(
-            select(Task).where(Task.id == task.id).with_for_update()
+            select(Task).where(Task.id == task.id).with_for_update()  # type: ignore[arg-type]
         )
         if locked_task is None:
             raise ValueError(f"Task {task.id} not found")

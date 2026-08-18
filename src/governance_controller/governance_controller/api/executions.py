@@ -18,7 +18,7 @@ async def get_execution(
 ) -> ExecutionResponse:
     """Return an execution by its primary key."""
     execution = await db.scalar(
-        select(Execution).where(Execution.id == execution_id)
+        select(Execution).where(Execution.id == execution_id)  # type: ignore[arg-type]
     )
     if execution is None:
         raise HTTPException(
