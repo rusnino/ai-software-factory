@@ -24,21 +24,27 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 
 ### Phase 1 Acceptance Criteria
 
-- [ ] Controller stores task independently of macro-agent.
-- [ ] Task cannot execute without durable human approval.
-- [ ] Controller starts macro-agent only after policy check.
-- [ ] Controller correlates its execution ID with macro-agent run/team IDs.
-- [ ] At least two distinct agent harnesses participate in one execution.
-- [ ] OpenCode is tested unless documented ACP blocker.
-- [ ] Per-role harness selection is configuration-driven.
-- [ ] Required macro-agent MCP tools work from non-Claude harness.
-- [ ] git-cascade worktree/stream flow works.
-- [ ] Agent messaging works where topology needs it.
-- [ ] Reviewer can issue a verdict.
-- [ ] Failed verification never produces DONE.
-- [ ] Human review required before final DONE/merge.
-- [ ] Phase 1 has no runtime dependency on Plane or Macro UI (E2E acceptance uses direct `POST /approvals` calls, not Plane webhooks).
-- [ ] Governance logic remains outside macro-agent fork.
+- [x] Controller stores task independently of macro-agent.
+- [x] Task cannot execute without durable human approval.
+- [x] Controller starts macro-agent only after policy check.
+- [x] Controller correlates its execution ID with macro-agent run/team IDs.
+- [ ] At least two distinct agent harnesses participate in one execution. [^phase1-harnesses]
+- [ ] OpenCode is tested unless documented ACP blocker. [^phase1-harnesses]
+- [ ] Per-role harness selection is configuration-driven. [^phase1-harnesses]
+- [ ] Required macro-agent MCP tools work from non-Claude harness. [^phase1-mcp]
+- [ ] git-cascade worktree/stream flow works. [^phase1-git-cascade]
+- [ ] Agent messaging works where topology needs it. [^phase1-messaging]
+- [ ] Reviewer can issue a verdict. [^phase1-reviewer]
+- [x] Failed verification never produces DONE.
+- [x] Human review required before final DONE/merge.
+- [x] Phase 1 has no runtime dependency on Plane or Macro UI (E2E acceptance uses direct `POST /approvals` calls, not Plane webhooks).
+- [x] Governance logic remains outside macro-agent fork.
+
+[^phase1-harnesses]: Phase 1 PoC registers OpenCode and Claude Code in the provider registry, but real multi-harness execution and per-role selection require macro-agent runtime integration planned for Phase 2.
+[^phase1-mcp]: OpenCode ACP/MCP compatibility with macro-agent tools is a documented Phase 1 stop-condition risk; no invasive testing was performed and no blocker was encountered for the stub path.
+[^phase1-git-cascade]: A deterministic landing stub with branch validation exists. Real git worktree/stream flow and cascade landing require git integration deferred to Phase 2/3.
+[^phase1-messaging]: Agent messaging is out of scope for the Phase 1 Governance Controller PoC; handled by macro-agent runtime.
+[^phase1-reviewer]: Reviewer verdict workflow is deferred to Phase 3 (Semantic Reviewer). Phase 1 enforces HUMAN_REVIEW gate before DONE.
 
 ### Stop Condition
 
