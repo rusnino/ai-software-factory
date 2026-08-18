@@ -2,11 +2,16 @@
 
 ## Current State
 
-Phase 1 Governance Controller is **complete and fully tested** in `src/governance_controller/`.
+Phase 1 Governance Controller implementation in `src/governance_controller/` passes its test suite
+(116 passed, ruff clean), but an independent review found 2 `CRITICAL` and 6 `HIGH` severity gaps against
+`SPEC-03`/`AGENTS.md` — including self-approval prevention being unenforced and an inverted forbidden-path
+check in the Policy Engine — so **Phase 1 is not yet done** per `AGENTS.md`'s gap-tracking gate rule. See
+`reviews/REVIEW-001-phase-1-governance-controller.md` for the full findings and `reviews/GAPS.md` for the
+tracked, closeable list. Do not start Phase 2 work until the `CRITICAL`/`HIGH` rows there are `CLOSED`.
 
 Implemented components:
 
-- FastAPI application with `POST /tasks`, `POST /approvals`, `GET /health`, `GET /tasks/{id}`, `GET /executions/{id}` (stub), and audit-log endpoint.
+- FastAPI application with `POST /tasks`, `POST /approvals`, `GET /health`, `GET /tasks/{id}`, `GET /executions/{id}` (stub; always returns 501, see `GAP-010`). No audit-log HTTP endpoint exists yet — audit records are DB-only via `AuditService` (`GAP-011`).
 - SQLModel async PostgreSQL models: `Task`, `Execution`, `Approval`, `AuditLog`.
 - Deterministic state machine covering `PROPOSED → PLAN_APPROVED → EXEC_APPROVED → READY → RUNNING → AGENT_REVIEW → HUMAN_REVIEW → DONE / FAILED / BLOCKED`.
 - Embedded Policy Engine validating task contracts, project profiles, harness allowlist, and approval chain.
@@ -53,7 +58,8 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Evaluate Firecracker / Kata for Phase 3.
 
 6. **Security hardening**
-   - Wire `PermissionService` into `ApprovalService`/API.
+   - Wire `PermissionService` into `ApprovalService`/API — **note: this is `GAP-001` (CRITICAL)**, a
+     Phase 1 blocker per `reviews/GAPS.md`, not optional Phase 2 hardening.
    - Authentication/authorization middleware.
    - Secret injection via environment or vault, never in prompts/YAML.
 

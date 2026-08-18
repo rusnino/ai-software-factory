@@ -39,6 +39,7 @@ Git + CI + Reviewer + Human Review → Done
 | `decisions/` | Architecture Decision Records |
 | `requirements/` | Requirements traceability matrix |
 | `docs/` | Supporting docs, diagrams, deferred-risk notes |
+| `reviews/` | Review findings (`REVIEW-NNN-*.md`) and the cross-review gap ledger (`GAPS.md`) — see `AGENTS.md` § Review Findings and Gap Tracking |
 | `src/` | *(future)* Application source code |
 | `tests/` | *(future)* Tests |
 | `tmp/` | Generated archives, diagrams, scratch files (ignored by git) |

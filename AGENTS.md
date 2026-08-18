@@ -86,6 +86,16 @@ Stop Phase 1 and document a blocker if:
 - When adding risk items, keep `requirements/REQUIREMENTS.md` synchronized.
 - Update `docs/NEXT_STEPS.md` when finishing or reprioritizing work.
 
+## Review Findings and Gap Tracking
+
+Any agent that reviews another agent's work (code review, spec-conformance review, security review) — whether asked to by a human or as a self-check before declaring something done — follows this convention so findings survive across agent sessions instead of living only in one session's chat history:
+
+- Write the full findings to `reviews/REVIEW-NNN-<slug>.md`, numbered sequentially like `decisions/ADR-NNN-*.md`. A review file is a point-in-time record: once written, don't edit it after the fact — if a later review revisits the same code, write a new `REVIEW-NNN` file and reference the earlier one.
+- Every finding, regardless of severity, gets one row in `reviews/GAPS.md` — the single running ledger across all reviews — with a stable `GAP-NNN` id, severity, one-line summary, source review, and status.
+- Whichever agent closes a gap (fixes the bug, wires up the missing enforcement, etc.) updates that row's status to `CLOSED` with the closing commit hash. Never delete a row — a closed row is proof the gap was found and fixed, not just forgotten.
+- **A phase may not be declared "complete" in `docs/NEXT_STEPS.md` or have its checklist ticked in `specs/SPEC-10-phase-plan.md` while any `CRITICAL` or `HIGH` gap tied to that phase is still `OPEN` in `reviews/GAPS.md`.** This is the Verification Rule below, applied to review findings specifically, not a separate exception to it.
+- `reviews/GAPS.md` is an inter-agent workflow ledger, not the Governance Controller's own audit log (SPEC-03 §3.8) — do not conflate the two. It tracks the humans'/agents' review-and-fix workflow around this repo; it has no runtime effect on the Controller itself.
+
 ## Verification Rule
 
 Every significant code change must be accompanied by tests or a clear explanation why tests are not yet feasible. Failed verification must never produce `DONE`.
