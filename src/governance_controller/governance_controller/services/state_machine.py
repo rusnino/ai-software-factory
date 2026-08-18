@@ -27,7 +27,6 @@ class StateMachine:
         TaskState.HUMAN_REVIEW: {
             TaskState.DONE,
             TaskState.FAILED,
-            TaskState.RUNNING,
         },
         TaskState.BLOCKED: {TaskState.RUNNING, TaskState.FAILED},
         TaskState.FAILED: set(),
