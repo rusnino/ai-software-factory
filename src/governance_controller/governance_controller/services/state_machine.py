@@ -32,10 +32,12 @@ class StateMachine:
             TaskState.FAILED,
         },
         TaskState.BLOCKED: {TaskState.RUNNING, TaskState.FAILED},
-        # Failed verification may return to RUNNING for retry per SPEC-09 §9.6.
-        TaskState.FAILED: {TaskState.RUNNING},
+        TaskState.FAILED: set(),
         TaskState.DONE: set(),
     }
+    # Retry after a failed verification is intentionally NOT in the global
+    # transition table. It is scoped to VerificationService so that arbitrary
+    # macro-agent events cannot resurrect a terminal FAILED task.
 
     @classmethod
     def _validate(cls, current_state: TaskState, target_state: TaskState) -> None:
@@ -132,14 +134,63 @@ class StateMachine:
         return False
 
     @classmethod
+    async def atomic_transition_from_failed_to_running(
+        cls,
+        db: AsyncSession,
+        task: Task,
+        execution_attempts: int,
+    ) -> bool:
+        """Scoped retry transition: FAILED -> RUNNING with execution_attempts.
+
+        This is intentionally separate from the generic transition table so
+        that only the verification-retry path can resurrect a terminal FAILED
+        task. The WHERE clause checks the pre-state is FAILED explicitly.
+        """
+        if task.state is not TaskState.FAILED:
+            return False
+
+        result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == task.version,  # type: ignore[arg-type]
+                Task.state == TaskState.FAILED.value,  # type: ignore[arg-type]
+            )
+            .values(
+                state=TaskState.RUNNING.value,
+                version=task.version + 1,
+                execution_attempts=execution_attempts,
+                updated_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount:  # type: ignore[attr-defined]
+            task.state = TaskState.RUNNING
+            task.version = task.version + 1
+            task.execution_attempts = execution_attempts
+            task.updated_at = datetime.now(UTC)
+            return True
+        return False
+
+    @classmethod
     async def atomic_transition_with_fields(
         cls,
         db: AsyncSession,
         task: Task,
         target_state: TaskState,
+        allowed_from_states: set[TaskState] | None = None,
         **field_values: object,
     ) -> bool:
-        """Atomically transition *task* and update additional fields in one UPDATE."""
+        """Atomically transition *task* and update additional fields in one UPDATE.
+
+        ``allowed_from_states`` optionally restricts the pre-state to a subset
+        of the global transition table. This is used by the verification retry
+        path so that ``FAILED -> RUNNING`` is allowed only from the scoped
+        retry call site, not from generic callers.
+        """
+        if allowed_from_states is not None and task.state not in allowed_from_states:
+            return False
+
         try:
             cls._validate(task.state, target_state)
         except ValueError:

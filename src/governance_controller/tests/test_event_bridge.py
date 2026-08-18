@@ -17,6 +17,7 @@ from governance_controller.schemas import (
     ScopeCheck,
 )
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.verification_service import VerificationService
 
 
 def _make_event(
@@ -404,6 +405,113 @@ class TestEventBridgeTransitions:
             for c in verification_failed.payload["checks"]
         }
         assert checks["required:always_fail"]["status"] == "failed"
+
+        # GAP-090: terminal failure must record an alert_human audit row.
+        assert any(e.event_type == "alert_human" for e in entries)
+        alert = next(e for e in entries if e.event_type == "alert_human")
+        assert alert.payload["reason"] == "max_retries_exhausted"
+
+    async def test_landing_completed_failing_contract_retries_and_starts_execution(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-085 regression: a retry actually restarts the macro-agent."""
+        from unittest.mock import AsyncMock
+
+        from governance_controller.adapters.macro_agent.executor import (
+            MacroAgentExecutor,
+        )
+
+        task = Task(
+            id="task-retry-contract",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            execution_attempts=0,
+            task_contract_json=TaskContract(
+                task_id="task-retry-contract",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Exercise retry path through EventBridge",
+                acceptance=["Task retries when required check fails"],
+                execution={"max_retries": 2},
+                completion_contract=CompletionContract(
+                    task_id="task-retry-contract",
+                    required=[
+                        Check(
+                            type="always_fail",
+                            command="exit 1",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        mock_executor = AsyncMock(spec=MacroAgentExecutor)
+        mock_executor.start.return_value = {"run_id": "retry-run-1"}
+        verifier = VerificationService(executor=mock_executor)
+
+        event = _make_event("landing:completed", task.id)
+        await EventBridge.handle(
+            db_session, event, verification_service=verifier
+        )
+
+        assert task.state == TaskState.RUNNING
+        assert task.execution_attempts == 1
+        mock_executor.start.assert_awaited_once()
+
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert any(e.event_type == "verification_failed_retry" for e in entries)
+        assert any(e.event_type == "retry_execution_start" for e in entries)
+
+        # The task should have a fresh Execution row for the retry.
+        from governance_controller.models.execution import Execution
+
+        executions = await db_session.execute(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert executions.scalar_one_or_none() is not None
+
+    async def test_terminal_failed_cannot_be_resurrected_by_running_event(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-077 regression: FAILED -> RUNNING must be scoped to retry only."""
+        task = Task(
+            id="task-terminal-failed",
+            project_id="proj-1",
+            state=TaskState.FAILED,
+            proposed_by="agent-1",
+            execution_attempts=2,
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("stream:committed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.FAILED
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert all(e.event_type == "macro_agent_stream:committed" for e in entries)
+        assert any(
+            "Invalid transition" in (e.payload.get("transition_error") or "")
+            for e in entries
+        )
 
     async def test_landing_completed_passing_completion_contract_moves_to_human_review(
         self,

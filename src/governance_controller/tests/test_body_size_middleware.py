@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from governance_controller.db import get_db
 from governance_controller.main import app
+from governance_controller.middleware import WriteBodySizeLimitMiddleware
 
 
 @pytest_asyncio.fixture
@@ -92,3 +93,51 @@ async def test_post_approvals_rejects_oversized_body_without_content_length(
     )
 
     assert response.status_code == 413
+
+
+async def test_disconnect_mid_oversized_body_does_not_spin(
+    async_client: AsyncClient,
+) -> None:
+    body = _json.dumps(
+        {"type": "x", "payload": "y" * (70 * 1024)}
+    ).encode()
+
+    # Build a generator that yields the first chunk and then a disconnect,
+    # simulating a client that abandons the stream before finishing the body.
+    async def _disconnecting_receive():
+        yield {"type": "http.request", "body": body, "more_body": True}
+        while True:
+            yield {"type": "http.disconnect"}
+
+    gen = _disconnecting_receive()
+    calls = []
+
+    async def _receive():
+        msg = await gen.asend(None)
+        calls.append(msg["type"])
+        return msg
+
+    sent: list[dict] = []
+
+    async def _send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/events",
+        "headers": [],
+    }
+
+    middleware = WriteBodySizeLimitMiddleware(app)
+    import asyncio
+
+    await asyncio.wait_for(
+        middleware(scope, _receive, _send), timeout=2.0
+    )
+
+    # We should have bailed early and never sent an HTTP response.
+    assert len(sent) == 0
+    # The drain loop should have seen the first request chunk then a disconnect
+    # and stopped, not spun forever.
+    assert calls.count("http.disconnect") >= 1

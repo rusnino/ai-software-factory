@@ -1,5 +1,7 @@
 """Approval REST API endpoint."""
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,13 +36,12 @@ def _make_idempotency_key(
     rounded = parsed.replace(microsecond=0)
     if rounded.tzinfo is None:
         rounded = rounded.replace(tzinfo=UTC)
-    components = (
-        task_id,
-        approval_type.value,
-        actor,
-        rounded.isoformat(),
-    )
-    return "|".join(components)
+    # Hash a JSON-encoded tuple so caller-controlled values cannot collide by
+    # embedding the delimiter (e.g. task_id "a|b" / actor "c" vs task_id "a" /
+    # actor "b|c"). Key length stays fixed regardless of component lengths.
+    components = (task_id, approval_type.value, actor, rounded.isoformat())
+    canonical = json.dumps(components, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @router.post("/approvals")

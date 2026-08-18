@@ -38,3 +38,18 @@ def test_log_level_reads_from_env(
     settings = Settings()
     assert settings.log_level == expected
     assert os.environ.get("GC_LOG_LEVEL") == env_value
+
+
+def test_negative_pool_size_is_rejected() -> None:
+    with pytest.raises(ValueError, match="pool settings must be non-negative"):
+        Settings(database_pool_size=-5)
+
+
+def test_negative_max_overflow_is_rejected() -> None:
+    with pytest.raises(ValueError, match="pool settings must be non-negative"):
+        Settings(database_max_overflow=-1)
+
+
+def test_unknown_log_level_is_rejected() -> None:
+    with pytest.raises(ValueError, match="unknown log level"):
+        Settings(log_level="bogus")

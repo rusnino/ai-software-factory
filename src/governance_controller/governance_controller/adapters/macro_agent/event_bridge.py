@@ -167,7 +167,20 @@ class EventBridge:
             contract = TaskContract(
                 **cast(dict[str, Any], task.task_contract_json)
             )
-            await verifier.verify_and_advance(db, task, contract)
+            # Profile is optional in Phase 1; retry execution falls back to
+            # defaults if no profile is available.
+            profile = None
+            if task.project_id:
+                from governance_controller.services.task_service import (
+                    TaskService,
+                )
+
+                profile = await TaskService(db).get_profile_by_project_id(
+                    task.project_id
+                )
+            await verifier.verify_and_advance(
+                db, task, contract, profile=profile, executor=verifier.executor
+            )
             # A verification failure with remaining retries transitions the task
             # back to RUNNING. Don't record the event as processed in that case;
             # the same landing:completed replay (if any) is harmless because the

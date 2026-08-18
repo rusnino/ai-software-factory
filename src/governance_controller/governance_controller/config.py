@@ -1,6 +1,7 @@
 """Application configuration and settings."""
 
 import structlog
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from structlog._log_levels import NAME_TO_LEVEL
 
@@ -28,6 +29,21 @@ class Settings(BaseSettings):
     # configured with a secret_token. Set to a non-empty value and route the
     # header to ``TelegramAdapter`` to validate that updates come from Telegram.
     telegram_webhook_secret_token: str = ""
+
+    @field_validator("database_pool_size", "database_max_overflow")
+    @classmethod
+    def _non_negative_pool_setting(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("pool settings must be non-negative")
+        return value
+
+    @field_validator("log_level")
+    @classmethod
+    def _known_log_level(cls, value: str) -> str:
+        normalized = value.lower()
+        if normalized not in NAME_TO_LEVEL:
+            raise ValueError(f"unknown log level: {value}")
+        return normalized
 
 
 def configure_logging(log_level: str) -> None:

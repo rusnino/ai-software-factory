@@ -9,7 +9,10 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
-from governance_controller.api.approvals import get_approval_service
+from governance_controller.api.approvals import (
+    _make_idempotency_key,
+    get_approval_service,
+)
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.db import get_db
 from governance_controller.main import app
@@ -236,6 +239,31 @@ class TestApprovalEndpoint:
 
         assert response.status_code == 503
         assert "macro-agent start failed" in response.json()["detail"]
+
+    async def test_fallback_idempotency_key_is_collision_resistant(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """GAP-087 regression: delimiter injection cannot create key collisions."""
+        from governance_controller.constants import ApprovalType
+
+        await _create_task(async_client, sample_contract, sample_profile)
+        await async_client.post(
+            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+
+        key1 = _make_idempotency_key(
+            "myid|plan", ApprovalType.PLAN, "bob", "2026-08-18T12:00:00+00:00"
+        )
+        key2 = _make_idempotency_key(
+            "myid", ApprovalType.PLAN, "plan|bob", "2026-08-18T12:00:00+00:00"
+        )
+        assert key1 != key2
+        # SHA-256 hex strings are 64 characters.
+        assert len(key1) == 64
+        assert len(key2) == 64
 
     async def test_approval_commits_ready_before_macro_agent_start(
         self,

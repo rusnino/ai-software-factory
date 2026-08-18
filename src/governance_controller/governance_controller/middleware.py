@@ -61,6 +61,8 @@ class WriteBodySizeLimitMiddleware:
                     # transport sees a complete request lifecycle.
                     while not complete:
                         tail = await receive()
+                        if tail.get("type") == "http.disconnect":
+                            return
                         complete = (
                             tail.get("type") == "http.request"
                             and not tail.get("more_body", False)
