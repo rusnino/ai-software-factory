@@ -82,12 +82,13 @@ class VerificationService:
     ) -> dict[str, object]:
         """Run all verification checks for *contract* and return a report.
 
-        If a CompletionContract is present, required/optional commands are
-        executed via ``asyncio.create_subprocess_shell`` and their exit codes
-        compared to ``Check.expect_exit``. Static forbidden-path and scope
-        checks are always performed. Verification commands declared in
-        ``TaskContract.verification`` (SPEC-03 §3.5) are merged with the
-        CompletionContract ``required`` checks.
+        Verification commands declared in ``TaskContract.verification``
+        (SPEC-03 §3.5) are always executed. If a CompletionContract is also
+        present, its required/optional commands are executed via
+        ``asyncio.create_subprocess_shell`` and their exit codes compared to
+        ``Check.expect_exit``. Static forbidden-path and scope checks are
+        performed when a CompletionContract is present; otherwise the task
+        contract's own ``forbidden_paths`` are checked.
 
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
@@ -96,11 +97,21 @@ class VerificationService:
         passed = True
 
         completion = contract.completion_contract
+        touched_paths = set(contract.inputs + contract.deliverables)
+
+        # Always execute TaskContract.verification.commands (SPEC-03 §3.5),
+        # even when there is no CompletionContract.
+        contract_verification_checks = (
+            cls._verification_commands_from_contract(contract)
+        )
+        for check in contract_verification_checks:
+            result = await cls._run_check(check)
+            checks.append(result)
+            if result["status"] == "failed":
+                passed = False
+
         if completion is not None:
-            contract_verification_checks = cls._verification_commands_from_contract(
-                contract
-            )
-            for check in completion.required + contract_verification_checks:
+            for check in completion.required:
                 result = await cls._run_check(check)
                 checks.append(result)
                 if result["status"] == "failed":
@@ -120,7 +131,6 @@ class VerificationService:
                 # Optional checks do not fail the overall verification.
 
             # Forbidden path check driven by the completion contract.
-            touched_paths = set(contract.inputs + contract.deliverables)
             forbidden_paths = completion.forbidden_path_check.paths
             forbidden_touches = {
                 p
@@ -164,18 +174,28 @@ class VerificationService:
             else:
                 checks.append({"name": "scope", "status": "passed"})
         else:
-            has_forbidden_path = contract.forbidden_paths and (
-                "__pycache__" in contract.forbidden_paths
-                or ".env" in contract.forbidden_paths
-            )
-
-            forbidden_status = "failed" if has_forbidden_path else "passed"
-            passed = forbidden_status == "passed"
-            checks = [
-                {"name": "schema", "status": "passed"},
-                {"name": "forbidden_paths", "status": forbidden_status},
-                {"name": "syntax", "status": "passed"},
-            ]
+            # Without a CompletionContract, run the contract-level forbidden_paths
+            # static check directly. The proposer-supplied list is used verbatim.
+            forbidden_paths = contract.forbidden_paths
+            forbidden_touches = {
+                p
+                for p in touched_paths
+                if any(
+                    cls._is_prefixed_by(p, forbidden)
+                    for forbidden in forbidden_paths
+                )
+            }
+            if forbidden_touches:
+                passed = False
+                checks.append(
+                    {
+                        "name": "forbidden_paths",
+                        "status": "failed",
+                        "detail": sorted(forbidden_touches),
+                    }
+                )
+            else:
+                checks.append({"name": "forbidden_paths", "status": "passed"})
 
         return {
             "contract_id": contract.task_id,

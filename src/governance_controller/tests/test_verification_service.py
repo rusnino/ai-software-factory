@@ -23,9 +23,7 @@ async def test_default_contract_passes_all_checks() -> None:
         "contract_id": "task-001",
         "passed": True,
         "checks": [
-            {"name": "schema", "status": "passed"},
             {"name": "forbidden_paths", "status": "passed"},
-            {"name": "syntax", "status": "passed"},
         ],
     }
 
@@ -38,17 +36,16 @@ async def test_forbidden_path_fails_verification() -> None:
         objective="Do something bad",
         acceptance=["It works"],
         forbidden_paths=[".env", "README.md"],
+        inputs=[".env"],
     )
 
     result = await VerificationService.verify_execution(contract)
 
     assert result["contract_id"] == "task-002"
     assert result["passed"] is False
-    assert result["checks"] == [
-        {"name": "schema", "status": "passed"},
-        {"name": "forbidden_paths", "status": "failed"},
-        {"name": "syntax", "status": "passed"},
-    ]
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    assert forbidden["status"] == "failed"
+    assert ".env" in forbidden["detail"]
 
 
 async def test_completion_contract_executes_required_checks() -> None:
@@ -194,3 +191,77 @@ async def test_optional_check_failure_does_not_fail_verification() -> None:
     assert result["passed"] is True
     optional = next(c for c in result["checks"] if c["name"] == "optional:false")
     assert optional["status"] == "failed"
+
+
+async def test_verification_commands_run_without_completion_contract() -> None:
+    contract = TaskContract(
+        task_id="task-006",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Run contract-level verification commands",
+        acceptance=["It works"],
+        verification={"commands": ["true", "true"]},
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["contract_id"] == "task-006"
+    assert result["passed"] is True
+    checks = {c["name"]: c for c in result["checks"]}
+    assert checks["required:contract_verification_0"]["status"] == "passed"
+    assert checks["required:contract_verification_1"]["status"] == "passed"
+    assert checks["forbidden_paths"]["status"] == "passed"
+
+
+async def test_verification_commands_fail_without_completion_contract() -> None:
+    contract = TaskContract(
+        task_id="task-007",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Run failing contract-level verification commands",
+        acceptance=["It works"],
+        verification={"commands": ["true", "false"]},
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["contract_id"] == "task-007"
+    assert result["passed"] is False
+    checks = {c["name"]: c for c in result["checks"]}
+    assert checks["required:contract_verification_0"]["status"] == "passed"
+    failed = checks["required:contract_verification_1"]
+    assert failed["status"] == "failed"
+    assert failed["actual_exit"] == 1
+    assert failed["expected_exit"] == 0
+
+
+async def test_verification_commands_merge_with_completion_contract() -> None:
+    contract = TaskContract(
+        task_id="task-008",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Merge contract and completion verification commands",
+        acceptance=["It works"],
+        completion_contract=CompletionContract(
+            task_id="task-008",
+            required=[Check(type="true", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(
+                description="Only touch controller code",
+                allowed_paths=[],
+                forbidden_paths=[],
+            ),
+        ),
+        verification={"commands": ["false", "true"]},
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["contract_id"] == "task-008"
+    assert result["passed"] is False
+    checks = {c["name"]: c for c in result["checks"]}
+    assert checks["required:contract_verification_0"]["status"] == "failed"
+    assert checks["required:contract_verification_1"]["status"] == "passed"
+    assert checks["required:true"]["status"] == "passed"
+    assert checks["forbidden_paths"]["status"] == "passed"
+    assert checks["scope"]["status"] == "passed"
