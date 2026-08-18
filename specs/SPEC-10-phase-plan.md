@@ -35,7 +35,7 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 - [ ] git-cascade worktree/stream flow works. [^phase1-git-cascade]
 - [ ] Agent messaging works where topology needs it. [^phase1-messaging]
 - [ ] Reviewer can issue a verdict. [^phase1-reviewer]
-- [x] Failed verification never produces DONE.
+- [ ] Failed verification never produces DONE. [^phase1-verification]
 - [x] Human review required before final DONE/merge.
 - [x] Phase 1 has no runtime dependency on Plane or Macro UI (E2E acceptance uses direct `POST /approvals` calls, not Plane webhooks).
 - [x] Governance logic remains outside macro-agent fork.
@@ -45,6 +45,7 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 [^phase1-git-cascade]: A deterministic landing stub with branch validation exists. Real git worktree/stream flow and cascade landing require git integration deferred to Phase 2/3.
 [^phase1-messaging]: Agent messaging is out of scope for the Phase 1 Governance Controller PoC; handled by macro-agent runtime.
 [^phase1-reviewer]: Reviewer verdict workflow is deferred to Phase 3 (Semantic Reviewer). Phase 1 enforces HUMAN_REVIEW gate before DONE.
+[^phase1-verification]: `VerificationService` exists and is driven by `CompletionContract` when present, but it is not invoked from `ApprovalService`, any API route, or the `AGENT_REVIEW -> HUMAN_REVIEW` transition — nothing in the live request path calls it. The `required`/`optional` `Check` commands it does read are not actually executed (status is hardcoded `"passed"`). So this criterion is not yet an enforced invariant, just an unwired component; see `reviews/GAPS.md` GAP-006 and `reviews/REVIEW-002-gap-closure-verification.md`.
 
 ### Stop Condition
 

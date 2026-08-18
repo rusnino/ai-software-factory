@@ -2,11 +2,15 @@
 
 ## Current State
 
-Phase 1 Governance Controller is **complete, fully tested, and review gaps are closed** in
-`src/governance_controller/`. All `CRITICAL`, `HIGH`, `MEDIUM`, and `LOW` findings from
-`reviews/REVIEW-001-phase-1-governance-controller.md` are now `CLOSED` in `reviews/GAPS.md`.
-
-Final test status: **130 passed**, ruff clean.
+Phase 1 Governance Controller in `src/governance_controller/` passes its test suite (**130 passed**, ruff
+clean), and most `REVIEW-001` gaps are genuinely closed — but an independent verification pass
+(`reviews/REVIEW-002-gap-closure-verification.md`) found that 3 of the closures were incomplete or
+incorrect, including 1 `CRITICAL` and 2 `HIGH` gaps that are now reopened in `reviews/GAPS.md`:
+`GAP-002` (forbidden-path check only catches exact string matches, not subpaths of a forbidden directory),
+`GAP-006` (Completion Contract `required`/`optional` checks never actually execute their commands, and
+`VerificationService` still isn't called from any live path), and `GAP-008` (the reconciliation "stub" is
+orphaned dead code that satisfies roughly 1 of SPEC-03 §3.9's 5 requirements). **Per `AGENTS.md`'s gate rule,
+Phase 1 is not yet done.** See `reviews/GAPS.md` for the full current status of all 19 gaps.
 
 Implemented components:
 
@@ -27,10 +31,10 @@ Implemented components:
 - Automatic execution trigger after `EXECUTION` approval, with `READY → RUNNING` transition.
 - opentasks materialization stub with DAG validation.
 - In-process macro-agent Event Bridge translating workspace events into Controller state updates.
-- Minimal reconciliation service stub for Plane/Controller divergence detection.
+- Reconciliation service class exists but is not wired into anything and doesn't compare against real data (GAP-008, open).
 - Dockerfile and Docker Compose for local API + PostgreSQL.
 - CLI (`approve`) and Telegram adapter stubs converging on `POST /approvals`.
-- Verification service driven by `CompletionContract` when present, with fallback checks.
+- Verification service reads `CompletionContract` fields for `forbidden_path_check`/`scope_check`, but never executes `required`/`optional` check commands and isn't called from any live path (GAP-006, open).
 - Git-cascade landing stub with branch validation.
 - End-to-end Phase 1 smoke test.
 
