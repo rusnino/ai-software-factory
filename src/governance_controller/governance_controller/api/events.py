@@ -3,6 +3,7 @@
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.event_bridge import EventBridge
@@ -11,9 +12,17 @@ from governance_controller.db import get_db
 router = APIRouter(prefix="/events", tags=["events"])
 
 
+class EventIn(BaseModel):
+    """Validated request body for a macro-agent workspace event."""
+
+    type: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 @router.post("", status_code=status.HTTP_204_NO_CONTENT)
 async def receive_event(
-    event: dict[str, Any],
+    event: EventIn,
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Receive a macro-agent workspace event and translate it into controller state.
@@ -21,10 +30,15 @@ async def receive_event(
     This is the live HTTP entry point for the Event Bridge described in
     SPEC-05 §5.4/§5.7. It is intentionally minimal for Phase 1: events are
     processed synchronously and state transitions use compare-and-swap guards.
+
+    Raises:
+        HTTPException: 409 Conflict if the event's transitions loses a CAS race.
     """
     try:
-        await EventBridge.handle(db, event)
+        await EventBridge.handle(db, event.model_dump())
     except ValueError as exc:
+        # Do not record a processed-event key for rejected CAS races so the
+        # caller can retry.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),

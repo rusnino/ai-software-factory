@@ -124,16 +124,30 @@ class EventBridge:
 
         transition_error: str | None = None
         if target_state is not None and task.state != target_state:
-            if not await StateMachine.atomic_transition(db, task, target_state):
+            valid_transition = True
+            try:
+                StateMachine.validate_transition(task.state, target_state)
+            except ValueError:
+                valid_transition = False
+
+            if valid_transition:
+                if not await StateMachine.atomic_transition(
+                    db, task, target_state
+                ):
+                    raise ValueError(
+                        "Concurrent modification detected: "
+                        "task state changed during event handling"
+                    )
+                # Re-load the task so the in-memory object reflects the latest
+                # DB state after our own successful update.
+                task = await db.get(Task, task_id)
+                if task is None:
+                    return
+            else:
                 transition_error = (
-                    "Concurrent modification detected: "
-                    "task state changed during event handling"
+                    f"Invalid transition: {task.state.value} -> "
+                    f"{target_state.value}"
                 )
-            # Re-load the task so the in-memory object reflects the latest DB
-            # state (either our own update or a concurrent one).
-            task = await db.get(Task, task_id)
-            if task is None:
-                return
 
         # Phase 1: landing:completed triggers automated verification that gates
         # AGENT_REVIEW -> HUMAN_REVIEW. This is a stub-grade integration until
@@ -152,8 +166,8 @@ class EventBridge:
             )
             await verifier.verify_and_advance(db, task, contract)
 
-        # Record the event as processed before applying state changes or
-        # emitting audit rows. A missing event_id/event_timestamp means we
+        # Record the event as processed only after transitions and
+        # verification succeed. A missing event_id/event_timestamp means we
         # cannot deduplicate, so we persist only when the full key is present.
         if event_id and event_timestamp:
             await EventBridge._record_processed_event(
