@@ -44,7 +44,10 @@ def test_register_adds_new_provider() -> None:
         supports_mcp=False,
         allowed_roles=["worker"],
     )
-    registry.register(custom)
+    try:
+        registry.register(custom)
 
-    assert registry.is_registered("aider") is True
-    assert registry.get("aider").command == "aider"
+        assert registry.is_registered("aider") is True
+        assert registry.get("aider").command == "aider"
+    finally:
+        registry._providers.pop("aider", None)
