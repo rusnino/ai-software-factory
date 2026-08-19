@@ -2,14 +2,14 @@
 
 ## Current State
 
-**The `CRITICAL`/`HIGH` gate is open on one narrow, well-understood residual: everything else REVIEW-019 found is now genuinely closed.**
+**The `CRITICAL`/`HIGH` gate is open on one gap, found in REVIEW-021 by accident while verifying the previous round's fixes: `GAP-094` — the SQLite runtime path cannot even start.**
 
-`GAP-077`/`GAP-085` (retry-before-`FAILED`, SPEC-09 §9.6) had three bugs across two fix attempts. `f62c5ba` genuinely fixed two of them, independently live-verified in REVIEW-020:
-- `GAP-085` (was the most severe): the retry now genuinely restarts execution — `_start_retry_execution()` creates a real `Execution` row and calls `executor.start()`, confirmed by a full round trip through `EventBridge.handle()` and an exact `max_retries` boundary check.
-- Global transition-table scope: `FAILED -> RUNNING` is no longer in `StateMachine`'s shared table at all; a dedicated `atomic_transition_from_failed_to_running()` is its only call site — confirmed all 6 previously-dangerous event types are now correctly rejected against a `FAILED` task, no resurrection.
-- No `GAP-080`-class regression: the retry's new DB writes commit before the live `executor.start()` call (probe returns in 0.02s against real Postgres), and the CAS is safe under a forced two-session race.
+`GAP-077` (event replay) and `GAP-091` (pool-setting validation gaps) are both now genuinely fixed and independently re-verified in REVIEW-021:
+- `GAP-077`: `EventBridge` now records the processed-event dedup key before returning on the retry path. Confirmed live: a replayed identical event no longer triggers a second `executor.start()`/`Execution` row, and a genuinely distinct subsequent event still processes normally (no over-blocking regression); the full `max_retries=2` boundary sequence still produces exactly 2 `executor.start()` calls even under replay.
+- `GAP-091`: `pool_size=0`/`max_overflow=0` are now rejected (same bug class as negative values), and `pool_timeout` has a validator that correctly rejects negative values while still accepting `0` (a legitimate SQLAlchemy "fail fast" setting, semantically distinct from the pool-size zero-is-unbounded bug).
+- `GAP-093` (a suspected concurrency race raised during this verification) was analyzed and found **not exploitable**: the existing `atomic_transition` CAS on the state transition already serializes concurrent identical events before either can reach the verification/retry logic — accepted, no code change needed.
 
-**Still open, blocking the gate**: `GAP-077` itself, narrowed to its one remaining bug — event replay. `EventBridge`'s early-return still skips recording the processed-event dedup key on a retry, so replaying the identical `landing:completed` event re-enters the retry path. This is now **worse than originally reported**: before `GAP-085`'s fix this only double-incremented a counter with no real effect; now it causes a genuine **second live macro-agent execution** for one event. Fix direction: record the dedup key for the retry path too.
+**New, blocking finding — `GAP-094` (HIGH)**: `db.py`'s module-level engine now passes `GAP-083`/`GAP-091`'s pool-tuning kwargs unconditionally, but SQLite's `StaticPool` doesn't accept them at all. `GC_DATABASE_URL=sqlite+aiosqlite:///... python -c "import governance_controller.db"` raises a `TypeError` — the module fails to import, so nothing (the CLI, a script, or `uvicorn`) can start under the SQLite configuration this codebase has documented and relied on throughout this whole review series as the local-dev-without-Postgres fallback. A regression introduced by `GAP-083`, never caught because its own verification only tested the Postgres dialect and the validation logic in isolation.
 
 Closed gaps, all independently re-verified by live reproduction (not just diff review):
 - `GAP-078` (CRITICAL): `DateTime(timezone=True)` on all datetime columns.
@@ -18,15 +18,16 @@ Closed gaps, all independently re-verified by live reproduction (not just diff r
 - `GAP-073` (MEDIUM): body-size limit on all write endpoints.
 - `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call.
 - `GAP-085` (HIGH): retry genuinely restarts execution.
-- `GAP-086` (HIGH): the body-size-limit middleware's drain loop no longer spins forever on client disconnect — confirmed via before/after reproduction (reverted code spun >1M `receive()` calls in 3s; current code returns promptly).
-- `GAP-087` (HIGH): the approvals fallback idempotency key is now a `sha256` hash, not a raw delimiter-joined string — confirmed the original cross-task collision no longer occurs, through the real ASGI app and DB.
-- `GAP-082`/`GAP-083` (LOW): orphaned dead code removed; DB pool settings configurable and genuinely wired.
+- `GAP-077` (HIGH): event-replay no longer double-executes.
+- `GAP-086` (HIGH): the body-size-limit middleware's drain loop no longer spins forever on client disconnect.
+- `GAP-087` (HIGH): the approvals fallback idempotency key is now a `sha256` hash, not a raw delimiter-joined string.
+- `GAP-082`/`GAP-083`/`GAP-091` (LOW/MEDIUM): orphaned dead code removed; DB pool settings configurable, validated, and genuinely wired.
 - `GAP-084` (MEDIUM): dual-DB test coverage bypass fixed, confirmed genuine.
-- `GAP-090` (MEDIUM): SPEC-09 §9.6's "alert human" now has a real, tested audit-log marker (`alert_human` event) — honestly scoped as not a real outbound notification (that remains Phase 2 work, see candidate task 11).
+- `GAP-090` (MEDIUM): SPEC-09 §9.6's "alert human" now has a real, tested audit-log marker — honestly scoped as not a real outbound notification (Phase 2 work, candidate task 11).
 
-Still open (non-blocking): `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet); `GAP-091` (MEDIUM, reopened — the `GAP-083` pool-setting validation fix missed `pool_size=0`, which reproduces the same unbounded-pool bug as a negative value, and never added a validator for `pool_timeout` at all); `GAP-092` (LOW — a recurring hygiene issue where the coding agent's ledger edits cite commit hashes that aren't actually reachable from `main`, now happened twice).
+Still open (non-blocking): `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet); `GAP-092` (LOW — recurring dangling-commit-hash hygiene issue; did not recur in REVIEW-021, the explicit ask to verify hashes worked).
 
-Test status: **209 passed**, `ruff` clean, `mypy --strict` clean. `GAP-077`'s remaining event-replay bug has no test coverage.
+Test status: **212 passed**, `ruff` clean, `mypy --strict` clean. None of this catches `GAP-094` — the pytest suite never imports `db.py`'s module-level engine against a real SQLite `database_url`.
 
 Implemented components:
 
