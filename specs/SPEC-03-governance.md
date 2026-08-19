@@ -73,6 +73,8 @@ Idempotency-Key: <uuid>
 - `403`: policy violation.
 - `422`: missing prerequisites.
 - `400`: invalid request.
+- `404`: task not found.
+- `503`: macro-agent unavailable (execution could not be started; see `reviews/GAPS.md` GAP-064).
 
 ### Idempotency
 

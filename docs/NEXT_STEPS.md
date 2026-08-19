@@ -2,15 +2,17 @@
 
 ## Current State
 
-**`reviews/GAPS.md` has zero `OPEN`/`IN_PROGRESS` rows for the first time across this 22-review series.** `GAP-094` (the last blocking gap — SQLite's `StaticPool` rejecting the pool-tuning kwargs `GAP-083`/`GAP-091` added, breaking module import under the SQLite fallback path) is fixed and independently re-verified in REVIEW-022: import now succeeds under `GC_DATABASE_URL=sqlite+aiosqlite:///...`, a full end-to-end task create/commit works against SQLite, and the default Postgres config still receives real pool kwargs (no regression). This is the first time the `CRITICAL`/`HIGH` gate has been clean *and* stayed clean through an immediate re-check with nothing newly found in the process — every prior "clean" milestone in this series was reopened by the very next round's fresh-eyes pass.
+**REVIEW-023 (a full fresh review, prompted specifically to look past the zero-open-rows milestone REVIEW-022 reached) reopened the gate: 3 new `HIGH` gaps found.**
 
-`GAP-077` (event replay) and `GAP-091` (pool-setting validation gaps), closed in REVIEW-021 and independently re-verified: `EventBridge` now records the processed-event dedup key before returning on the retry path (a replayed identical event no longer double-executes, a genuinely distinct subsequent event still processes normally); `pool_size=0`/`max_overflow=0` are rejected like negative values, `pool_timeout` correctly rejects negative values while still accepting `0`. `GAP-093` (a suspected concurrency race) was analyzed and found not exploitable — the existing `atomic_transition` CAS already serializes concurrent identical event deliveries.
+- `GAP-095`: `EventBridge.handle()`'s `AGENT_REVIEW` transition is never committed before running verification commands, so the row lock is held for as long as an untimed, proposer-controlled shell command takes — the same defect class `GAP-080` fixed in `_trigger_execution`, in a sibling path that fix never touched, and worse here because it's fully unbounded (no timeout at all). Live-reproduced against real Postgres.
+- `GAP-096`: `PermissionService.may_approve()`'s non-human-actor blocklist is an exact-literal check against `{"system", "agent"}`, but SPEC-03 itself documents structured actor identifiers like `system:macro-agent` — any such identity sails through and can approve a PLAN it didn't propose. Live-reproduced through the real API. Directly implicates AGENTS.md's non-negotiable self-approval rule.
+- `GAP-097`: a transient failure of the outbound macro-agent call during a verification retry skips recording the event's dedup key, so the mandatory SPEC-05 §5.4 redelivery reprocesses the same event as new and double-consumes the retry budget. Live-reproduced.
 
-All other gaps remain closed, independently re-verified by live reproduction across the series (not just diff review) — see `reviews/GAPS.md` for the full 94-row ledger. Non-blocking, already-accepted items: `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity risk, documented, no CI enforcing the dual-DB test path yet) and `GAP-092` (a recurring dangling-commit-hash ledger-hygiene note, resolved once the coding agent started verifying hashes before writing them).
+Also new this round, non-blocking: `GAP-098` (MEDIUM, `GAP-094`'s SQLite fix over-broadly also silences pool settings for file-based SQLite, not just `:memory:` — the identical `RISK-18` pattern one level deeper), `GAP-099`/`GAP-100`/`GAP-101` (MEDIUM — a `BLOCKED` task can be un-blocked by any `RUNNING`-mapped event, not just `conflict:resolved`; a comma in a policy-violation message corrupts the API's structured `violations` array; `TaskContract.execution.role` is policy-validated but never forwarded to macro-agent), `GAP-102` (MEDIUM, closed directly — `SPEC-03` §3.3 was missing `404`/`503` from its documented response codes), `GAP-103`/`GAP-104`/`GAP-105`/`GAP-106` (LOW — dead code with a false docstring, a test-isolation leak, the SDD progress ledger stale again, `TaskResponse` not exposing `execution_attempts`).
 
-Test status: **212 passed**, `ruff` clean, `mypy --strict` clean, confirmed working against both SQLite and real PostgreSQL.
+Every gap closed through REVIEW-022 remains closed, independently re-verified by live reproduction across the series (not just diff review) — see `reviews/GAPS.md` for the full ledger. This round is a reminder that "zero open rows" describes the state of *known* defects at that moment, not an assurance nothing remains to find — REVIEW-023 found 3 new `HIGH` issues in code no prior round's fresh-eyes pass had specifically targeted (the `EventBridge`↔verification lock interaction, the permission blocklist's literal-string matching, and the retry-mechanism's own exception path).
 
-**This does not mean Phase 1 is feature-complete** — see "Immediate Next Step: Phase 2" below for the substantial, honestly-disclosed list of deferred/stubbed work (real Plane sync, real macro-agent integration, reconciliation, Meta Orchestrator, Intake Adapter, security hardening, SPEC-09 §9.6's real outbound alert channel, and more). It means the acceptance criteria and known-defect ledger for what *has* been built are, as of this review, genuinely clean.
+Test status: **212 passed**, `ruff` clean, `mypy --strict` clean — none of this round's findings are tooling-detectable.
 
 Implemented components:
 
@@ -23,7 +25,9 @@ Implemented components:
   `CompletionContract` shell-command allowlisting.
 - Append-only `AuditService` wired into task/profile creation, approvals, state transitions,
   execution starts, macro-agent events, and verification results.
-- `PermissionService` wired into `ApprovalService` to reject self-approval and system/agent actors.
+- `PermissionService` wired into `ApprovalService` to reject self-approval and system/agent actors
+  (the actor blocklist's exact-string matching has a known gap against structured `system:*`
+  identifiers — see `GAP-096`).
 - `ApprovalService` as the single convergence point for all approvals, with `Idempotency-Key`
   header support and key-based deduplication.
 - Plane Adapter interface + in-memory stub.
@@ -91,18 +95,18 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Telegram/Email/API intake, feeding the Idea Ingestion Service.
    - Human Triage queue in Plane.
 
-10. **Verification failure feedback to macro-agent, and actually restarting execution (SPEC-09 §9.6 steps 1-2)**
-    - `GAP-077`'s retry loop is not safe to ship yet — see `reviews/GAPS.md`/the Current State section
-      above (`GAP-077`, `GAP-085`, `GAP-086`, `GAP-087` all `OPEN`, `HIGH`). Besides emitting a real
-      failure-feedback message to macro-agent, the retry path itself needs to actually restart
-      execution (call `MacroAgentExecutor.start()`, mirroring `_trigger_execution`) and the
-      `FAILED -> RUNNING` transition needs to be scoped so only the verification-retry path can use
-      it, not every macro-agent event type.
+10. **Verification failure feedback to macro-agent (SPEC-09 §9.6 step 2)**
+    - `GAP-077`'s retry loop genuinely retries and restarts execution (`GAP-085`, `GAP-077` both
+      `CLOSED`, independently re-verified). The remaining gap: no failure-feedback message is emitted
+      to macro-agent so it can repair and re-land; `verification_service.py` still has a `# TODO`
+      marking this. `GAP-097` (HIGH, OPEN) also needs fixing in this area: a transient failure of the
+      outbound macro-agent call during a retry skips recording the event's dedup key, so a redelivery
+      of that event (which SPEC-05 §5.4 requires on failure) double-consumes the retry budget.
 
-11. **Alert human on terminal FAILED (SPEC-09 §9.6 step 3)**
-    - Entirely unimplemented: no notification/alerting mechanism exists anywhere (no webhook, email,
-      or Plane comment push). A terminally `FAILED` task is only discoverable by polling
-      `GET /tasks/{id}` or the audit log. Tracked as `GAP-090`.
+11. **Real outbound alert channel for terminal FAILED (SPEC-09 §9.6 step 3)**
+    - `GAP-090` added a real, tested `alert_human` audit-log marker — a human can now find terminal
+      failures by querying the audit log, but there's still no webhook/email/Plane-comment push; a
+      human must still poll to discover the failure.
 
 ## Blockers to Watch
 
