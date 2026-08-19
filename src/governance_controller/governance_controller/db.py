@@ -5,14 +5,24 @@ from sqlmodel import SQLModel
 
 from governance_controller.config import settings
 
+_ENGINE_KWARGS: dict[str, object] = {
+    "echo": False,
+    "future": True,
+    "pool_pre_ping": settings.database_pool_pre_ping,
+}
+
+if not settings.database_url.startswith("sqlite"):
+    _ENGINE_KWARGS.update(
+        {
+            "pool_size": settings.database_pool_size,
+            "max_overflow": settings.database_max_overflow,
+            "pool_timeout": settings.database_pool_timeout,
+        }
+    )
+
 engine = create_async_engine(
     settings.database_url,
-    echo=False,
-    future=True,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
-    pool_timeout=settings.database_pool_timeout,
-    pool_pre_ping=settings.database_pool_pre_ping,
+    **_ENGINE_KWARGS,
 )
 
 AsyncSessionLocal = async_sessionmaker(
