@@ -25,6 +25,7 @@ class MacroAgentExecutor:
             "task_id": task_contract.task_id,
             "team": execution.team,
             "harness": execution.harness,
+            "role": execution.role,
             "objective": task_contract.objective,
             "acceptance": task_contract.acceptance,
             "timeout_minutes": execution.timeout_minutes,
