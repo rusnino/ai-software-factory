@@ -163,6 +163,9 @@ class EventBridge:
             and task.state == TaskState.AGENT_REVIEW
             and task.task_contract_json
         ):
+            # Commit before verification so no task row lock is held across the
+            # potentially slow subprocess execution (GAP-095).
+            await db.commit()
             verifier = verification_service or VerificationService()
             contract = TaskContract(
                 **cast(dict[str, Any], task.task_contract_json)
