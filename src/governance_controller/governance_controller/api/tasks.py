@@ -37,6 +37,7 @@ def _task_response(task: Task) -> TaskResponse:
         proposed_by=task.proposed_by,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        execution_attempts=task.execution_attempts,
     )
 
 
