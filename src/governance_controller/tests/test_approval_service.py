@@ -14,7 +14,10 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
-from governance_controller.services.policy_engine import PolicyEngine
+from governance_controller.services.policy_engine import (
+    PolicyEngine,
+    PolicyViolationError,
+)
 
 
 async def _audit_rows_for_task(
@@ -203,18 +206,16 @@ class TestApprovalServicePolicyViolations:
         db_session: AsyncSession,
     ) -> None:
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
-        contract = _make_contract(harness="forbidden-harness")
-        profile = _make_profile()
 
-        with pytest.raises(ValueError, match="Policy violation"):
+        with pytest.raises(PolicyViolationError, match="Policy violation"):
             await service.approve(
                 task=task,
-                contract=contract,
-                profile=profile,
+                contract=_make_contract(harness="forbidden-harness"),
+                profile=_make_profile(),
                 approval_type=ApprovalType.EXECUTION,
                 source="plane",
-                actor="human-1",
-                idempotency_key="key-exec-bad",
+                actor="admin",
+                idempotency_key="key-policy-audit",
             )
 
         assert task.state == TaskState.PLAN_APPROVED
@@ -235,7 +236,7 @@ class TestApprovalServicePolicyViolations:
         service = ApprovalService(db=db_session, policy_engine=AlwaysDeny)
         task = await _make_task(db_session, TaskState.PROPOSED)
 
-        with pytest.raises(ValueError, match="injected-deny"):
+        with pytest.raises(PolicyViolationError, match="injected-deny"):
             await service.approve(
                 task=task,
                 contract=_make_contract(),
@@ -305,7 +306,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
     ) -> None:
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
 
-        with pytest.raises(ValueError, match="Policy violation"):
+        with pytest.raises(PolicyViolationError, match="Policy violation"):
             await service.approve(
                 task=task,
                 contract=_make_contract(harness="forbidden-harness"),
@@ -313,7 +314,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
                 approval_type=ApprovalType.EXECUTION,
                 source="plane",
                 actor="admin",
-                idempotency_key="key-policy-audit",
+                idempotency_key="key-exec-bad",
             )
 
         entries = await _audit_rows_for_task(db_session, task.id)

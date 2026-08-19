@@ -13,6 +13,7 @@ from governance_controller.db import get_db
 from governance_controller.schemas.approval import ApprovalRequest, ApprovalResponse
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.policy_engine import PolicyViolationError
 from governance_controller.services.task_service import TaskService
 
 router = APIRouter(tags=["approvals"])
@@ -109,6 +110,11 @@ async def submit_approval(
             idempotency_key=idempotency_key,
             comment=payload.comment,
         )
+    except PolicyViolationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"message": str(exc), "violations": exc.violations},
+        ) from exc
     except ValueError as exc:
         message = str(exc)
         if "Invalid transition" in message:
@@ -120,18 +126,6 @@ async def submit_approval(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=message,
-            ) from exc
-        if "Policy violation" in message:
-            # Reconstruct violations from the ValueError message for the response.
-            prefix = "Policy violation(s): "
-            violations = []
-            if message.startswith(prefix):
-                violations = [
-                    v.strip() for v in message[len(prefix) :].split(",") if v.strip()
-                ]
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"message": message, "violations": violations},
             ) from exc
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

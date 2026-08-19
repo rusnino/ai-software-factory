@@ -15,7 +15,11 @@ from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.permission_service import PermissionService
-from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
+from governance_controller.services.policy_engine import (
+    PolicyEngine,
+    PolicyResult,
+    PolicyViolationError,
+)
 from governance_controller.services.state_machine import StateMachine
 
 _APPROVAL_TARGET_STATES: dict[ApprovalType, TaskState] = {
@@ -120,7 +124,8 @@ class ApprovalService:
             contract, profile, approval_type
         )
         if not policy_result.allowed:
-            await self._log_rejection_and_raise(
+            await AuditService.log(
+                db=self.db,
                 event_type="approval_rejected",
                 task_id=task.id,
                 actor=actor,
@@ -129,7 +134,11 @@ class ApprovalService:
                     "approval_type": approval_type.value,
                     "violations": policy_result.violations,
                 },
-                message=f"Policy violation(s): {', '.join(policy_result.violations)}",
+            )
+            await self.db.commit()
+            raise PolicyViolationError(
+                f"Policy violation(s): {', '.join(policy_result.violations)}",
+                violations=policy_result.violations,
             )
 
         # 2. Idempotency: return existing task state if this exact key was
