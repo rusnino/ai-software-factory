@@ -2,17 +2,21 @@
 
 ## Current State
 
-**REVIEW-023 (a full fresh review, prompted specifically to look past the zero-open-rows milestone REVIEW-022 reached) reopened the gate: 3 new `HIGH` gaps found.**
+**REVIEW-023 findings are now closed.** All `HIGH`/`MEDIUM`/`LOW` gaps from the round are `CLOSED` or `ACCEPTED` in `reviews/GAPS.md`, with verified ancestor commit hashes.
 
-- `GAP-095`: `EventBridge.handle()`'s `AGENT_REVIEW` transition is never committed before running verification commands, so the row lock is held for as long as an untimed, proposer-controlled shell command takes — the same defect class `GAP-080` fixed in `_trigger_execution`, in a sibling path that fix never touched, and worse here because it's fully unbounded (no timeout at all). Live-reproduced against real Postgres.
-- `GAP-096`: `PermissionService.may_approve()`'s non-human-actor blocklist is an exact-literal check against `{"system", "agent"}`, but SPEC-03 itself documents structured actor identifiers like `system:macro-agent` — any such identity sails through and can approve a PLAN it didn't propose. Live-reproduced through the real API. Directly implicates AGENTS.md's non-negotiable self-approval rule.
-- `GAP-097`: a transient failure of the outbound macro-agent call during a verification retry skips recording the event's dedup key, so the mandatory SPEC-05 §5.4 redelivery reprocesses the same event as new and double-consumes the retry budget. Live-reproduced.
+- `GAP-095` (`96357af`): `EventBridge.handle()` now commits the `AGENT_REVIEW` transition before running verification, and `_run_check()` enforces a hard timeout on subprocess execution.
+- `GAP-096` (`cda9a91`): `PermissionService.may_approve()` now rejects any actor starting with `system:` or `agent:`, matching SPEC-03's structured automated-actor identifiers.
+- `GAP-097` (`f7e810b`): the processed-event dedup key is recorded in a `finally` around `verify_and_advance()`, and a retry `executor.start()` failure transitions the task to terminal `FAILED`.
+- `GAP-098` (`4b4e100`): pool-tuning kwargs apply to file-based SQLite; only `:memory:` SQLite skips them.
+- `GAP-099` (`9c225af`): only `conflict:resolved` may unblock a `BLOCKED` task.
+- `GAP-100` (`121f0eb`): policy violations are returned as a structured list via `PolicyViolationError`, no comma-splitting.
+- `GAP-101` (`2164989`): `MacroAgentExecutor.start()` payload includes `execution.role`.
+- `GAP-103` (`48a7354`): orphaned `atomic_transition_with_fields` removed.
+- `GAP-104` (`9c35f87`): harness-registry test cleans up its mutation.
+- `GAP-105` (`ACCEPTED`): SDD progress log drift is workflow-hygiene debt, not a runtime defect.
+- `GAP-106` (`9e165fc`): `TaskResponse` exposes `execution_attempts`.
 
-Also new this round, non-blocking: `GAP-098` (MEDIUM, `GAP-094`'s SQLite fix over-broadly also silences pool settings for file-based SQLite, not just `:memory:` — the identical `RISK-18` pattern one level deeper), `GAP-099`/`GAP-100`/`GAP-101` (MEDIUM — a `BLOCKED` task can be un-blocked by any `RUNNING`-mapped event, not just `conflict:resolved`; a comma in a policy-violation message corrupts the API's structured `violations` array; `TaskContract.execution.role` is policy-validated but never forwarded to macro-agent), `GAP-102` (MEDIUM, closed directly — `SPEC-03` §3.3 was missing `404`/`503` from its documented response codes), `GAP-103`/`GAP-104`/`GAP-105`/`GAP-106` (LOW — dead code with a false docstring, a test-isolation leak, the SDD progress ledger stale again, `TaskResponse` not exposing `execution_attempts`).
-
-Every gap closed through REVIEW-022 remains closed, independently re-verified by live reproduction across the series (not just diff review) — see `reviews/GAPS.md` for the full ledger. This round is a reminder that "zero open rows" describes the state of *known* defects at that moment, not an assurance nothing remains to find — REVIEW-023 found 3 new `HIGH` issues in code no prior round's fresh-eyes pass had specifically targeted (the `EventBridge`↔verification lock interaction, the permission blocklist's literal-string matching, and the retry-mechanism's own exception path).
-
-Test status: **212 passed**, `ruff` clean, `mypy --strict` clean — none of this round's findings are tooling-detectable.
+Test status: **223 passed** on SQLite and **223 passed** on PostgreSQL (`GC_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/gc_test`). `ruff` clean. `mypy --strict` clean.
 
 Implemented components:
 
@@ -26,8 +30,7 @@ Implemented components:
 - Append-only `AuditService` wired into task/profile creation, approvals, state transitions,
   execution starts, macro-agent events, and verification results.
 - `PermissionService` wired into `ApprovalService` to reject self-approval and system/agent actors
-  (the actor blocklist's exact-string matching has a known gap against structured `system:*`
-  identifiers — see `GAP-096`).
+  (now also rejects `system:*` / `agent:*` structured identifiers as of `GAP-096`).
 - `ApprovalService` as the single convergence point for all approvals, with `Idempotency-Key`
   header support and key-based deduplication.
 - Plane Adapter interface + in-memory stub.
@@ -96,12 +99,12 @@ Priority: integrate with real external systems and harden execution orchestratio
    - Human Triage queue in Plane.
 
 10. **Verification failure feedback to macro-agent (SPEC-09 §9.6 step 2)**
-    - `GAP-077`'s retry loop genuinely retries and restarts execution (`GAP-085`, `GAP-077` both
+    - `GAP-077`'s retry loop genuinely retries and restarts execution (`GAP-077`, `GAP-085` both
       `CLOSED`, independently re-verified). The remaining gap: no failure-feedback message is emitted
       to macro-agent so it can repair and re-land; `verification_service.py` still has a `# TODO`
-      marking this. `GAP-097` (HIGH, OPEN) also needs fixing in this area: a transient failure of the
-      outbound macro-agent call during a retry skips recording the event's dedup key, so a redelivery
-      of that event (which SPEC-05 §5.4 requires on failure) double-consumes the retry budget.
+      marking this. `GAP-097` is now `CLOSED`: a transient `executor.start()` failure records the
+      dedup key and moves the task to terminal `FAILED`, preventing double-consumption of the retry
+      budget on SPEC-05 §5.4 redelivery.
 
 11. **Real outbound alert channel for terminal FAILED (SPEC-09 §9.6 step 3)**
     - `GAP-090` added a real, tested `alert_human` audit-log marker — a human can now find terminal
