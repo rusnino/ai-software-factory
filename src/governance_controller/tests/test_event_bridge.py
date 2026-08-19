@@ -1,5 +1,7 @@
 """Tests for the macro-agent event bridge listener."""
 
+from unittest.mock import patch
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +20,21 @@ from governance_controller.schemas import (
 )
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.verification_service import VerificationService
+
+
+class _CommitCountingAsyncSession:
+    """Wrapper that counts explicit commits on an AsyncSession."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self.commit_count = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+        await self._session.commit()
 
 
 def _make_event(
@@ -581,3 +598,121 @@ class TestEventBridgeTransitions:
             for c in verification_passed.payload["checks"]
         }
         assert checks["required:always_pass"]["status"] == "passed"
+
+    async def test_agent_review_transition_committed_before_verify(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-095 regression: row lock is released before verification runs."""
+        task = Task(
+            id="task-gap095-commit",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            task_contract_json=TaskContract(
+                task_id="task-gap095-commit",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Verify commit happens before verification",
+                acceptance=["Commit count proves lock release"],
+                completion_contract=CompletionContract(
+                    task_id="task-gap095-commit",
+                    required=[
+                        Check(
+                            type="always_pass",
+                            command="exit 0",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        counting_session = _CommitCountingAsyncSession(db_session)
+
+        # Patch _run_check to capture commits that happened before it runs.
+        original_run_check = VerificationService._run_check
+        commits_before_run_check = 0
+
+        async def _counting_run_check(check: Check) -> dict[str, object]:
+            nonlocal commits_before_run_check
+            commits_before_run_check = counting_session.commit_count
+            return await original_run_check(check)
+
+        with patch.object(
+            VerificationService, "_run_check", staticmethod(_counting_run_check)
+        ):
+            event = _make_event("landing:completed", task.id)
+            await EventBridge.handle(counting_session, event)
+
+        assert task.state == TaskState.HUMAN_REVIEW
+        assert commits_before_run_check >= 1, (
+            "AGENT_REVIEW transition should be committed before verification"
+        )
+
+    async def test_already_agent_review_still_commits_before_verify(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-095 regression: no transition still commits before verification."""
+        task = Task(
+            id="task-gap095-already-review",
+            project_id="proj-1",
+            state=TaskState.AGENT_REVIEW,
+            proposed_by="agent-1",
+            task_contract_json=TaskContract(
+                task_id="task-gap095-already-review",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Verify commit happens before verification",
+                acceptance=["Commit count proves lock release"],
+                completion_contract=CompletionContract(
+                    task_id="task-gap095-already-review",
+                    required=[
+                        Check(
+                            type="always_pass",
+                            command="exit 0",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        counting_session = _CommitCountingAsyncSession(db_session)
+        original_run_check = VerificationService._run_check
+        commits_before_run_check = 0
+
+        async def _counting_run_check(check: Check) -> dict[str, object]:
+            nonlocal commits_before_run_check
+            commits_before_run_check = counting_session.commit_count
+            return await original_run_check(check)
+
+        with patch.object(
+            VerificationService, "_run_check", staticmethod(_counting_run_check)
+        ):
+            event = _make_event("landing:completed", task.id)
+            await EventBridge.handle(counting_session, event)
+
+        assert task.state == TaskState.HUMAN_REVIEW
+        assert commits_before_run_check >= 1, (
+            "Pending work should be committed before verification even when "
+            "task was already in AGENT_REVIEW"
+        )
+

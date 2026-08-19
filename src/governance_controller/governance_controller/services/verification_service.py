@@ -14,6 +14,7 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+from governance_controller.config import settings
 from governance_controller.constants import TaskState
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
@@ -35,16 +36,41 @@ class VerificationService:
         self.executor = executor or MacroAgentExecutor()
 
     @staticmethod
-    async def _run_check(check: Check) -> dict[str, object]:
-        """Run a single Check command and return a result dict."""
+    async def _run_check(
+        check: Check,
+        timeout: float | None = None,
+    ) -> dict[str, object]:
+        """Run a single Check command and return a result dict.
+
+        Args:
+            check: The command to run and expected exit code.
+            timeout: Maximum seconds to wait for the subprocess. ``None``
+                uses ``settings.macro_agent_timeout_seconds``.
+        """
+        if timeout is None:
+            timeout = settings.macro_agent_timeout_seconds
+
         proc = await asyncio.create_subprocess_shell(
             check.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
-        actual_exit = proc.returncode or 0
-        status = "passed" if actual_exit == check.expect_exit else "failed"
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout
+            )
+            actual_exit = proc.returncode or 0
+            status = "passed" if actual_exit == check.expect_exit else "failed"
+        except TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+
+            stdout, stderr = b"", b""
+            actual_exit = -1
+            status = "failed"
 
         result: dict[str, object] = {
             "name": f"required:{check.type}",
@@ -56,6 +82,8 @@ class VerificationService:
         if status == "failed":
             result["stdout"] = stdout.decode(errors="replace")
             result["stderr"] = stderr.decode(errors="replace")
+            if actual_exit == -1:
+                result["detail"] = "check timed out"
         return result
 
     @staticmethod

@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.config import Settings
 from governance_controller.db import get_db
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
@@ -17,6 +18,46 @@ from governance_controller.schemas import (
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.verification_service import VerificationService
+
+
+async def test_run_check_times_out_and_records_failed_result() -> None:
+    """GAP-095 regression: a long-running check is killed when timeout hits."""
+    from governance_controller.schemas.completion_contract import Check
+
+    check = Check(
+        type="sleep",
+        command="sleep 10",
+        expect_exit=0,
+    )
+
+    result = await VerificationService._run_check(check, timeout=0.1)
+
+    assert result["status"] == "failed"
+    assert result["actual_exit"] == -1
+    assert result["detail"] == "check timed out"
+    assert result["command"] == "sleep 10"
+    assert result["expected_exit"] == 0
+
+
+async def test_run_check_uses_settings_timeout_by_default() -> None:
+    """_run_check defaults to settings.macro_agent_timeout_seconds."""
+    from governance_controller.schemas.completion_contract import Check
+
+    original_settings = Settings()
+    with patch(
+        "governance_controller.services.verification_service.settings",
+        original_settings,
+    ):
+        # Use a tiny explicit timeout to keep the test fast.
+        check = Check(
+            type="sleep",
+            command="sleep 10",
+            expect_exit=0,
+        )
+        result = await VerificationService._run_check(check, timeout=0.05)
+
+    assert result["status"] == "failed"
+    assert result["actual_exit"] == -1
 
 
 async def test_default_contract_passes_all_checks() -> None:
