@@ -1,4 +1,6 @@
+import os
 from contextlib import asynccontextmanager
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import DateTime, text
@@ -102,3 +104,26 @@ async def test_get_db_success_branch_requires_no_exception(patched_db):
 
     async with asynccontextmanager(get_db)() as session:
         assert await session.get(Task, "thrown-commit") is not None
+
+
+def test_file_based_sqlite_uses_tuned_pool(tmp_path, monkeypatch):
+    """File-based SQLite should receive pool_size/max_overflow/pool_timeout."""
+    db_file = tmp_path / "test.db"
+    db_url = f"sqlite+aiosqlite:///{db_file}"
+    monkeypatch.setenv("GC_DATABASE_URL", str(db_url))
+    monkeypatch.setenv("GC_DATABASE_POOL_SIZE", "3")
+    monkeypatch.setenv("GC_DATABASE_MAX_OVERFLOW", "7")
+    monkeypatch.setenv("GC_DATABASE_POOL_TIMEOUT", "5")
+
+    import importlib
+
+    from governance_controller import config
+    from governance_controller import db as db_module
+
+    with patch.dict(os.environ, {"GC_DATABASE_URL": str(db_url)}):
+        importlib.reload(config)
+        importlib.reload(db_module)
+
+    assert db_module.engine.url.database == str(db_file)
+    assert db_module.engine.pool.size() == 3
+    assert db_module.engine.pool.timeout() == 5
