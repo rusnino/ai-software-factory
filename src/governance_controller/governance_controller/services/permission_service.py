@@ -21,7 +21,12 @@ class PermissionService:
         approval_type: ApprovalType,
     ) -> bool:
         """Return whether ``actor`` may request ``approval_type`` for ``task_id``."""
-        if actor in {"system", "agent"}:
+        if (
+            actor == "system"
+            or actor == "agent"
+            or actor.startswith("system:")
+            or actor.startswith("agent:")
+        ):
             return False
 
         if approval_type == ApprovalType.PLAN:
