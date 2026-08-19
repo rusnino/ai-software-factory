@@ -2,32 +2,15 @@
 
 ## Current State
 
-**The `CRITICAL`/`HIGH` gate is open on one gap, found in REVIEW-021 by accident while verifying the previous round's fixes: `GAP-094` — the SQLite runtime path cannot even start.**
+**`reviews/GAPS.md` has zero `OPEN`/`IN_PROGRESS` rows for the first time across this 22-review series.** `GAP-094` (the last blocking gap — SQLite's `StaticPool` rejecting the pool-tuning kwargs `GAP-083`/`GAP-091` added, breaking module import under the SQLite fallback path) is fixed and independently re-verified in REVIEW-022: import now succeeds under `GC_DATABASE_URL=sqlite+aiosqlite:///...`, a full end-to-end task create/commit works against SQLite, and the default Postgres config still receives real pool kwargs (no regression). This is the first time the `CRITICAL`/`HIGH` gate has been clean *and* stayed clean through an immediate re-check with nothing newly found in the process — every prior "clean" milestone in this series was reopened by the very next round's fresh-eyes pass.
 
-`GAP-077` (event replay) and `GAP-091` (pool-setting validation gaps) are both now genuinely fixed and independently re-verified in REVIEW-021:
-- `GAP-077`: `EventBridge` now records the processed-event dedup key before returning on the retry path. Confirmed live: a replayed identical event no longer triggers a second `executor.start()`/`Execution` row, and a genuinely distinct subsequent event still processes normally (no over-blocking regression); the full `max_retries=2` boundary sequence still produces exactly 2 `executor.start()` calls even under replay.
-- `GAP-091`: `pool_size=0`/`max_overflow=0` are now rejected (same bug class as negative values), and `pool_timeout` has a validator that correctly rejects negative values while still accepting `0` (a legitimate SQLAlchemy "fail fast" setting, semantically distinct from the pool-size zero-is-unbounded bug).
-- `GAP-093` (a suspected concurrency race raised during this verification) was analyzed and found **not exploitable**: the existing `atomic_transition` CAS on the state transition already serializes concurrent identical events before either can reach the verification/retry logic — accepted, no code change needed.
+`GAP-077` (event replay) and `GAP-091` (pool-setting validation gaps), closed in REVIEW-021 and independently re-verified: `EventBridge` now records the processed-event dedup key before returning on the retry path (a replayed identical event no longer double-executes, a genuinely distinct subsequent event still processes normally); `pool_size=0`/`max_overflow=0` are rejected like negative values, `pool_timeout` correctly rejects negative values while still accepting `0`. `GAP-093` (a suspected concurrency race) was analyzed and found not exploitable — the existing `atomic_transition` CAS already serializes concurrent identical event deliveries.
 
-**New, blocking finding — `GAP-094` (HIGH)**: `db.py`'s module-level engine now passes `GAP-083`/`GAP-091`'s pool-tuning kwargs unconditionally, but SQLite's `StaticPool` doesn't accept them at all. `GC_DATABASE_URL=sqlite+aiosqlite:///... python -c "import governance_controller.db"` raises a `TypeError` — the module fails to import, so nothing (the CLI, a script, or `uvicorn`) can start under the SQLite configuration this codebase has documented and relied on throughout this whole review series as the local-dev-without-Postgres fallback. A regression introduced by `GAP-083`, never caught because its own verification only tested the Postgres dialect and the validation logic in isolation.
+All other gaps remain closed, independently re-verified by live reproduction across the series (not just diff review) — see `reviews/GAPS.md` for the full 94-row ledger. Non-blocking, already-accepted items: `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity risk, documented, no CI enforcing the dual-DB test path yet) and `GAP-092` (a recurring dangling-commit-hash ledger-hygiene note, resolved once the coding agent started verifying hashes before writing them).
 
-Closed gaps, all independently re-verified by live reproduction (not just diff review):
-- `GAP-078` (CRITICAL): `DateTime(timezone=True)` on all datetime columns.
-- `GAP-079` (HIGH): dialect-aware profile upsert.
-- `GAP-074` (HIGH): `TaskContract.forbidden_paths` enforced.
-- `GAP-073` (MEDIUM): body-size limit on all write endpoints.
-- `GAP-080` (HIGH): no DB row lock held across macro-agent HTTP call.
-- `GAP-085` (HIGH): retry genuinely restarts execution.
-- `GAP-077` (HIGH): event-replay no longer double-executes.
-- `GAP-086` (HIGH): the body-size-limit middleware's drain loop no longer spins forever on client disconnect.
-- `GAP-087` (HIGH): the approvals fallback idempotency key is now a `sha256` hash, not a raw delimiter-joined string.
-- `GAP-082`/`GAP-083`/`GAP-091` (LOW/MEDIUM): orphaned dead code removed; DB pool settings configurable, validated, and genuinely wired.
-- `GAP-084` (MEDIUM): dual-DB test coverage bypass fixed, confirmed genuine.
-- `GAP-090` (MEDIUM): SPEC-09 §9.6's "alert human" now has a real, tested audit-log marker — honestly scoped as not a real outbound notification (Phase 2 work, candidate task 11).
+Test status: **212 passed**, `ruff` clean, `mypy --strict` clean, confirmed working against both SQLite and real PostgreSQL.
 
-Still open (non-blocking): `RISK-17`/`GAP-081` (SQLite-vs-Postgres dialect parity, no CI yet); `GAP-092` (LOW — recurring dangling-commit-hash hygiene issue; did not recur in REVIEW-021, the explicit ask to verify hashes worked).
-
-Test status: **212 passed**, `ruff` clean, `mypy --strict` clean. None of this catches `GAP-094` — the pytest suite never imports `db.py`'s module-level engine against a real SQLite `database_url`.
+**This does not mean Phase 1 is feature-complete** — see "Immediate Next Step: Phase 2" below for the substantial, honestly-disclosed list of deferred/stubbed work (real Plane sync, real macro-agent integration, reconciliation, Meta Orchestrator, Intake Adapter, security hardening, SPEC-09 §9.6's real outbound alert channel, and more). It means the acceptance criteria and known-defect ledger for what *has* been built are, as of this review, genuinely clean.
 
 Implemented components:
 
