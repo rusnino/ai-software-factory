@@ -19,7 +19,7 @@ def task_contract() -> TaskContract:
         proposed_by="agent-1",
         objective="Implement the feature",
         acceptance=["Tests pass", "Code merged"],
-        execution=ExecutionConfig(team="default", harness="opencode"),
+        execution=ExecutionConfig(team="default", harness="opencode", role="planner"),
     )
 
 
@@ -39,6 +39,7 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
             "task_id": "task-1",
             "team": "default",
             "harness": "opencode",
+            "role": "planner",
             "objective": "Implement the feature",
             "acceptance": ["Tests pass", "Code merged"],
             "timeout_minutes": 60,
