@@ -510,6 +510,33 @@ class TestEventBridgeTransitions:
         assert task.execution_attempts == 1
         mock_executor.start.assert_awaited_once()
 
+    async def test_blocked_task_cannot_be_unblocked_by_non_conflict_event(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-099 regression: only conflict:resolved may unblock BLOCKED."""
+        task = Task(
+            id="task-blocked-stream-committed",
+            project_id="proj-1",
+            state=TaskState.BLOCKED,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        event = _make_event("stream:committed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        assert task.state == TaskState.BLOCKED
+        rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        entries = rows.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].event_type == "macro_agent_stream:committed"
+        assert "transition_error" in entries[0].payload
+        assert "conflict:resolved" in entries[0].payload["transition_error"]
+
     async def test_terminal_failed_cannot_be_resurrected_by_running_event(
         self,
         db_session: AsyncSession,
