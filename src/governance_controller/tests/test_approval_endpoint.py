@@ -201,6 +201,29 @@ class TestApprovalEndpoint:
         )
 
         assert response.status_code == 403
+        body = response.json()
+        assert "violations" in body["detail"]
+        assert isinstance(body["detail"]["violations"], list)
+
+    async def test_policy_violation_with_comma_preserved(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """GAP-100 regression: violations containing commas remain whole."""
+        sample_profile.security.forbidden_paths = ["/secure/a,b"]
+        sample_contract.inputs = ["/secure/a,b/c"]
+        await _create_task(async_client, sample_contract, sample_profile)
+
+        response = await async_client.post(
+            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+        )
+
+        assert response.status_code == 403
+        violations = response.json()["detail"]["violations"]
+        assert any("/secure/a,b" in v for v in violations)
+        assert sum("/secure/a" in v for v in violations) == 1
 
     async def test_invalid_timestamp_returns_400(
         self,

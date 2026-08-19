@@ -38,6 +38,19 @@ from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.utils.paths import normalize_path
 
 
+class PolicyViolationError(Exception):
+    """Raised when policy evaluation rejects an approval request.
+
+    Carries the original human-readable message and a structured list of
+    violations so callers do not have to parse comma-joined strings.
+    """
+
+    def __init__(self, message: str, violations: list[str]) -> None:
+        super().__init__(message)
+        self.message = message
+        self.violations = violations
+
+
 @dataclass
 class PolicyResult:
     """Result of policy evaluation."""
