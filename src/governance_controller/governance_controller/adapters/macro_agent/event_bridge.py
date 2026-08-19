@@ -181,16 +181,10 @@ class EventBridge:
             await verifier.verify_and_advance(
                 db, task, contract, profile=profile, executor=verifier.executor
             )
-            # A verification failure with remaining retries transitions the task
-            # back to RUNNING. Don't record the event as processed in that case;
-            # the same landing:completed replay (if any) is harmless because the
-            # task won't be in AGENT_REVIEW until the next landing completes.
-            if task.state == TaskState.RUNNING:  # type: ignore[comparison-overlap]
-                return
-
-        # Record the event as processed only after transitions and
-        # verification succeed. A missing event_id/event_timestamp means we
-        # cannot deduplicate, so we persist only when the full key is present.
+        # Record the event as processed so a replay is ignored regardless of
+        # whether verification passed, failed terminally, or failed with a
+        # retry scheduled. A missing event_id/event_timestamp means we cannot
+        # deduplicate, so we persist only when the full key is present.
         if event_id and event_timestamp:
             await EventBridge._record_processed_event(
                 db,
@@ -199,6 +193,12 @@ class EventBridge:
                 event_timestamp=event_timestamp,
                 event_id=event_id,
             )
+
+        # A verification failure with remaining retries transitions the task
+        # back to RUNNING. The processed-event key has already been recorded,
+        # so a replayed landing:completed cannot re-enter the retry path.
+        if target_state == TaskState.AGENT_REVIEW and task.state == TaskState.RUNNING:
+            return
 
         payload: dict[str, Any] = {"event": event}
         if transition_error is not None:

@@ -484,6 +484,15 @@ class TestEventBridgeTransitions:
         )
         assert executions.scalar_one_or_none() is not None
 
+        # GAP-077 residual: a replay of the same landing:completed event must
+        # not re-enter the retry path (no second executor.start call).
+        await EventBridge.handle(
+            db_session, event, verification_service=verifier
+        )
+        assert task.state == TaskState.RUNNING
+        assert task.execution_attempts == 1
+        mock_executor.start.assert_awaited_once()
+
     async def test_terminal_failed_cannot_be_resurrected_by_running_event(
         self,
         db_session: AsyncSession,

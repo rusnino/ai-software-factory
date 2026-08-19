@@ -40,14 +40,29 @@ def test_log_level_reads_from_env(
     assert os.environ.get("GC_LOG_LEVEL") == env_value
 
 
+def test_zero_pool_size_is_rejected() -> None:
+    with pytest.raises(ValueError, match="pool size and max_overflow must be positive"):
+        Settings(database_pool_size=0)
+
+
+def test_zero_max_overflow_is_rejected() -> None:
+    with pytest.raises(ValueError, match="pool size and max_overflow must be positive"):
+        Settings(database_max_overflow=0)
+
+
 def test_negative_pool_size_is_rejected() -> None:
-    with pytest.raises(ValueError, match="pool settings must be non-negative"):
+    with pytest.raises(ValueError, match="pool size and max_overflow must be positive"):
         Settings(database_pool_size=-5)
 
 
 def test_negative_max_overflow_is_rejected() -> None:
-    with pytest.raises(ValueError, match="pool settings must be non-negative"):
+    with pytest.raises(ValueError, match="pool size and max_overflow must be positive"):
         Settings(database_max_overflow=-1)
+
+
+def test_negative_pool_timeout_is_rejected() -> None:
+    with pytest.raises(ValueError, match="pool timeout must be non-negative"):
+        Settings(database_pool_timeout=-30)
 
 
 def test_unknown_log_level_is_rejected() -> None:

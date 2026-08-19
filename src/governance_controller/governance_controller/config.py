@@ -32,9 +32,16 @@ class Settings(BaseSettings):
 
     @field_validator("database_pool_size", "database_max_overflow")
     @classmethod
-    def _non_negative_pool_setting(cls, value: int) -> int:
+    def _positive_pool_setting(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("pool size and max_overflow must be positive")
+        return value
+
+    @field_validator("database_pool_timeout")
+    @classmethod
+    def _non_negative_pool_timeout(cls, value: int) -> int:
         if value < 0:
-            raise ValueError("pool settings must be non-negative")
+            raise ValueError("pool timeout must be non-negative")
         return value
 
     @field_validator("log_level")
