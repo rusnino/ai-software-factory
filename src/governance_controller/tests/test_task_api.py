@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from governance_controller.constants import TaskState
 from governance_controller.db import get_db
 from governance_controller.main import app
+from governance_controller.models.task import Task
 from governance_controller.schemas import ProjectProfile, RepositoryConfig, TaskContract
 
 
@@ -85,6 +86,30 @@ class TestTaskApi:
         body = response.json()
         assert body["id"] == "api-task-1"
         assert body["state"] == TaskState.PROPOSED.value
+        assert body["execution_attempts"] == 0
+
+    async def test_execution_attempts_increments_on_retry(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+        client_db_session,
+    ) -> None:
+        create_payload = {
+            "task_contract": sample_contract.model_dump(),
+            "project_profile": sample_profile.model_dump(),
+        }
+        await async_client.post("/tasks", json=create_payload)
+
+        task = await client_db_session.get(Task, sample_contract.task_id)
+        task.execution_attempts += 1
+        await client_db_session.commit()
+
+        response = await async_client.get("/tasks/api-task-1")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["execution_attempts"] == 1
 
     async def test_get_task_nonexistent_returns_404(
         self,

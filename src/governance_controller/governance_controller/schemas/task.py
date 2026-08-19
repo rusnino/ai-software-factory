@@ -24,3 +24,4 @@ class TaskResponse(BaseModel):
     proposed_by: str
     created_at: datetime
     updated_at: datetime | None
+    execution_attempts: int
