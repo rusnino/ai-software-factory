@@ -5,13 +5,19 @@ from sqlmodel import SQLModel
 
 from governance_controller.config import settings
 
+
+def _is_in_memory_sqlite(database_url: str) -> bool:
+    """Return True for in-memory SQLite URLs that require StaticPool."""
+    return database_url.startswith("sqlite") and ":memory:" in database_url
+
+
 _ENGINE_KWARGS: dict[str, object] = {
     "echo": False,
     "future": True,
     "pool_pre_ping": settings.database_pool_pre_ping,
 }
 
-if not settings.database_url.startswith("sqlite"):
+if not _is_in_memory_sqlite(settings.database_url):
     _ENGINE_KWARGS.update(
         {
             "pool_size": settings.database_pool_size,
