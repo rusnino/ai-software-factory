@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -509,6 +511,85 @@ class TestEventBridgeTransitions:
         assert task.state == TaskState.RUNNING
         assert task.execution_attempts == 1
         mock_executor.start.assert_awaited_once()
+
+    async def test_retry_executor_failure_records_dedup_key(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """GAP-097 regression: dedup key persists even if retry start fails."""
+        from unittest.mock import AsyncMock
+
+        from governance_controller.adapters.macro_agent.executor import (
+            MacroAgentExecutor,
+        )
+
+        task = Task(
+            id="task-retry-dedup",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            execution_attempts=0,
+            task_contract_json=TaskContract(
+                task_id="task-retry-dedup",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Exercise retry dedup on executor failure",
+                acceptance=["Dedup key survives retry executor.start failure"],
+                execution={"max_retries": 2},
+                completion_contract=CompletionContract(
+                    task_id="task-retry-dedup",
+                    required=[
+                        Check(
+                            type="always_fail",
+                            command="exit 1",
+                            expect_exit=0,
+                        ),
+                    ],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        calls = 0
+
+        async def _failing_then_ok(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConnectionError("macro-agent unavailable")
+            return {"run_id": "retry-run-ok"}
+
+        mock_executor = AsyncMock(spec=MacroAgentExecutor)
+        mock_executor.start.side_effect = _failing_then_ok
+        verifier = VerificationService(executor=mock_executor)
+
+        event = _make_event("landing:completed", task.id)
+
+        # First delivery: retry executor.start fails.
+        with pytest.raises(RuntimeError, match="retry macro-agent start failed"):
+            await EventBridge.handle(
+                db_session, event, verification_service=verifier
+            )
+
+        assert task.state == TaskState.FAILED
+        assert task.execution_attempts == 1
+        assert calls == 1
+
+        # Second delivery of the same event: must be deduplicated, so no
+        # second executor.start call and execution_attempts stays at 1.
+        await EventBridge.handle(
+            db_session, event, verification_service=verifier
+        )
+        assert task.state == TaskState.FAILED
+        assert task.execution_attempts == 1
+        assert calls == 1
 
     async def test_blocked_task_cannot_be_unblocked_by_non_conflict_event(
         self,

@@ -191,13 +191,29 @@ class EventBridge:
                 profile = await TaskService(db).get_profile_by_project_id(
                     task.project_id
                 )
-            await verifier.verify_and_advance(
-                db, task, contract, profile=profile, executor=verifier.executor
-            )
+            try:
+                await verifier.verify_and_advance(
+                    db, task, contract, profile=profile, executor=verifier.executor
+                )
+            finally:
+                # Record the event as processed so a replay is ignored even if
+                # verify_and_advance raises (e.g. retry executor.start() failed).
+                # A missing event_id/event_timestamp means we cannot deduplicate,
+                # so we persist only when the full key is present.
+                if event_id and event_timestamp:
+                    await EventBridge._record_processed_event(
+                        db,
+                        task_id=task_id,
+                        event_type=event_type,
+                        event_timestamp=event_timestamp,
+                        event_id=event_id,
+                    )
+
         # Record the event as processed so a replay is ignored regardless of
-        # whether verification passed, failed terminally, or failed with a
-        # retry scheduled. A missing event_id/event_timestamp means we cannot
-        # deduplicate, so we persist only when the full key is present.
+        # whether verification passed, failed terminally, failed with a retry
+        # scheduled, or was skipped because no contract was stored. A missing
+        # event_id/event_timestamp means we cannot deduplicate, so we persist
+        # only when the full key is present.
         if event_id and event_timestamp:
             await EventBridge._record_processed_event(
                 db,
@@ -206,6 +222,7 @@ class EventBridge:
                 event_timestamp=event_timestamp,
                 event_id=event_id,
             )
+            await db.flush()
 
         # A verification failure with remaining retries transitions the task
         # back to RUNNING. The processed-event key has already been recorded,

@@ -419,6 +419,9 @@ class VerificationService:
                     "verification_report": report,
                 },
             )
+            # If the retry cannot even start, the task cannot recover on its
+            # own; move it to terminal FAILED so humans are alerted.
+            await StateMachine.atomic_transition(db, task, TaskState.FAILED)
             await db.commit()
             raise RuntimeError(
                 f"retry macro-agent start failed: {exc}"
