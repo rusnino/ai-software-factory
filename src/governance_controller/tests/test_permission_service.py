@@ -77,3 +77,25 @@ class TestPermissionServiceSystemAndAgent:
                 "task-1",
                 approval_type,
             )
+
+    async def test_system_prefixed_actor_cannot_approve(
+        self,
+        service: PermissionService,
+    ) -> None:
+        for approval_type in ApprovalType:
+            assert not await service.may_approve(
+                "system:macro-agent",
+                "task-1",
+                approval_type,
+            )
+
+    async def test_agent_prefixed_actor_cannot_approve(
+        self,
+        service: PermissionService,
+    ) -> None:
+        for approval_type in ApprovalType:
+            assert not await service.may_approve(
+                "agent:worker",
+                "task-1",
+                approval_type,
+            )
