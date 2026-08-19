@@ -127,30 +127,40 @@ class EventBridge:
 
         transition_error: str | None = None
         if target_state is not None and task.state != target_state:
-            valid_transition = True
-            try:
-                StateMachine.validate_transition(task.state, target_state)
-            except ValueError:
-                valid_transition = False
-
-            if valid_transition:
-                if not await StateMachine.atomic_transition(
-                    db, task, target_state
-                ):
-                    raise ValueError(
-                        "Concurrent modification detected: "
-                        "task state changed during event handling"
-                    )
-                # Re-load the task so the in-memory object reflects the latest
-                # DB state after our own successful update.
-                task = await db.get(Task, task_id)
-                if task is None:
-                    return
-            else:
+            # GAP-099: Only conflict:resolved is allowed to unblock a BLOCKED
+            # task. Other RUNNING-mapped events must be rejected so a stray
+            # worktree or merge-queue event cannot silently resume blocked
+            # work.
+            if task.state == TaskState.BLOCKED and event_type != "conflict:resolved":
                 transition_error = (
-                    f"Invalid transition: {task.state.value} -> "
-                    f"{target_state.value}"
+                    f"Blocked task may only be unblocked by conflict:resolved; "
+                    f"got {event_type}"
                 )
+            else:
+                valid_transition = True
+                try:
+                    StateMachine.validate_transition(task.state, target_state)
+                except ValueError:
+                    valid_transition = False
+
+                if valid_transition:
+                    if not await StateMachine.atomic_transition(
+                        db, task, target_state
+                    ):
+                        raise ValueError(
+                            "Concurrent modification detected: "
+                            "task state changed during event handling"
+                        )
+                    # Re-load the task so the in-memory object reflects the
+                    # latest DB state after our own successful update.
+                    task = await db.get(Task, task_id)
+                    if task is None:
+                        return
+                else:
+                    transition_error = (
+                        f"Invalid transition: {task.state.value} -> "
+                        f"{target_state.value}"
+                    )
 
         # Phase 1: landing:completed triggers automated verification that gates
         # AGENT_REVIEW -> HUMAN_REVIEW. This is a stub-grade integration until
