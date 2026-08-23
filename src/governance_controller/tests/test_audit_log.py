@@ -230,6 +230,31 @@ def _is_postgres(url: str) -> bool:
     return url.startswith("postgresql")
 
 
+async def test_run_migrations_raises_when_auditlog_table_missing() -> None:
+    """#137: run_migrations() guard raises before introspecting a missing table."""
+    from governance_controller.db import engine as db_engine
+    from governance_controller.db import run_migrations
+
+    original_engine = db_engine
+    # Use a fresh, empty in-memory SQLite database with no create_all().
+    test_engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        echo=False,
+        future=True,
+    )
+    try:
+        db_module = __import__("governance_controller.db", fromlist=["engine"])
+        db_module.engine = test_engine
+        with pytest.raises(
+            RuntimeError,
+            match=r"run_migrations\(\) called before auditlog table exists",
+        ):
+            await run_migrations()
+    finally:
+        db_module.engine = original_engine
+        await test_engine.dispose()
+
+
 @pytest.mark.skipif(
     not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
