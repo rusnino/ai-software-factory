@@ -311,14 +311,33 @@ class VerificationService:
         # override so a guessed/non-existent path does not crash verification
         # before any state transition is attempted (#118).
         worktree_path: str | None = None
+        fallback_to_cwd = False
         if profile is not None:
             repo_path = getattr(profile.repository, "path", None)
             if repo_path:
                 candidate = os.path.join(str(repo_path), "worktrees", task.id)
                 if os.path.isdir(candidate):
                     worktree_path = candidate
+                else:
+                    fallback_to_cwd = True
 
         report = await service.verify_execution(contract, cwd=worktree_path)
+
+        # SPEC-03 §3.8: record when verification silently degrades to the
+        # Controller's own cwd because the guessed worktree is missing.
+        if fallback_to_cwd:
+            await AuditService.log(
+                db=db,
+                event_type="verification_cwd_fallback",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "expected_worktree": candidate,
+                    "reason": "guessed worktree directory does not exist",
+                    "verification_report": report,
+                },
+            )
 
         if report["passed"]:
             target_state = TaskState.HUMAN_REVIEW

@@ -475,6 +475,63 @@ async def test_verification_commands_merge_with_completion_contract() -> None:
     assert checks["scope"]["status"] == "passed"
 
 
+async def test_verify_and_advance_logs_cwd_fallback_when_worktree_missing(
+    db_session: AsyncSession,
+) -> None:
+    """#128: falling back to the Controller cwd must leave an audit trail."""
+    from governance_controller.constants import TaskState
+    from governance_controller.schemas.project_profile import ProjectProfile
+
+    task = Task(
+        id="task-fallback-audit",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        task_contract_json=TaskContract(
+            task_id="task-fallback-audit",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Verify cwd fallback audit",
+            acceptance=["audit event present"],
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    profile = ProjectProfile(
+        project_id="proj-1",
+        project_name="Test Project",
+        repository={"path": "/nonexistent/repo/path"},
+        execution={"allowed_harnesses": ["opencode"]},
+        security={"forbidden_paths": []},
+        git={"merge_requires_human": True},
+    )
+    contract = TaskContract(
+        task_id="task-fallback-audit",
+        project_id="proj-1",
+        proposed_by="agent-1",
+        objective="Verify cwd fallback audit",
+        acceptance=["audit event present"],
+    )
+
+    await VerificationService.verify_and_advance(
+        db_session, task, contract, profile=profile
+    )
+
+    audits = (
+        await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == "task-fallback-audit")
+        )
+    ).scalars().all()
+    events = [a.event_type for a in audits]
+    assert "verification_cwd_fallback" in events
+    fallback = next(
+        a for a in audits if a.event_type == "verification_cwd_fallback"
+    )
+    assert fallback.payload["reason"] == "guessed worktree directory does not exist"
+    assert "/nonexistent/repo/path" in fallback.payload["expected_worktree"]
+
+
 class TestVerificationConcurrency:
     """Regression tests for verification CAS and audit durability."""
 
