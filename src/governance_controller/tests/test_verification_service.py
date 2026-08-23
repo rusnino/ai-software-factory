@@ -46,6 +46,29 @@ async def test_run_check_times_out_and_records_failed_result(tmp_path) -> None:
     assert elapsed < 2.0
 
 
+async def test_run_check_handles_subprocess_creation_error() -> None:
+    """#132: OSError during subprocess creation returns a failed check result."""
+    from governance_controller.schemas.completion_contract import Check
+
+    # Use a cwd path that is extremely unlikely to exist so create_subprocess_shell
+    # raises OSError before the shell can even be spawned.
+    check = Check(
+        type="true",
+        command="true",
+        expect_exit=0,
+    )
+
+    result = await VerificationService._run_check(
+        check,
+        cwd="/this/path/should/not/exist/for/gc/test",
+    )
+
+    assert result["status"] == "failed"
+    assert result["actual_exit"] == -1
+    assert "subprocess creation failed" in result["detail"]
+    assert result["command"] == check.command
+
+
 async def test_run_check_uses_provided_cwd(tmp_path) -> None:
     """Check commands run in the supplied working directory."""
     from governance_controller.schemas.completion_contract import Check

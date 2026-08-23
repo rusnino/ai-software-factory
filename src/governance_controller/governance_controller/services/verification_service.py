@@ -14,6 +14,7 @@ import signal
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -76,14 +77,42 @@ class VerificationService:
         # scoping HOME is a cheap layer of filesystem isolation.
         if cwd is not None:
             env["HOME"] = cwd
-        proc = await asyncio.create_subprocess_shell(
-            check.command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
-            cwd=cwd,
-            env=env,
-        )
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                check.command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+                cwd=cwd,
+                env=env,
+            )
+        except OSError as exc:
+            logger = structlog.get_logger("governance_controller.audit")
+            logger.info(
+                "audit_log_entry",
+                event_type="verification_check_failed",
+                task_id="unknown",
+                actor="system",
+                source="verification_service",
+                payload={
+                    "command": check.command,
+                    "expected_exit": check.expect_exit,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "detail": "subprocess creation failed",
+                },
+            )
+            return {
+                "name": f"required:{check.type}",
+                "status": "failed",
+                "command": check.command,
+                "expected_exit": check.expect_exit,
+                "actual_exit": -1,
+                "stdout": "",
+                "stderr": "",
+                "detail": f"subprocess creation failed: {exc}",
+            }
+
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
