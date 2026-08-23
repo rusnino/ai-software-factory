@@ -2,10 +2,13 @@
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import Column, DateTime, Index, event
 from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.engine import Connection
+from sqlalchemy.orm import Mapper
+from sqlalchemy.sql.expression import ColumnElement
 from sqlmodel import Field, SQLModel
 
 
@@ -87,15 +90,17 @@ class AuditLog(SQLModel, table=True):
 
 
 @event.listens_for(AuditLog, "before_insert")
-def _audit_log_before_insert(mapper, connection, target: AuditLog) -> None:  # noqa: ANN001, ARG001
+def _audit_log_before_insert(
+    mapper: Mapper[Any], connection: Connection, target: AuditLog
+) -> None:
     """Hash-chain new audit rows before they are inserted."""
     from sqlalchemy import select
 
     if target.row_hash is None:
         if target.previous_hash == "":
             result = connection.execute(
-                select(AuditLog.row_hash)
-                .order_by(AuditLog.id.desc())
+                select(cast(ColumnElement[str], AuditLog.row_hash))
+                .order_by(cast(ColumnElement[int], AuditLog.id).desc())
                 .limit(1)
             )
             previous = result.scalar()
@@ -104,12 +109,16 @@ def _audit_log_before_insert(mapper, connection, target: AuditLog) -> None:  # n
 
 
 @event.listens_for(AuditLog, "before_update")
-def _audit_log_reject_update(mapper, connection, target: AuditLog) -> None:  # noqa: ANN001, ARG001
+def _audit_log_reject_update(
+    mapper: Mapper[Any], connection: Connection, target: AuditLog
+) -> None:
     """Raise an exception if anything tries to mutate an audit row."""
     raise RuntimeError("AuditLog rows are append-only and cannot be updated")
 
 
 @event.listens_for(AuditLog, "before_delete")
-def _audit_log_reject_delete(mapper, connection, target: AuditLog) -> None:  # noqa: ANN001, ARG001
+def _audit_log_reject_delete(
+    mapper: Mapper[Any], connection: Connection, target: AuditLog
+) -> None:
     """Raise an exception if anything tries to delete an audit row."""
     raise RuntimeError("AuditLog rows are append-only and cannot be deleted")
