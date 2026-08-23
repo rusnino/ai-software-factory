@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 
@@ -37,9 +38,85 @@ AsyncSessionLocal = async_sessionmaker(
 )
 
 
+def _get_audit_log_table() -> type[SQLModel]:
+    from governance_controller.models.audit_log import AuditLog
+
+    return AuditLog
+
+
+async def run_migrations() -> None:
+    """Apply lightweight startup migrations that ``create_all`` skips.
+
+    ``SQLModel.metadata.create_all`` does not alter existing tables, so adding
+    new columns (such as AuditLog's ``previous_hash``/``row_hash``) to a
+    pre-existing database requires an explicit ``ALTER TABLE``. This function
+    is a minimal in-code migration runner for Phase 1; a full Alembic setup
+    may replace it in Phase 2.
+    """
+    # Force the AuditLog model to be imported so its table name is known.
+    _get_audit_log_table()
+    async with engine.begin() as conn:
+        columns = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).get_columns("auditlog")
+        )
+        column_names = {c["name"] for c in columns}
+        dialect_name = conn.dialect.name
+
+        new_columns: list[tuple[str, str]] = []
+        if "previous_hash" not in column_names:
+            new_columns.append(("previous_hash", "VARCHAR"))
+        if "row_hash" not in column_names:
+            new_columns.append(("row_hash", "VARCHAR"))
+
+        for column_name, column_type in new_columns:
+            await conn.execute(
+                text(
+                    f"ALTER TABLE auditlog ADD COLUMN {column_name} "
+                    f"{column_type} DEFAULT ''"
+                )
+            )
+
+        # Backfill any legacy rows that were inserted before the migration.
+        # Hash values cannot be reconstructed deterministically for old rows,
+        # but empty-string placeholders let the chain continue from this point.
+        if new_columns:
+            await conn.execute(
+                text(
+                    "UPDATE auditlog SET previous_hash = '' "
+                    "WHERE previous_hash IS NULL OR previous_hash = ''"
+                )
+            )
+            await conn.execute(
+                text(
+                    "UPDATE auditlog SET row_hash = '' "
+                    "WHERE row_hash IS NULL OR row_hash = ''"
+                )
+            )
+
+        # Apply DB-level immutability triggers to existing tables (#120).
+        from governance_controller.models.audit_log import (
+            _AUDITLOG_POSTGRES_FUNCTION,
+            _AUDITLOG_POSTGRES_TRIGGER,
+            _AUDITLOG_SQLITE_DELETE_TRIGGER,
+            _AUDITLOG_SQLITE_DROP_DELETE,
+            _AUDITLOG_SQLITE_DROP_UPDATE,
+            _AUDITLOG_SQLITE_UPDATE_TRIGGER,
+        )
+
+        if dialect_name == "postgresql":
+            await conn.execute(_AUDITLOG_POSTGRES_FUNCTION)
+            await conn.execute(_AUDITLOG_POSTGRES_TRIGGER)
+        elif dialect_name == "sqlite":
+            await conn.execute(_AUDITLOG_SQLITE_DROP_UPDATE)
+            await conn.execute(_AUDITLOG_SQLITE_DROP_DELETE)
+            await conn.execute(_AUDITLOG_SQLITE_UPDATE_TRIGGER)
+            await conn.execute(_AUDITLOG_SQLITE_DELETE_TRIGGER)
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+    await run_migrations()
 
 
 async def ensure_sqlite_tables() -> None:
