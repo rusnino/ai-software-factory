@@ -88,13 +88,40 @@ Stop Phase 1 and document a blocker if:
 
 ## Review Findings and Gap Tracking
 
-Any agent that reviews another agent's work (code review, spec-conformance review, security review) — whether asked to by a human or as a self-check before declaring something done — follows this convention so findings survive across agent sessions instead of living only in one session's chat history:
+**As of 2026-08-19, gap tracking lives in GitHub Issues on `rusnino/ai-software-factory`, not in
+`reviews/GAPS.md`/`reviews/REVIEW-NNN-*.md`.** Those files are a frozen historical record (106 gaps,
+`GAP-001` through `GAP-106`, all migrated as closed/resolved Issues — see the banner at the top of
+`reviews/GAPS.md`) — do not add new rows or new `REVIEW-NNN` files to them. Any agent that reviews
+another agent's work (code review, spec-conformance review, security review) — whether asked to by a
+human or as a self-check before declaring something done — follows this convention instead, so
+findings survive across agent sessions and are visible/searchable in the same place the code lives:
 
-- Write the full findings to `reviews/REVIEW-NNN-<slug>.md`, numbered sequentially like `decisions/ADR-NNN-*.md`. A review file is a point-in-time record: once written, don't edit it after the fact — if a later review revisits the same code, write a new `REVIEW-NNN` file and reference the earlier one.
-- Every finding, regardless of severity, gets one row in `reviews/GAPS.md` — the single running ledger across all reviews — with a stable `GAP-NNN` id, severity, one-line summary, source review, and status.
-- Whichever agent closes a gap (fixes the bug, wires up the missing enforcement, etc.) updates that row's status to `CLOSED` with the closing commit hash. Never delete a row — a closed row is proof the gap was found and fixed, not just forgotten.
-- **A phase may not be declared "complete" in `docs/NEXT_STEPS.md` or have its checklist ticked in `specs/SPEC-10-phase-plan.md` while any `CRITICAL` or `HIGH` gap tied to that phase is still `OPEN` in `reviews/GAPS.md`.** This is the Verification Rule below, applied to review findings specifically, not a separate exception to it.
-- `reviews/GAPS.md` is an inter-agent workflow ledger, not the Governance Controller's own audit log (SPEC-03 §3.8) — do not conflate the two. It tracks the humans'/agents' review-and-fix workflow around this repo; it has no runtime effect on the Controller itself.
+- **Filing a finding**: `gh issue create --repo rusnino/ai-software-factory --title "<short, specific
+  summary>" --body "<the full finding — failure scenario, exact file:line, reproduction evidence, same
+  level of detail a `GAPS.md` row used to carry>" --label "severity:<critical|high|medium|low>" --label
+  "phase-1"`. The GitHub issue number is the identifier from now on — reference it as `#123` in commit
+  messages, other issues, spec footnotes, and `requirements/REQUIREMENTS.md` RISK rows. There is no more
+  manual `GAP-NNN` numbering; don't invent one.
+- **Closing a finding**: whichever agent fixes it includes `Fixes #123` (or `Closes #123`) in the
+  commit message. Pushing that commit to `main` auto-closes the issue — no separate "mark it closed"
+  step needed. If a claimed fix later turns out incomplete on re-verification, `gh issue reopen 123`
+  with a comment explaining exactly what's still broken (mirroring the old "reopened, here's why" note
+  a `GAPS.md` row used to carry) — don't file a duplicate issue for the same underlying defect.
+- **Review rounds**: no more `REVIEW-NNN.md` files. A review round's findings are: a new issue per new
+  problem found, and a comment on each existing issue being re-verified — state what was checked, the
+  live-reproduction evidence, and the verdict, exactly what a `REVIEW-NNN.md` entry used to say, just on
+  that issue's timeline instead of in a separate file. `gh issue comment 123 --body "..."`.
+- **The gate rule** (unchanged in substance, restated for the new location): **a phase may not be
+  declared "complete" in `docs/NEXT_STEPS.md` or have its checklist ticked in
+  `specs/SPEC-10-phase-plan.md` while any issue labeled `severity:critical` or `severity:high` is still
+  open.** Check both severities before declaring anything complete — `gh issue list --repo
+  rusnino/ai-software-factory --label "severity:critical" --state open` and the same with
+  `severity:high` (run as two separate queries: `gh issue list`'s multiple `--label` flags are ANDed
+  together, not ORed, so a single call with both labels would never match anything). This is the
+  Verification Rule below, applied to review findings specifically, not a separate exception to it.
+- GitHub Issues here are an inter-agent workflow tracker, not the Governance Controller's own audit log
+  (SPEC-03 §3.8) — do not conflate the two. It tracks the humans'/agents' review-and-fix workflow around
+  this repo; it has no runtime effect on the Controller itself.
 
 ## Verification Rule
 
