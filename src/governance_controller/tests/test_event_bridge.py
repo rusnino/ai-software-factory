@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 import pytest
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -590,6 +589,15 @@ class TestEventBridgeTransitions:
         assert task.state == TaskState.FAILED
         assert task.execution_attempts == 1
         assert calls == 1
+
+        # GAP-097 residual: the dedup key must survive get_db()'s rollback.
+        # Simulate a fresh session and verify the ProcessedEvent row exists.
+        from governance_controller.models.processed_event import ProcessedEvent
+
+        fresh = await db_session.execute(
+            select(ProcessedEvent).where(ProcessedEvent.task_id == task.id)
+        )
+        assert fresh.scalar_one_or_none() is not None
 
     async def test_blocked_task_cannot_be_unblocked_by_non_conflict_event(
         self,

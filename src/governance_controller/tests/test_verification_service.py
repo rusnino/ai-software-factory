@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 from unittest.mock import patch
 
@@ -30,13 +31,19 @@ async def test_run_check_times_out_and_records_failed_result() -> None:
         expect_exit=0,
     )
 
+    start = asyncio.get_event_loop().time()
     result = await VerificationService._run_check(check, timeout=0.1)
+    elapsed = asyncio.get_event_loop().time() - start
 
     assert result["status"] == "failed"
     assert result["actual_exit"] == -1
     assert result["detail"] == "check timed out"
     assert result["command"] == "sleep 10"
     assert result["expected_exit"] == 0
+    # The fix must kill the whole process group, not just the shell. With
+    # start_new_session=True + os.killpg(), a forked sleep child dies within
+    # a small multiple of the timeout, not after the full 10 seconds.
+    assert elapsed < 2.0
 
 
 async def test_run_check_uses_settings_timeout_by_default() -> None:
@@ -54,10 +61,14 @@ async def test_run_check_uses_settings_timeout_by_default() -> None:
             command="sleep 10",
             expect_exit=0,
         )
+
+        start = asyncio.get_event_loop().time()
         result = await VerificationService._run_check(check, timeout=0.05)
+        elapsed = asyncio.get_event_loop().time() - start
 
     assert result["status"] == "failed"
     assert result["actual_exit"] == -1
+    assert elapsed < 2.0
 
 
 async def test_default_contract_passes_all_checks() -> None:

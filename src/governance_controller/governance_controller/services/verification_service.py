@@ -8,6 +8,8 @@ checks. If verification passes, the task is advanced from ``AGENT_REVIEW`` to
 """
 
 import asyncio
+import os
+import signal
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -54,6 +56,7 @@ class VerificationService:
             check.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -63,9 +66,14 @@ class VerificationService:
             status = "passed" if actual_exit == check.expect_exit else "failed"
         except TimeoutError:
             try:
-                proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
+                # Kill the whole process group so forked children (e.g. a
+                # shell-spawned sleep) cannot outlive the shell itself.
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
                 pass
 
             stdout, stderr = b"", b""

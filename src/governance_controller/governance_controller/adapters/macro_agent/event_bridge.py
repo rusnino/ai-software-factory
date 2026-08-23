@@ -200,6 +200,10 @@ class EventBridge:
                 # verify_and_advance raises (e.g. retry executor.start() failed).
                 # A missing event_id/event_timestamp means we cannot deduplicate,
                 # so we persist only when the full key is present.
+                #
+                # COMMIT BEFORE RE-RAISING: get_db() rolls back the session on
+                # any exception, so the dedup key must be committed while we are
+                # still inside this call (GAP-097).
                 if event_id and event_timestamp:
                     await EventBridge._record_processed_event(
                         db,
@@ -208,6 +212,7 @@ class EventBridge:
                         event_timestamp=event_timestamp,
                         event_id=event_id,
                     )
+                    await db.commit()
 
         # Record the event as processed so a replay is ignored regardless of
         # whether verification passed, failed terminally, failed with a retry
