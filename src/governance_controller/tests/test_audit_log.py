@@ -177,6 +177,50 @@ class TestAuditLogModel:
         with pytest.raises(RuntimeError, match="append-only"):
             await db_session.flush()
 
+    async def test_core_bulk_update_is_blocked(
+        self, db_session: AsyncSession
+    ) -> None:
+        """#120: Core-style update() must not bypass ORM immutability events."""
+        from sqlalchemy import update
+
+        await AuditService.log(
+            db=db_session,
+            event_type="approval",
+            task_id="task-core-update",
+            actor="human-1",
+            source="plane",
+        )
+
+        with pytest.raises(Exception, match="append-only"):
+            await db_session.execute(
+                update(AuditLog).where(
+                    AuditLog.task_id == "task-core-update"
+                ).values(actor="tampered")
+            )
+            await db_session.commit()
+
+    async def test_core_bulk_delete_is_blocked(
+        self, db_session: AsyncSession
+    ) -> None:
+        """#120: Core-style delete() must not bypass ORM immutability events."""
+        from sqlalchemy import delete
+
+        await AuditService.log(
+            db=db_session,
+            event_type="approval",
+            task_id="task-core-delete",
+            actor="human-1",
+            source="plane",
+        )
+
+        with pytest.raises(Exception, match="append-only"):
+            await db_session.execute(
+                delete(AuditLog).where(
+                    AuditLog.task_id == "task-core-delete"
+                )
+            )
+            await db_session.commit()
+
 
 class TestAuditServiceSideEffects:
     async def test_structlog_event_is_emitted(
