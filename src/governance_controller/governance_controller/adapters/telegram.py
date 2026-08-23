@@ -9,6 +9,7 @@ header if one is configured. Missing/invalid tokens produce a ``403`` so
 that unauthenticated updates cannot reach ``POST /approvals``.
 """
 
+import hmac
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -48,7 +49,9 @@ class TelegramAdapter:
         """
         if self.secret_token is None:
             return
-        if secret_token_header != self.secret_token:
+        if not hmac.compare_digest(
+            secret_token_header or "", self.secret_token
+        ):
             raise TelegramWebhookAuthError("Invalid or missing Telegram secret token")
 
     @staticmethod
