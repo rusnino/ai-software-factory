@@ -167,6 +167,7 @@ class EventBridge:
         # real CI/artifact checks exist in Phase 2. Skip verification if the
         # task has no stored contract (e.g., tests that only exercise state
         # transitions).
+        verification_happened = False
         if (
             transition_error is None
             and target_state == TaskState.AGENT_REVIEW
@@ -191,20 +192,37 @@ class EventBridge:
                 profile = await TaskService(db).get_profile_by_project_id(
                     task.project_id
                 )
+
+            # Capture the state before verification so we can tell whether this
+            # delivery actually advanced the task. If verify_and_advance raises
+            # before any transition (e.g. a non-existent guessed worktree path),
+            # the dedup key must NOT be committed so the event can be redelivered
+            # (#118).
+            state_before_verify = task.state
             try:
                 await verifier.verify_and_advance(
                     db, task, contract, profile=profile, executor=verifier.executor
                 )
+                verification_happened = True
+            except Exception:
+                # Re-load the task to see whether a transition occurred before
+                # the exception. If it did, this delivery is "spent" and should
+                # be deduplicated; if not, re-raise without recording the key so
+                # the caller can retry.
+                fresh_task = await db.get(Task, task_id)
+                if fresh_task is not None and fresh_task.state != state_before_verify:
+                    verification_happened = True
+                raise
             finally:
-                # Record the event as processed so a replay is ignored even if
-                # verify_and_advance raises (e.g. retry executor.start() failed).
-                # A missing event_id/event_timestamp means we cannot deduplicate,
-                # so we persist only when the full key is present.
+                # Record the event as processed so a replay is ignored only when
+                # verification actually ran or changed state. A missing
+                # event_id/event_timestamp means we cannot deduplicate, so we
+                # persist only when the full key is present.
                 #
                 # COMMIT BEFORE RE-RAISING: get_db() rolls back the session on
                 # any exception, so the dedup key must be committed while we are
                 # still inside this call (GAP-097).
-                if event_id and event_timestamp:
+                if verification_happened and event_id and event_timestamp:
                     await EventBridge._record_processed_event(
                         db,
                         task_id=task_id,

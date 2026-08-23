@@ -836,3 +836,121 @@ class TestEventBridgeTransitions:
             "task was already in AGENT_REVIEW"
         )
 
+    async def test_missing_worktree_path_falls_back_to_controller_cwd(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#118: a guessed worktree path that does not exist falls back."""
+        from governance_controller.models.processed_event import ProcessedEvent
+        from governance_controller.models.project_profile import (
+            ProjectProfileModel,
+        )
+        from governance_controller.schemas.project_profile import ProjectProfile
+
+        task = Task(
+            id="task-fallback-worktree",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            execution_attempts=0,
+            task_contract_json=TaskContract(
+                task_id="task-fallback-worktree",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Verify missing worktree falls back safely",
+                acceptance=["Task reaches HUMAN_REVIEW without crashing"],
+                completion_contract=CompletionContract(
+                    task_id="task-fallback-worktree",
+                    required=[Check(type="true", command="true")],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        # Persist a profile whose repository.path has no worktrees/task-id dir.
+        profile = ProjectProfile(
+            project_id="proj-1",
+            project_name="No Worktree",
+            repository={"path": "/nonexistent/repository/path"},
+            execution={"allowed_harnesses": ["opencode"]},
+            security={"forbidden_paths": []},
+        )
+        db_session.add(
+            ProjectProfileModel(
+                project_id="proj-1",
+                profile_json=profile.model_dump(mode="json"),
+            )
+        )
+        await db_session.flush()
+
+        event = _make_event("landing:completed", task.id)
+        await EventBridge.handle(db_session, event)
+
+        # Verification falls back to Controller cwd and succeeds.
+        assert task.state == TaskState.HUMAN_REVIEW
+        processed = await db_session.execute(
+            select(ProcessedEvent).where(ProcessedEvent.task_id == task.id)
+        )
+        assert processed.scalar_one_or_none() is not None
+
+    async def test_verify_exception_before_state_change_does_not_dedup(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#118: dedup is not recorded if verification raises before transition."""
+        from unittest.mock import AsyncMock
+
+        from governance_controller.models.processed_event import ProcessedEvent
+
+        task = Task(
+            id="task-verify-raise",
+            project_id="proj-1",
+            state=TaskState.RUNNING,
+            proposed_by="agent-1",
+            execution_attempts=0,
+            task_contract_json=TaskContract(
+                task_id="task-verify-raise",
+                project_id="proj-1",
+                proposed_by="agent-1",
+                objective="Verify exception handling does not dedup",
+                acceptance=["Redelivery must be possible"],
+                completion_contract=CompletionContract(
+                    task_id="task-verify-raise",
+                    required=[Check(type="true", command="true")],
+                    forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                    scope_check=ScopeCheck(
+                        description="No scope constraints",
+                        allowed_paths=[],
+                        forbidden_paths=[],
+                    ),
+                ),
+            ).model_dump(mode="json"),
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        verifier = VerificationService()
+        verifier.verify_and_advance = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("verification exploded before transition")
+        )
+
+        event = _make_event("landing:completed", task.id)
+        with pytest.raises(RuntimeError, match="verification exploded"):
+            await EventBridge.handle(
+                db_session, event, verification_service=verifier
+            )
+
+        # Task never left AGENT_REVIEW and no dedup key was recorded.
+        assert task.state == TaskState.AGENT_REVIEW
+        processed = await db_session.execute(
+            select(ProcessedEvent).where(ProcessedEvent.task_id == task.id)
+        )
+        assert processed.scalar_one_or_none() is None
+

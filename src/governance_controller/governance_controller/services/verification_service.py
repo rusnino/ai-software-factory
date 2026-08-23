@@ -40,8 +40,11 @@ class VerificationService:
 
     # Environment variables that are safe to propagate to verification checks.
     # Controller secrets (DB credentials, macro-agent tokens, etc.) are excluded.
+    # HOME/USER/SHELL are intentionally omitted: HOME is scoped to the worktree
+    # (or omitted), and USER/SHELL leak the Controller process identity without
+    # adding value to the check.
     _SAFE_ENV_KEYS: frozenset[str] = frozenset(
-        {"PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM", "PWD"}
+        {"PATH", "LANG", "LC_ALL", "TERM", "PWD"}
     )
 
     @staticmethod
@@ -67,6 +70,12 @@ class VerificationService:
             for key, value in os.environ.items()
             if key in VerificationService._SAFE_ENV_KEYS
         }
+        # Scope HOME to the task worktree when one is supplied. This prevents
+        # an approved check from reading/writing the Controller user's real home
+        # directory via $HOME or ~ expansion. A worktree is not a sandbox, but
+        # scoping HOME is a cheap layer of filesystem isolation.
+        if cwd is not None:
+            env["HOME"] = cwd
         proc = await asyncio.create_subprocess_shell(
             check.command,
             stdout=asyncio.subprocess.PIPE,
@@ -298,15 +307,16 @@ class VerificationService:
         service = cls(executor=executor)
 
         # Determine a task-specific worktree when a repository path is provided.
+        # Only use the path if it actually exists; otherwise fall back to no cwd
+        # override so a guessed/non-existent path does not crash verification
+        # before any state transition is attempted (#118).
         worktree_path: str | None = None
         if profile is not None:
             repo_path = getattr(profile.repository, "path", None)
             if repo_path:
-                worktree_path = os.path.join(
-                    str(repo_path),
-                    "worktrees",
-                    task.id,
-                )
+                candidate = os.path.join(str(repo_path), "worktrees", task.id)
+                if os.path.isdir(candidate):
+                    worktree_path = candidate
 
         report = await service.verify_execution(contract, cwd=worktree_path)
 
