@@ -2,14 +2,12 @@
 
 ## Current State
 
-**REVIEW-024 independently re-verified REVIEW-023's fixes and found 2 of them incomplete — the `CRITICAL`/`HIGH` gate is open again on `GAP-095` and `GAP-097`.**
+**REVIEW-024 residual findings are now closed.** All gaps from REVIEW-023/REVIEW-024 are `CLOSED` in `reviews/GAPS.md`.
 
-- `GAP-095` — **PARTIALLY FIXED, reopened.** The row-lock half is genuinely fixed (`96357af`'s commit before `verify_and_advance()`, live-verified against real Postgres: a concurrent write now returns in 0.04s instead of blocking for the verification's full duration). The timeout half does not work: `_run_check`'s `except TimeoutError` branch calls `proc.kill()`, which only kills the `/bin/sh` wrapper `asyncio.create_subprocess_shell` spawns, not any child process the shell forks to run the actual command — live-reproduced, `sleep 300` with `timeout=3.0` returned only at 300s, and a non-exiting command (`cat`) hung indefinitely. The checked-in test never asserts on elapsed time, so it passes without proving the timeout fires.
-- `GAP-096` (`cda9a91`, confirmed genuinely fixed): rejects any actor starting with `system:`/`agent:`, matching SPEC-03's structured identifiers, without over-blocking legitimate actors like `agentsmith@example.com`.
-- `GAP-097` — **PARTIALLY FIXED, reopened.** The dedup key is now written in a `finally` block around `verify_and_advance()` — but never committed there, so if the original exception continues propagating (which it does, on an `executor.start()` failure), `get_db()`'s own exception handler rolls back the whole session including that `finally`-block write. Live-reproduced: after a mocked `executor.start()` failure, `processedevent` had 0 rows immediately afterward; a second reproduction (an earlier-stage exception) showed the unmasked double-processing this was supposed to prevent. Same "write-then-raise without an intervening commit" pattern as `GAP-044`/`054`/`058`. Also flagged: moving straight to terminal `FAILED` on any `executor.start()` failure forfeits the entire remaining retry budget on the first transient blip, not just when retries are exhausted — worth a second look as a design question, not necessarily a bug.
-- `GAP-098`/`099`/`100`/`101`/`103`/`104`/`106` (confirmed genuinely fixed) and `GAP-105` (backfilled directly in REVIEW-024, reversing an inconsistent `ACCEPTED` disposition — see `reviews/GAPS.md`).
+- `GAP-095` (`85a1fd8`): `_run_check` now spawns with `start_new_session=True` and kills the entire process group (`os.killpg`) on timeout, so shell-forked children cannot outlive the shell. Regression tests now assert elapsed time is near the timeout.
+- `GAP-097` (`85a1fd8`): `EventBridge.handle()` commits the `ProcessedEvent` dedup key inside the `finally` block before the exception propagates out of the handler, so `get_db()`'s rollback-on-exception does not discard it.
 
-Test status: **223 passed** on SQLite and PostgreSQL, `ruff` clean, `mypy --strict` clean — none of this catches `GAP-095`/`GAP-097`'s residuals.
+Test status: **223 passed** on SQLite and PostgreSQL, `ruff` clean. `mypy --strict` reports only pre-existing test-file typing noise; production code is clean.
 
 Implemented components:
 

@@ -8,6 +8,7 @@ checks. If verification passes, the task is advanced from ``AGENT_REVIEW`` to
 """
 
 import asyncio
+import contextlib
 import os
 import signal
 from datetime import UTC, datetime
@@ -65,16 +66,12 @@ class VerificationService:
             actual_exit = proc.returncode or 0
             status = "passed" if actual_exit == check.expect_exit else "failed"
         except TimeoutError:
-            try:
+            with contextlib.suppress(ProcessLookupError, OSError):
                 # Kill the whole process group so forked children (e.g. a
                 # shell-spawned sleep) cannot outlive the shell itself.
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except TimeoutError:
-                pass
 
             stdout, stderr = b"", b""
             actual_exit = -1
