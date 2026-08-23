@@ -1,7 +1,12 @@
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import inspect, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlmodel import SQLModel
 
 from governance_controller.config import settings
@@ -27,7 +32,9 @@ if not _is_in_memory_sqlite(settings.database_url):
         }
     )
 
-engine = create_async_engine(
+# Allow tests to override the engine so migration/helper functions can be
+# exercised against an isolated database.
+engine: AsyncEngine = create_async_engine(
     settings.database_url,
     **_ENGINE_KWARGS,
 )
@@ -52,10 +59,27 @@ async def run_migrations() -> None:
     pre-existing database requires an explicit ``ALTER TABLE``. This function
     is a minimal in-code migration runner for Phase 1; a full Alembic setup
     may replace it in Phase 2.
+
+    This migration path is designed for the production Postgres database.
+    SQLite dev/test deployments only run ``create_all()`` via
+    ``ensure_sqlite_tables()``, so legacy SQLite auditlog tables do not receive
+    the ``previous_hash``/``row_hash`` backfill or immutability triggers.
     """
     # Force the AuditLog model to be imported so its table name is known.
     _get_audit_log_table()
     async with engine.begin() as conn:
+        tables = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).get_table_names()
+        )
+        if "auditlog" not in tables:
+            # The AuditLog table does not exist yet; create_all() has not run
+            # and there is nothing to migrate. Raising a clear error prevents a
+            # confusing NoSuchTableError from SQLAlchemy introspection.
+            raise RuntimeError(
+                "run_migrations() called before auditlog table exists; "
+                "run create_all() first"
+            )
+
         columns = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_columns("auditlog")
         )

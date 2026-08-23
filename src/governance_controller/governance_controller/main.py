@@ -18,7 +18,13 @@ from governance_controller.middleware import WriteBodySizeLimitMiddleware
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
-    """Initialize the database on startup when configured for PostgreSQL."""
+    """Initialize the database on startup when configured for PostgreSQL.
+
+    The full migration path (ALTER TABLE backfill, DB-level immutability
+    triggers) is intentionally Postgres-only; AGENTS.md mandates PostgreSQL for
+    production Controller deployments. SQLite-backed dev/test deployments only
+    run ``create_all()`` via ``ensure_sqlite_tables()``.
+    """
     if settings.database_url.startswith("postgresql"):
         await init_db()
     yield

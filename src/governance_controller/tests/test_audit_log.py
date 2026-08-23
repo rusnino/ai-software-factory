@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 from governance_controller.constants import ApprovalType, TaskState
@@ -244,6 +245,134 @@ class TestAuditLogPostgresDDL:
             await conn.run_sync(SQLModel.metadata.drop_all)
             await conn.run_sync(SQLModel.metadata.create_all)
         await engine.dispose()
+
+        # #129: run_migrations() must also complete without error.
+        from governance_controller.db import engine as db_engine
+        from governance_controller.db import run_migrations
+
+        original_engine = db_engine
+        test_engine = create_async_engine(url, echo=False, future=True)
+        try:
+            db_module = __import__("governance_controller.db", fromlist=["engine"])
+            db_module.engine = test_engine
+            await run_migrations()
+        finally:
+            db_module.engine = original_engine
+            await test_engine.dispose()
+
+    async def test_postgres_run_migrations_backfills_legacy_auditlog(
+        self,
+    ) -> None:
+        """#129: migrate a pre-existing auditlog missing hash columns."""
+        from sqlalchemy import select, text
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        # Reuse the asyncpg-backed async engine for setup too, avoiding a
+        # synchronous psycopg2 dependency in the test environment.
+        legacy_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            # Each engine created in this test must be bound to the same event
+            # loop as run_migrations(). Avoiding connection pooling sidesteps
+            # asyncpg loop-attachment issues when tests are collected in a
+            # different order.
+            poolclass=NullPool,
+        )
+        try:
+            async with legacy_engine.begin() as conn:
+                await conn.execute(text("DROP TABLE IF EXISTS auditlog CASCADE"))
+                await conn.execute(
+                    text(
+                        """
+                        CREATE TABLE auditlog (
+                            id SERIAL PRIMARY KEY,
+                            event_id VARCHAR NOT NULL,
+                            event_type VARCHAR NOT NULL,
+                            task_id VARCHAR NOT NULL,
+                            execution_id VARCHAR,
+                            actor VARCHAR NOT NULL,
+                            source VARCHAR NOT NULL,
+                            timestamp TIMESTAMP WITH TIME ZONE
+                                NOT NULL DEFAULT NOW(),
+                            payload JSONB DEFAULT '{}'
+                        )
+                        """
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO auditlog "
+                        "(event_id, event_type, task_id, actor, source, payload) "
+                        "VALUES "
+                        "('legacy-1', 'approval', 'task-legacy', "
+                        "'human-1', 'plane', '{}')"
+                    )
+                )
+        finally:
+            await legacy_engine.dispose()
+
+        # Now run the async migration path against the legacy table.
+        from governance_controller.db import engine as db_engine
+        from governance_controller.db import run_migrations
+
+        original_engine = db_engine
+        migration_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+        )
+        try:
+            db_module = __import__("governance_controller.db", fromlist=["engine"])
+            db_module.engine = migration_engine
+            await run_migrations()
+        finally:
+            db_module.engine = original_engine
+            await migration_engine.dispose()
+
+        # Verify columns were added, legacy row backfilled, and the trigger
+        # now blocks updates.
+        check_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+        )
+        try:
+            async with check_engine.begin() as conn:
+                columns = (
+                    await conn.execute(
+                        text(
+                            "SELECT column_name FROM information_schema.columns "
+                            "WHERE table_name = 'auditlog'"
+                        )
+                    )
+                ).fetchall()
+                column_names = {c[0] for c in columns}
+                assert "previous_hash" in column_names
+                assert "row_hash" in column_names
+
+                row = (
+                    await conn.execute(
+                        select(text("previous_hash, row_hash")).select_from(
+                            text("auditlog")
+                        )
+                    )
+                ).fetchone()
+                assert row is not None
+                assert row.previous_hash == ""
+                assert row.row_hash == ""
+
+                with pytest.raises(Exception, match="append-only"):
+                    await conn.execute(
+                        text(
+                            "UPDATE auditlog SET actor = 'tampered' "
+                            "WHERE task_id = 'task-legacy'"
+                        )
+                    )
+        finally:
+            await check_engine.dispose()
 
     async def test_postgres_trigger_blocks_update_and_delete(
         self, isolated_db: tuple[AsyncEngine, sessionmaker]
