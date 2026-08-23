@@ -11,6 +11,7 @@
 - `#109`/`#110`/`#111`/`#112`/`#113`: verification subprocesses now run with an isolated `cwd`/filtered env; `CompletionContract.scope_check.allowed_paths` is now enforced (not just `forbidden_paths`); self-approval/permission-denial rejections now return 403 (not 422); Project Profile security flags are now forwarded to the macro-agent executor payload; `reviews/` freeze-date banners corrected to their actual commit date.
 - `#114`: `AuditLog` now hash-chains rows (`previous_hash`/`row_hash`, SHA-256) and rejects UPDATE/DELETE via SQLAlchemy events.
 - `#115`: mypy typing regression from `#114`'s event listeners fixed.
+- `#126`: literal `%` in Postgres `audit_log` DDL escaped so `create_all()`/`run_migrations()` do not crash on real Postgres; trigger split into separate DROP/CREATE statements for the asyncpg driver.
 
 Test status: **passing** on SQLite and PostgreSQL, `ruff` clean, `mypy governance_controller` clean.
 

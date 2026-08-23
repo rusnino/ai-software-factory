@@ -44,6 +44,7 @@
 - [x] GitHub Issues migration — gap tracking moved from `reviews/GAPS.md`/`REVIEW-NNN-*.md` to GitHub Issues on `rusnino/ai-software-factory` (commit c857b92); frozen `reviews/` banners corrected to actual freeze date 2026-08-23
 - [x] Issues #107-#115 round — shell-command newline bypass, approval idempotency scope, verification isolation, scope check enforcement, 403 mapping, security-flag forwarding, review banner dates, hash-chain/mypy fix (commits 5ab5ea1..25dfeb6)
 - [x] Issues #116-#125 round — shlex-based argv policy validation, audit hash-chain FOR UPDATE locking, missing-worktree fallback + conditional event dedup, AuditLog startup migration + DB-level immutability triggers, Check.command NUL/control-char validation, verification env HOME scoping, Telegram constant-time secret comparison, NEXT_STEPS/progress ledger updates
+- [x] Issues #126-#130 round — Postgres DDL `%` escaping, verification-command argv[0] allowlist closing wrapper/interpreter bypasses, audit log for cwd fallback, run_migrations() coverage against real Postgres plus table-existence guard
 
 ## Preflight Rulings
 
