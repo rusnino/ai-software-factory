@@ -1,6 +1,6 @@
 # REVIEW-025: Verification of GAP-095/097's third fix attempt
 
-Date: 2026-08-19
+Date: 2026-08-23
 Scope: the two residual gaps left open after REVIEW-024 (`GAP-095`'s process-group timeout,
 `GAP-097`'s uncommitted dedup-key write), fixed in commit `85a1fd8`. Not a full fresh review, per
 explicit instruction — targeted verification only.

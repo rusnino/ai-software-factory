@@ -1,4 +1,4 @@
-# Archived — this directory is historical, frozen 2026-08-19
+# Archived — this directory is historical, frozen 2026-08-23
 
 Everything in this directory (`GAPS.md`, all `REVIEW-NNN-*.md` files, and the handful of early
 `GAP-NNN-report.md` closure reports) documents the inter-agent review-and-fix workflow for the Phase 1

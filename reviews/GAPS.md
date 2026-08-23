@@ -1,6 +1,6 @@
-# Gap Ledger — FROZEN 2026-08-19, superseded by GitHub Issues
+# Gap Ledger — FROZEN 2026-08-23, superseded by GitHub Issues
 
-**This file is a frozen historical record as of 2026-08-19.** All 106 gaps below (`GAP-001` through
+**This file is a frozen historical record as of 2026-08-23.** All 106 gaps below (`GAP-001` through
 `GAP-106`) were migrated to closed/resolved GitHub Issues on
 [`rusnino/ai-software-factory`](https://github.com/rusnino/ai-software-factory/issues?q=is%3Aissue+label%3Aphase-1)
 (search issues titled `[GAP-NNN]` to find a specific row's migrated Issue). Gap tracking for anything
