@@ -98,6 +98,7 @@ class ApprovalService:
                     "proposed_by": task.proposed_by,
                 },
                 message="Policy violation(s): actor cannot approve their own task",
+                policy_violations=["actor cannot approve their own task"],
             )
 
         permitted = await self.permission_service.may_approve(
@@ -117,6 +118,9 @@ class ApprovalService:
                     "Policy violation(s): "
                     f"{actor} may not request {approval_type.value} approval"
                 ),
+                policy_violations=[
+                    f"{actor} may not request {approval_type.value} approval"
+                ],
             )
 
         # 1. Policy evaluation must happen before any state change or record.
@@ -273,14 +277,19 @@ class ApprovalService:
         source: str,
         payload: dict[str, Any],
         message: str,
+        policy_violations: list[str] | None = None,
     ) -> None:
-        """Persist an audit log entry for a rejection, then raise ValueError.
+        """Persist an audit log entry for a rejection, then raise an exception.
 
         ``get_db()`` rolls back the containing transaction whenever an
         exception propagates out of an endpoint. If a rejection is recorded
         with only ``db.add``/``flush``, the audit row is discarded along with
         the rest of the transaction. This helper flushes and commits the audit
         entry before raising so the rejection is durably recorded.
+
+        When ``policy_violations`` is provided, a ``PolicyViolationError`` is
+        raised so callers can map governance denials to ``403`` instead of
+        ``422``.
         """
         await AuditService.log(
             db=self.db,
@@ -296,6 +305,8 @@ class ApprovalService:
         # ``async with session.begin()`` may need to handle the now-committed
         # state; production path requires this commit for durable audit.
         await self.db.commit()
+        if policy_violations is not None:
+            raise PolicyViolationError(message, violations=policy_violations)
         raise ValueError(message)
 
     async def _trigger_execution(

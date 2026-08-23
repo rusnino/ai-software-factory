@@ -355,7 +355,9 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
 
-        with pytest.raises(ValueError, match="cannot approve their own task"):
+        with pytest.raises(
+            PolicyViolationError, match="cannot approve their own task"
+        ):
             await service.approve(
                 task=task,
                 contract=_make_contract(),
@@ -380,7 +382,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
 
-        with pytest.raises(ValueError, match="may not request"):
+        with pytest.raises(PolicyViolationError, match="may not request"):
             await service.approve(
                 task=task,
                 contract=_make_contract(),
@@ -514,7 +516,9 @@ class TestApprovalServiceSelfApprovalPrevention:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
         # Simulate the proposer attempting to approve their own task.
-        with pytest.raises(ValueError, match="cannot approve their own task"):
+        with pytest.raises(
+            PolicyViolationError, match="cannot approve their own task"
+        ):
             await service.approve(
                 task=task,
                 contract=_make_contract(),
@@ -532,7 +536,7 @@ class TestApprovalServiceSelfApprovalPrevention:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
         for forbidden_actor in ("system", "agent"):
-            with pytest.raises(ValueError, match="may not request"):
+            with pytest.raises(PolicyViolationError, match="may not request"):
                 await service.approve(
                     task=task,
                     contract=_make_contract(),

@@ -205,6 +205,48 @@ class TestApprovalEndpoint:
         assert "violations" in body["detail"]
         assert isinstance(body["detail"]["violations"], list)
 
+    async def test_self_approval_returns_403(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        await _create_task(async_client, sample_contract, sample_profile)
+
+        response = await async_client.post(
+            "/approvals",
+            json=_approval_payload(
+                "approval-task-1", ApprovalType.PLAN, actor="agent-1"
+            ),
+        )
+
+        assert response.status_code == 403
+        body = response.json()
+        assert "violations" in body["detail"]
+        assert any(
+            "cannot approve their own task" in v for v in body["detail"]["violations"]
+        )
+
+    async def test_permission_denied_returns_403(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        await _create_task(async_client, sample_contract, sample_profile)
+
+        response = await async_client.post(
+            "/approvals",
+            json=_approval_payload(
+                "approval-task-1", ApprovalType.PLAN, actor="system"
+            ),
+        )
+
+        assert response.status_code == 403
+        body = response.json()
+        assert "violations" in body["detail"]
+        assert any("may not request" in v for v in body["detail"]["violations"])
+
     async def test_policy_violation_with_comma_preserved(
         self,
         async_client: AsyncClient,
