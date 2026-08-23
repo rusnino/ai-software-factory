@@ -164,7 +164,7 @@ async def test_completion_contract_executes_required_checks() -> None:
             forbidden_path_check=ForbiddenPathCheck(paths=["/etc/passwd"]),
             scope_check=ScopeCheck(
                 description="Only touch controller code",
-                allowed_paths=["src/"],
+                allowed_paths=["src/", "/etc/"],
                 forbidden_paths=["tests/"],
             ),
         ),
@@ -340,7 +340,38 @@ async def test_completion_contract_scope_conflict_fails() -> None:
     assert result["passed"] is False
     scope_check = next(c for c in result["checks"] if c["name"] == "scope")
     assert scope_check["status"] == "failed"
+    # tests/ is both forbidden and outside allowed_paths; forbidden wins.
     assert "tests/test_x.py" in scope_check["detail"]
+
+
+async def test_allowed_paths_outside_scope_fails() -> None:
+    """A deliverable outside the allowed_paths allowlist fails the scope check."""
+    contract = TaskContract(
+        task_id="task-024",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Deliver outside allowed scope",
+        acceptance=["It works"],
+        deliverables=["docs/leak.md", "src/foo.py"],
+        completion_contract=CompletionContract(
+            task_id="task-024",
+            required=[],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(
+                description="only src/ and tests/ allowed",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    scope_check = next(c for c in result["checks"] if c["name"] == "scope")
+    assert scope_check["status"] == "failed"
+    assert "docs/leak.md" in scope_check["detail"]
+    assert "src/foo.py" not in scope_check["detail"]
 
 
 async def test_optional_check_failure_does_not_fail_verification() -> None:

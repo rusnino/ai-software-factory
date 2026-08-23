@@ -227,15 +227,29 @@ class VerificationService:
 
         if completion is not None:
             # Scope check: treat forbidden/allowed paths as prefixes.
-            scope_forbidden = completion.scope_check.forbidden_paths
-            scope_conflicts = {
-                p
-                for p in touched_paths
+            scope = completion.scope_check
+            scope_conflicts: set[str] = set()
+
+            allowed_paths = [
+                path
+                for path in scope.allowed_paths
+                if path and isinstance(path, str)
+            ]
+            if allowed_paths:
+                for touched in touched_paths:
+                    if not any(
+                        cls._is_prefixed_by(touched, prefix)
+                        for prefix in allowed_paths
+                    ):
+                        scope_conflicts.add(touched)
+
+            for touched in touched_paths:
                 if any(
-                    cls._is_prefixed_by(p, prefix)
-                    for prefix in scope_forbidden
-                )
-            }
+                    cls._is_prefixed_by(touched, prefix)
+                    for prefix in scope.forbidden_paths
+                ):
+                    scope_conflicts.add(touched)
+
             if scope_conflicts:
                 passed = False
                 checks.append(
