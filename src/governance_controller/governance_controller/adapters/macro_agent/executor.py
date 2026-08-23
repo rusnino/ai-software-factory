@@ -32,6 +32,12 @@ class MacroAgentExecutor:
             "max_retries": execution.max_retries,
             "sandbox": sandbox,
             "max_parallel_agents": max_parallel_agents,
+            "uses_docker_socket": execution.uses_docker_socket,
+            "destructive_shell": execution.destructive_shell,
+            "spawn_subagents": execution.spawn_subagents,
+            "network_access": execution.network_access,
+            "force_push": execution.force_push,
+            "signed_commits": execution.signed_commits,
             "metadata": {
                 "controller_task_id": task_contract.task_id,
                 "controller_execution_id": controller_execution_id,

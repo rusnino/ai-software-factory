@@ -46,6 +46,12 @@ async def test_executor_start_sends_correct_payload_and_returns_run_id(
             "max_retries": 2,
             "sandbox": "worktree",
             "max_parallel_agents": 3,
+            "uses_docker_socket": False,
+            "destructive_shell": False,
+            "spawn_subagents": False,
+            "network_access": "restricted",
+            "force_push": False,
+            "signed_commits": False,
             "metadata": {
                 "controller_task_id": "task-1",
                 "controller_execution_id": "exec-1",
