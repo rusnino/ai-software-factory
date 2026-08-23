@@ -605,6 +605,86 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         assert any("wrapper/interpreter" in v for v in result.violations)
 
 
+class TestPolicyEngineCommandExecutionPrimitives:
+    def test_git_ssh_command_config_is_rejected(self) -> None:
+        # #139: git -c core.sshCommand=<shell command> executes unconditionally.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="git",
+                        command='git -c core.sshCommand="touch /tmp/pwned" ls-remote ssh://x/repo.git',
+                    )
+                ],
+                scope_check=ScopeCheck(description="git ssh bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("command-execution primitive" in v for v in result.violations)
+
+    def test_tar_to_command_is_rejected(self) -> None:
+        # #140: tar --to-command=<shell command> executes per extracted member.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="tar",
+                        command='tar -xf /tmp/a.tar --to-command="touch /tmp/pwned"',
+                    )
+                ],
+                scope_check=ScopeCheck(description="tar to-command bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "destructive shell operation" in v
+            or "command-execution primitive" in v
+            for v in result.violations
+        )
+
+    def test_find_delete_is_rejected(self) -> None:
+        # #135: find -delete silently removes files recursively.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="find", command="find . -type f -delete")],
+                scope_check=ScopeCheck(description="find delete bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive shell operation" in v for v in result.violations)
+
+    def test_git_clean_force_is_rejected(self) -> None:
+        # #135: git clean -fdx removes untracked files forcibly.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command="git clean -fdx")],
+                scope_check=ScopeCheck(description="git clean bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive shell operation" in v for v in result.violations)
+
+
 class TestPolicyEngineForbiddenPathsInCommands:
     def test_command_argument_touching_forbidden_path_is_rejected(self) -> None:
         # #134: path-like argv tokens in Check.command must be checked against

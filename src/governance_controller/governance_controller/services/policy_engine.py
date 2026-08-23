@@ -259,6 +259,44 @@ _FORBIDDEN_CONTAINER_ESCAPE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
+# Dangerous git config keys that accept arbitrary shell commands. Any git -c
+# override matching these keys is rejected, because values such as
+# core.sshCommand=<shell command> execute unconditionally when git touches SSH.
+_FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    }
+)
+
+# Dangerous tar flags that execute arbitrary commands or delete files.
+_FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
+    {
+        "--to-command",
+        "--remove-files",
+        "--remove-file",
+    }
+)
+
+# Dangerous find predicates and actions. -delete silently removes files; -exec
+# and -ok can run arbitrary commands.
+_FORBIDDEN_FIND_ACTIONS: frozenset[str] = frozenset(
+    {
+        "-delete",
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir",
+        "-fls",
+        "-fprint",
+        "-fprint0",
+    }
+)
+
 
 def _normalize_path(path: str) -> str:
     """Return a normalized path for prefix comparison."""
@@ -391,6 +429,83 @@ def _is_container_escape_flag(argv: list[str]) -> bool:
     )
 
 
+def _has_git_dangerous_config(argv: list[str]) -> bool:
+    """Return True if a git -c override sets a dangerous config key."""
+    if _base_command(argv[0]) != "git":
+        return False
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token in ("-c", "--config"):
+            if i + 1 >= len(argv):
+                return False
+            key, _, _ = argv[i + 1].partition("=")
+            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+                return True
+            i += 2
+            continue
+        if token.lower().startswith("-c"):
+            config = token[2:]
+            key, _, _ = config.partition("=")
+            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+                return True
+        i += 1
+    return False
+
+
+def _has_tar_dangerous_flag(argv: list[str]) -> bool:
+    """Return True if tar uses an extraction hook or destructive flag."""
+    if _base_command(argv[0]) != "tar":
+        return False
+    for token in argv[1:]:
+        lowered = token.lower()
+        if any(
+            lowered == flag or lowered.startswith(flag + "=")
+            for flag in _FORBIDDEN_TAR_FLAGS
+        ):
+            return True
+    return False
+
+
+def _has_find_dangerous_action(argv: list[str]) -> bool:
+    """Return True if find uses a destructive or command-execution action."""
+    if _base_command(argv[0]) != "find":
+        return False
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        lowered = token.lower()
+        if lowered in _FORBIDDEN_FIND_ACTIONS:
+            return True
+        if lowered in ("-exec", "-execdir", "-ok", "-okdir"):
+            # Skip the command body and the terminating ; or + so we do not
+            # misinterpret an argument to the inner command as a find action.
+            i += 1
+            while i < len(argv) and argv[i] not in (";", "+"):
+                i += 1
+            if i < len(argv):
+                i += 1
+            continue
+        i += 1
+    return False
+
+
+def _has_git_clean_destructive(argv: list[str]) -> bool:
+    """Return True if git clean is invoked with force/remove flags."""
+    if _base_command(argv[0]) != "git":
+        return False
+    if len(argv) < 2 or argv[1] != "clean":
+        return False
+    for token in argv[2:]:
+        if token in {"-f", "--force", "-x", "-d"}:
+            return True
+        if token.startswith("-") and len(token) > 1 and any(
+            ch in token for ch in "fxd"
+        ):
+            return True
+    return False
+
+
 def _is_dd_to_device(argv: list[str]) -> bool:
     """Return True for ``dd if=... of=/dev/...`` or block-device-like targets."""
     if _base_command(argv[0]) != "dd":
@@ -426,11 +541,26 @@ def _is_recursive_force_rm(argv: list[str]) -> bool:
 
 def _is_destructive_command(argv: list[str]) -> bool:
     """Return True if *argv* looks like a destructive file operation."""
-    if any(_base_command(token) in _FORBIDDEN_DESTRUCTIVE_COMMANDS for token in argv):
-        return True
-    if _is_recursive_force_rm(argv):
-        return True
-    return bool(_is_dd_to_device(argv))
+    return bool(
+        any(
+            _base_command(token) in _FORBIDDEN_DESTRUCTIVE_COMMANDS
+            for token in argv
+        )
+        or _is_recursive_force_rm(argv)
+        or _is_dd_to_device(argv)
+        or _has_find_dangerous_action(argv)
+        or _has_tar_dangerous_flag(argv)
+        or _has_git_clean_destructive(argv)
+    )
+
+
+def _has_command_execution_primitive(argv: list[str]) -> bool:
+    """Return True if an allowlisted binary carries a command-execution hook."""
+    return bool(
+        _has_git_dangerous_config(argv)
+        or _has_tar_dangerous_flag(argv)
+        or _has_find_dangerous_action(argv)
+    )
 
 
 def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
@@ -482,6 +612,11 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
     if _is_destructive_command(argv):
         local_violations.append(
             f"Command contains destructive shell operation: {command!r}"
+        )
+
+    if _has_command_execution_primitive(argv):
+        local_violations.append(
+            f"Command contains a command-execution primitive: {command!r}"
         )
 
     if _is_container_escape_flag(argv):
