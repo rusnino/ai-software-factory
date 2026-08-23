@@ -2,16 +2,25 @@
 
 ## Current State
 
-**Gap tracking lives in GitHub Issues now** (see `AGENTS.md` §"Review Findings and Gap Tracking"). A fresh full Phase 1 review on 2026-08-23 filed #107-#115; #107-#115 are `CLOSED` (fixed same day). A follow-on review filed #116-#125; check `gh issue list --repo rusnino/ai-software-factory --state open` before treating Phase 1 as gap-free.
+**Gap tracking lives in GitHub Issues now** (see `AGENTS.md` §"Review Findings and Gap Tracking"). Use the live GitHub issue list rather than this file for the current open/closed state:
 
-- `GAP-095` (`85a1fd8`): `_run_check` now spawns with `start_new_session=True` and kills the entire process group (`os.killpg`) on timeout, so shell-forked children cannot outlive the shell. Regression tests now assert elapsed time is near the timeout.
-- `GAP-097` (`85a1fd8`): `EventBridge.handle()` commits the `ProcessedEvent` dedup key inside the `finally` block before the exception propagates out of the handler, so `get_db()`'s rollback-on-exception does not discard it.
-- `#107`: `PolicyEngine`'s shell-command allowlist now rejects embedded newlines/carriage returns (previously bypassable — a smuggled second command separated by `\n` ran unblocked).
-- `#108`: `POST /approvals` idempotency lookup now scopes on `(task_id, approval_type, actor)` in addition to the key, closing a cross-task bypass where reusing a key for an unrelated task returned a false `approved: true`.
-- `#109`/`#110`/`#111`/`#112`/`#113`: verification subprocesses now run with an isolated `cwd`/filtered env; `CompletionContract.scope_check.allowed_paths` is now enforced (not just `forbidden_paths`); self-approval/permission-denial rejections now return 403 (not 422); Project Profile security flags are now forwarded to the macro-agent executor payload; `reviews/` freeze-date banners corrected to their actual commit date.
-- `#114`: `AuditLog` now hash-chains rows (`previous_hash`/`row_hash`, SHA-256) and rejects UPDATE/DELETE via SQLAlchemy events.
-- `#115`: mypy typing regression from `#114`'s event listeners fixed.
-- `#126`: literal `%` in Postgres `audit_log` DDL escaped so `create_all()`/`run_migrations()` do not crash on real Postgres; trigger split into separate DROP/CREATE statements for the asyncpg driver.
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
+gh issue list --repo rusnino/ai-software-factory --state closed --label phase-1
+```
+
+The most recent review rounds closed #131-#140. Highlights:
+
+- `#131`: `NEXT_STEPS.md` and SDD progress updated for the #126-#130 round.
+- `#132`: `VerificationService._run_check` wraps `create_subprocess_shell` in OSError handling and returns a failed check result instead of propagating.
+- `#133`: verification-command allowlist extended with common linters and type checkers; `python`/`python3` remain forbidden wrappers.
+- `#134`: `PolicyEngine.evaluate` and `VerificationService.verify_execution` now extract path-like argv tokens from every `Check.command` and check them against forbidden paths, not just declared `inputs`/`deliverables`.
+- `#135`: destructive primitives on allowlisted binaries are now rejected: `find -delete`/`-exec`, `tar --to-command`/`--remove-files`, `git clean -f`/`-x`/`-d`.
+- `#136`: `.superpowers/sdd/.../progress.md` retired; gap tracking now fully in GitHub Issues.
+- `#137`: `run_migrations()` precondition guard (raise if `auditlog` table missing) covered by automated test.
+- `#138`: `docker`/`podman`/`kubectl` removed from the verification-command allowlist; bind-mount and privileged-flag escapes are not safely enumerable in Phase 1.
+- `#139`: `git -c` overrides for dangerous config keys (`core.sshCommand`, `core.fsmonitor`, `core.editor`, `credential.helper`, etc.) are rejected.
+- `#140`: `tar --to-command` and other extraction/deletion hooks are rejected.
 
 Test status: **passing** on SQLite and PostgreSQL, `ruff` clean, `mypy governance_controller` clean.
 
