@@ -119,3 +119,13 @@ Priority: integrate with real external systems and harden execution orchestratio
   concrete alternative execution engine (untested API surface, verify before evaluating further);
   alexngai/openhive is a multi-swarm federation candidate once single-swarm operation is proven — see
   `docs/research-alexngai-ecosystem-and-sudocode.md`.
+- Same macro-agent-alternative scenario: Untrivial-ai/agent-orchestrator (fleet manager for coding-agent
+  CLI sessions, worktree-per-task, pluggable agent/runtime/SCM adapters, ~9.9k stars, very active) is a
+  second concrete candidate — its Kanban UI would need to stay out of scope (Plane already owns that
+  role) and its programmatic API surface is unverified — see
+  `docs/research-agent-orchestration-and-governance-survey-2026-08.md`.
+- microsoft/agent-governance-toolkit (tool-call-level policy middleware, potentially complementary to the
+  Governance Controller rather than competing with it) is a watch item only, not adopted and not formally
+  risk-tracked — its maturity signals (6,091 stars on a ~5-6 month old repo, "Public Preview" versioning)
+  don't hold up to a first pass of scrutiny; revisit only if independently corroborated beyond GitHub's
+  own counters — see `docs/research-agent-orchestration-and-governance-survey-2026-08.md`.
