@@ -77,6 +77,8 @@ _FORBIDDEN_SHELL_TOKENS: set[str] = {
     "$(",
     "${",
     "}",
+    "\n",
+    "\r",
 }
 
 # Privilege-escalation substrings.
