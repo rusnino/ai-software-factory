@@ -466,6 +466,41 @@ async def test_verification_commands_fail_without_completion_contract() -> None:
     assert failed["expected_exit"] == 0
 
 
+async def test_forbidden_path_in_command_text_is_detected() -> None:
+    """#134: path-like argv tokens in commands are checked against forbidden paths."""
+    contract = TaskContract(
+        task_id="task-cmd-path",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Exfiltrate via command",
+        acceptance=["It works"],
+        forbidden_paths=["/tmp/gcpoc_secret_dir"],
+        completion_contract=CompletionContract(
+            task_id="task-cmd-path",
+            required=[
+                Check(
+                    type="leak",
+                    command="cp /tmp/gcpoc_secret_dir/id_rsa /tmp/gcpoc_exfil",
+                    expect_exit=0,
+                )
+            ],
+            forbidden_path_check=ForbiddenPathCheck(paths=["/tmp/gcpoc_secret_dir"]),
+            scope_check=ScopeCheck(
+                description="scope",
+                allowed_paths=[],
+                forbidden_paths=[],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    assert forbidden["status"] == "failed"
+    assert any("/tmp/gcpoc_secret_dir" in str(p) for p in forbidden["detail"])
+
+
 async def test_verification_commands_merge_with_completion_contract() -> None:
     contract = TaskContract(
         task_id="task-008",

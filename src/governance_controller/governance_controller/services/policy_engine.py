@@ -288,6 +288,37 @@ def _forbidden_path_conflicts(
     return conflicts
 
 
+def _extract_command_paths(command: str) -> set[str]:
+    """Return path-like tokens from *command*'s resolved argv.
+
+    A token is treated as a path if it looks like an absolute path, a
+    relative path segment containing ``/``, a tilde expansion, or a path
+    argument glued to a short option such as ``-I/some/path``. This is a
+    heuristic; it intentionally skips plain flag tokens like ``-l``.
+    """
+    argv, _ = _parse_command_to_argv(command)
+    if argv is None:
+        return set()
+    paths: set[str] = set()
+    for token in argv[1:]:
+        lowered = token.lower()
+        if token.startswith("-"):
+            # Some flags carry an inline path: -I/path, --file=/path, -I=path.
+            for sep in ("=", ""):
+                for flag_prefix in ("-I", "--include", "--exclude", "--file"):
+                    prefix = flag_prefix + sep
+                    if lowered.startswith(prefix.lower()):
+                        candidate = token[len(prefix) :]
+                        if candidate:
+                            paths.add(candidate)
+                            break
+            continue
+        # Keep tokens that resemble filesystem paths.
+        if token.startswith(("/", "~", ".")) or "/" in token:
+            paths.add(token)
+    return paths
+
+
 def _parse_command_to_argv(command: str) -> tuple[list[str] | None, str | None]:
     """Parse *command* into the argv the shell would actually execute.
 
@@ -595,11 +626,26 @@ class PolicyEngine:
                 f"Harness '{requested_harness}' is not registered; cannot validate role"
             )
 
-        # 3. Forbidden path enforcement: any input or deliverable that the task
-        #    explicitly touches must not be inside a path forbidden by the
-        #    project profile or by the task contract itself. Exact matches are
-        #    also rejected.
+        # 3. Forbidden path enforcement: any input, deliverable, or path-like
+        #    argument appearing in a verification command must not be inside a
+        #    path forbidden by the project profile or by the task contract itself.
+        #    Exact matches are also rejected.
         touched_paths = set(contract.inputs + contract.deliverables)
+        completion = contract.completion_contract
+        verification = contract.verification or {}
+        verification_commands: list[str] = []
+        if isinstance(verification.get("commands"), list):
+            verification_commands = [
+                c for c in verification["commands"] if isinstance(c, str)
+            ]
+        command_paths: set[str] = set()
+        for cmd_source in verification_commands:
+            command_paths |= _extract_command_paths(cmd_source)
+        if completion is not None:
+            for check in list(completion.required) + list(completion.optional):
+                command_paths |= _extract_command_paths(check.command)
+        touched_paths |= command_paths
+
         forbidden_paths = list(
             set(profile.security.forbidden_paths) | set(contract.forbidden_paths)
         )

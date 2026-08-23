@@ -26,6 +26,10 @@ from governance_controller.schemas.completion_contract import Check
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.policy_engine import (
+    _extract_command_paths,
+    _forbidden_path_conflicts,
+)
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.utils.paths import normalize_path
 
@@ -236,21 +240,26 @@ class VerificationService:
                 # Optional checks do not fail the overall verification.
 
         # Forbidden path check: merge task-level forbidden_paths with those from
-        # the CompletionContract (when present). SPEC-03 treats these as the
-        # canonical pairing, so the task-level list is always enforced.
+        # the CompletionContract (when present). Also include path-like tokens
+        # extracted from every executed command so a check cannot read or write
+        # a forbidden path that was never declared as an input/deliverable.
         forbidden_paths: list[str] = list(contract.forbidden_paths)
         if completion is not None:
             forbidden_paths = list(
                 set(forbidden_paths) | set(completion.forbidden_path_check.paths)
             )
-        forbidden_touches = {
-            p
-            for p in touched_paths
-            if any(
-                cls._is_prefixed_by(p, forbidden)
-                for forbidden in forbidden_paths
-            )
-        }
+
+        command_paths: set[str] = set()
+        for check in contract_verification_checks:
+            command_paths |= _extract_command_paths(check.command)
+        if completion is not None:
+            for check in list(completion.required) + list(completion.optional):
+                command_paths |= _extract_command_paths(check.command)
+        touched_paths |= command_paths
+
+        forbidden_touches = set(
+            _forbidden_path_conflicts(touched_paths, forbidden_paths)
+        )
         if forbidden_touches:
             passed = False
             checks.append(

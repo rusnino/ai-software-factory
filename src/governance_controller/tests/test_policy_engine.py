@@ -8,6 +8,7 @@ from governance_controller.harness.base import HarnessProvider
 from governance_controller.schemas import (
     Check,
     CompletionContract,
+    ForbiddenPathCheck,
     ScopeCheck,
 )
 from governance_controller.schemas.project_profile import ProjectProfile
@@ -602,6 +603,60 @@ class TestPolicyEngineVerificationCommandsAllowlist:
 
         assert result.allowed is False
         assert any("wrapper/interpreter" in v for v in result.violations)
+
+
+class TestPolicyEngineForbiddenPathsInCommands:
+    def test_command_argument_touching_forbidden_path_is_rejected(self) -> None:
+        # #134: path-like argv tokens in Check.command must be checked against
+        # forbidden_paths, not just declared inputs/deliverables.
+        contract = _make_contract(
+            forbidden_paths=["/tmp/gcpoc_secret_dir"],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="leak",
+                        command="cp /tmp/gcpoc_secret_dir/id_rsa /tmp/gcpoc_exfil",
+                        expect_exit=0,
+                    )
+                ],
+                forbidden_path_check=ForbiddenPathCheck(
+                    forbidden_paths=["/tmp/gcpoc_secret_dir"]
+                ),
+                scope_check=ScopeCheck(description="forbidden path in command"),
+            ),
+        )
+        profile = _make_profile(
+            forbidden_paths=["/tmp/gcpoc_secret_dir"],
+        )
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path" in v and "/tmp/gcpoc_secret_dir" in v
+            for v in result.violations
+        )
+
+    def test_command_argument_sibling_of_forbidden_path_is_allowed(self) -> None:
+        contract = _make_contract(
+            forbidden_paths=["/tmp/gcpoc_secret_dir"],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="safe",
+                        command="cat /tmp/gcpoc_secret_dir_backup/id_rsa",
+                    )
+                ],
+                scope_check=ScopeCheck(description="sibling path"),
+            ),
+        )
+        profile = _make_profile(forbidden_paths=["/tmp/gcpoc_secret_dir"])
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
 
 
 class TestPolicyEngineContainerAllowlistRemoval:
