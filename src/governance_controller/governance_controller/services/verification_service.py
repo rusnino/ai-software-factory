@@ -38,10 +38,17 @@ class VerificationService:
     ) -> None:
         self.executor = executor or MacroAgentExecutor()
 
+    # Environment variables that are safe to propagate to verification checks.
+    # Controller secrets (DB credentials, macro-agent tokens, etc.) are excluded.
+    _SAFE_ENV_KEYS: frozenset[str] = frozenset(
+        {"PATH", "HOME", "USER", "SHELL", "LANG", "LC_ALL", "TERM", "PWD"}
+    )
+
     @staticmethod
     async def _run_check(
         check: Check,
         timeout: float | None = None,
+        cwd: str | None = None,
     ) -> dict[str, object]:
         """Run a single Check command and return a result dict.
 
@@ -49,15 +56,24 @@ class VerificationService:
             check: The command to run and expected exit code.
             timeout: Maximum seconds to wait for the subprocess. ``None``
                 uses ``settings.macro_agent_timeout_seconds``.
+            cwd: Working directory for the subprocess. ``None`` uses the
+                Controller process's current working directory.
         """
         if timeout is None:
             timeout = settings.macro_agent_timeout_seconds
 
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in VerificationService._SAFE_ENV_KEYS
+        }
         proc = await asyncio.create_subprocess_shell(
             check.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
+            cwd=cwd,
+            env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -124,6 +140,7 @@ class VerificationService:
     async def verify_execution(
         cls,
         contract: TaskContract,
+        cwd: str | None = None,
     ) -> dict[str, object]:
         """Run all verification checks for *contract* and return a report.
 
@@ -134,6 +151,11 @@ class VerificationService:
         ``Check.expect_exit``. Static forbidden-path and scope checks are
         performed when a CompletionContract is present; otherwise the task
         contract's own ``forbidden_paths`` are checked.
+
+        Args:
+            contract: The task contract to verify.
+            cwd: Working directory for verification subprocesses. ``None``
+                uses the Controller process's current working directory.
 
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
@@ -150,20 +172,20 @@ class VerificationService:
             cls._verification_commands_from_contract(contract)
         )
         for check in contract_verification_checks:
-            result = await cls._run_check(check)
+            result = await cls._run_check(check, cwd=cwd)
             checks.append(result)
             if result["status"] == "failed":
                 passed = False
 
         if completion is not None:
             for check in completion.required:
-                result = await cls._run_check(check)
+                result = await cls._run_check(check, cwd=cwd)
                 checks.append(result)
                 if result["status"] == "failed":
                     passed = False
 
             for check in completion.optional:
-                result = await cls._run_check(check)
+                result = await cls._run_check(check, cwd=cwd)
                 checks.append(
                     {
                         "name": f"optional:{check.type}",
@@ -260,7 +282,19 @@ class VerificationService:
         cannot silently clobber each other.
         """
         service = cls(executor=executor)
-        report = await service.verify_execution(contract)
+
+        # Determine a task-specific worktree when a repository path is provided.
+        worktree_path: str | None = None
+        if profile is not None:
+            repo_path = getattr(profile.repository, "path", None)
+            if repo_path:
+                worktree_path = os.path.join(
+                    str(repo_path),
+                    "worktrees",
+                    task.id,
+                )
+
+        report = await service.verify_execution(contract, cwd=worktree_path)
 
         if report["passed"]:
             target_state = TaskState.HUMAN_REVIEW

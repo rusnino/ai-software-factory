@@ -21,7 +21,7 @@ from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.verification_service import VerificationService
 
 
-async def test_run_check_times_out_and_records_failed_result() -> None:
+async def test_run_check_times_out_and_records_failed_result(tmp_path) -> None:
     """GAP-095 regression: a long-running check is killed when timeout hits."""
     from governance_controller.schemas.completion_contract import Check
 
@@ -44,6 +44,42 @@ async def test_run_check_times_out_and_records_failed_result() -> None:
     # start_new_session=True + os.killpg(), a forked sleep child dies within
     # a small multiple of the timeout, not after the full 10 seconds.
     assert elapsed < 2.0
+
+
+async def test_run_check_uses_provided_cwd(tmp_path) -> None:
+    """Check commands run in the supplied working directory."""
+    from governance_controller.schemas.completion_contract import Check
+
+    subdir = tmp_path / "workspace"
+    subdir.mkdir()
+    (subdir / "marker.txt").write_text("hi")
+
+    check = Check(type="cwd", command="cat marker.txt", expect_exit=0)
+
+    result = await VerificationService._run_check(check, cwd=str(subdir))
+
+    assert result["status"] == "passed"
+
+
+async def test_run_check_filters_environment(tmp_path, monkeypatch) -> None:
+    """Controller secrets are not inherited by verification subprocesses."""
+    import os
+
+    from governance_controller.schemas.completion_contract import Check
+
+    monkeypatch.setenv("GC_DATABASE_URL", "postgresql+asyncpg://secret")
+    monkeypatch.setenv("GC_MACRO_AGENT_TOKEN", "super-secret")
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
+
+    check = Check(
+        type="env",
+        command="env > captured_env.txt && ! grep -q GC_ captured_env.txt",
+        expect_exit=0,
+    )
+
+    result = await VerificationService._run_check(check, cwd=str(tmp_path))
+
+    assert result["status"] == "passed"
 
 
 async def test_run_check_uses_settings_timeout_by_default() -> None:
