@@ -510,6 +510,55 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         assert result.allowed is True
 
 
+class TestPolicyEngineShellObfuscationBypasses:
+    def test_ifs_word_splitting_rm_rf_is_rejected(self) -> None:
+        # #116: $IFS word-splitting reassembles to "rm -rf" in the real shell.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="cleanup", command="rm$IFS-rf$IFS/tmp")],
+                scope_check=ScopeCheck(description="IFS bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+
+    def test_backslash_character_splitting_rm_rf_is_rejected(self) -> None:
+        # #116: backslash character-splitting reassembles to "rm -rf" in dash.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="cleanup", command="r\\m -\\rf /tmp")],
+                scope_check=ScopeCheck(description="backslash bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive" in v for v in result.violations)
+
+    def test_backslash_character_splitting_sudo_is_rejected(self) -> None:
+        # #116: backslash splitting can reassemble "sudo".
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="info", command="su\\do -V")],
+                scope_check=ScopeCheck(description="sudo backslash bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("privilege escalation" in v for v in result.violations)
+
+
 class TestPolicyEngineRoleAllowlist:
     def test_default_worker_role_on_opencode_passes(self) -> None:
         contract = _make_contract()

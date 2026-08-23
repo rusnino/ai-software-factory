@@ -6,29 +6,31 @@ CompletionContract checks run system commands during verification, so PolicyEngi
 validates every ``Check.command`` before approval. The checks below are applied in
 ``_check_completion_contract_commands``:
 
-1. Reject shell metacharacters/operators that can change semantics or chain
-   arbitrary commands: ``;``, ``&``, ``|``, ``&&``, ``||``, ``>``, ``<``, ``>>``,
-   ``<<``, ``*`` (glob), ``?`` (glob), backticks, ``$(...)``, and ``${...}``.
-2. Reject sub-shell / process substitution patterns: ``$(``, ``${``, backticks.
-3. Reject privilege escalation: ``sudo``, ``su -``, ``doas``.
-4. Reject common destructive file-system operations: ``rm -rf``, ``rm -fr``,
-   ``rm --no-preserve-root``, ``dd if=... of=...`` with device-ish targets,
-   ``mkfs.*``, ``>`` redirections that could truncate files.
-5. Reject commands that require Docker socket access (``docker.sock``,
-   ``/var/run/docker.sock``) unless the project profile permits it.
-6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell`` in
-   the ExecutionConfig unless the corresponding project profile security field
-   explicitly allows it.
+1. Parse the command with :func:`shlex.split` to obtain the resolved argv that
+   the shell would actually execute.
+2. Reject commands that cannot be parsed or that still contain shell
+   metacharacters/operators after parsing (redirections, pipes, command
+   substitution, globbing, variable expansion, etc.).
+3. Reject privilege escalation by argv[0]: ``sudo``, ``su``, ``doas``.
+4. Reject common destructive file-system operations: ``rm`` with recursive and
+   force flags, ``rm --no-preserve-root``, ``dd if=... of=...`` with device-ish
+   targets, ``mkfs.*``.
+5. Reject commands that reference Docker socket paths
+   (``docker.sock``, ``/var/run/docker.sock``) unless the project profile
+   permits it.
+6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell``
+   in the ExecutionConfig unless the corresponding project profile security
+   field explicitly allows it.
 
-This is an explicit allowlist approach: if a command matches any forbidden pattern,
-approval is denied with a human-readable violation. Commands that are meant to be
-high-privilege must be declared by the task proposer and allowed by the project
-profile before they can pass policy.
+This is an explicit allowlist approach: if a command matches any forbidden
+pattern, approval is denied with a human-readable violation. Commands that are
+meant to be high-privilege must be declared by the task proposer and allowed by
+the project profile before they can pass policy.
 """
 
 from __future__ import annotations
 
-import re
+import shlex
 from dataclasses import dataclass
 
 from governance_controller.constants import ApprovalType
@@ -59,52 +61,44 @@ class PolicyResult:
     violations: list[str]
 
 
-# Forbidden shell tokens/operators/metacharacters. These can alter command
-# semantics, chain arbitrary commands, glob widely, or perform redirections.
-_FORBIDDEN_SHELL_TOKENS: set[str] = {
+# Forbidden shell metacharacters/operators that can change semantics, chain
+# arbitrary commands, glob widely, perform redirections, or expand variables.
+# These are rejected even when they appear inside a single shlex token.
+_FORBIDDEN_SHELL_METACHARACTERS: set[str] = {
     ";",
     "&",
     "|",
-    "&&",
-    "||",
     ">",
     "<",
-    ">>",
-    "<<",
+    "`",
+    "$",
+    "(",
+    ")",
+    "{",
+    "}",
     "*",
     "?",
-    "`",
-    "$(",
-    "${",
-    "}",
-    "\n",
-    "\r",
+    "[",
+    "]",
+    "~",
+    "#",
 }
 
-# Privilege-escalation substrings.
-_FORBIDDEN_PRIVILEGE_SUBSTRINGS: tuple[str, ...] = ("sudo", "su -", "doas")
+# Control characters that can terminate statements or smuggle payloads even
+# when shlex splits the surrounding text into innocent-looking tokens.
+_FORBIDDEN_CONTROL_CHARACTERS: set[str] = {"\n", "\r", "\x00"}
 
-# Destructive file-system substrings / patterns.
-_FORBIDDEN_DESTRUCTIVE_SUBSTRINGS: tuple[str, ...] = (
-    "rm -rf",
-    "rm -fr",
-    "rm --no-preserve-root",
-    "mkfs.",
-    "dd if=",
-)
+# Privilege-escalation base commands (argv[0] match).
+_FORBIDDEN_PRIVILEGE_COMMANDS: frozenset[str] = frozenset({"sudo", "su", "doas"})
 
-# Docker-socket access substrings.
+# Destructive file-system base commands (argv[0] match).
+_FORBIDDEN_DESTRUCTIVE_COMMANDS: frozenset[str] = frozenset({"mkfs"})
+
+# Docker-socket access substrings (checked against resolved argv tokens).
 _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS: tuple[str, ...] = (
     "docker.sock",
     "/var/run/docker.sock",
 )
-
-
-_FORBIDDEN_COMMAND_PATTERNS: list[re.Pattern[str]] = [
-    # Sub-shell / process substitution
-    re.compile(r"\$\s*\("),
-    re.compile(r"`[^`]*`"),
-]
 
 
 def _normalize_path(path: str) -> str:
@@ -135,44 +129,131 @@ def _forbidden_path_conflicts(
     return conflicts
 
 
-def _contains_forbidden_shell_token(command: str) -> bool:
-    """Return True if *command* contains a forbidden shell token/operator."""
-    # Check the raw command string for exact token presence; this catches
-    # simple redirections, globs, and command chaining.
-    return any(token in command for token in _FORBIDDEN_SHELL_TOKENS)
+def _parse_command_to_argv(command: str) -> tuple[list[str] | None, str | None]:
+    """Parse *command* into the argv the shell would actually execute.
+
+    Returns ``(argv, None)`` on success, or ``(None, error_message)`` when the
+    command is unparsable or contains embedded NUL bytes.
+    """
+    if "\x00" in command:
+        return None, "command contains embedded NUL byte"
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return None, f"command could not be parsed: {exc}"
+    if not argv:
+        return None, "command is empty after parsing"
+    return argv, None
 
 
-def _has_forbidden_pattern(command: str) -> bool:
-    """Return True if *command* matches a forbidden regex pattern."""
-    return any(pattern.search(command) for pattern in _FORBIDDEN_COMMAND_PATTERNS)
+def _argv_contains_metacharacter(argv: list[str]) -> bool:
+    """Return True if any token still contains a forbidden shell metacharacter.
+
+    shlex.split resolves quotes and backslash escapes, so a token like
+    ``r\\m`` becomes ``rm``. If any token still contains ``$``, ``|``, ``>``,
+    etc., the command relies on shell behavior that the verification harness
+    does not support and that could be used to bypass policy.
+    """
+    for token in argv:
+        if any(ch in token for ch in _FORBIDDEN_SHELL_METACHARACTERS):
+            return True
+    return False
 
 
-def _has_forbidden_substrings(command: str, substrings: tuple[str, ...]) -> bool:
-    """Return True if any forbidden substring is present (case-insensitive)."""
-    lowered = command.lower()
-    return any(sub in lowered for sub in substrings)
+def _is_privilege_escalation(argv: list[str]) -> bool:
+    """Return True if argv[0] is a known privilege-escalation command."""
+    base = argv[0].split("/")[-1].lower()
+    return base in _FORBIDDEN_PRIVILEGE_COMMANDS
+
+
+def _is_docker_socket_command(argv: list[str]) -> bool:
+    """Return True if any resolved token references the Docker socket."""
+    lowered = [token.lower() for token in argv]
+    return any(
+        sub in token for token in lowered for sub in _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
+    )
+
+
+def _is_dd_to_device(argv: list[str]) -> bool:
+    """Return True for ``dd if=... of=/dev/...`` or block-device-like targets."""
+    if argv[0].lower() != "dd":
+        return False
+    has_input = False
+    has_device_output = False
+    for token in argv[1:]:
+        if token.lower().startswith("if="):
+            has_input = True
+        if token.lower().startswith("of=") and (
+            token.startswith("of=/dev/") or token.startswith("of=/")
+        ):
+            has_device_output = True
+    return has_input and has_device_output
+
+
+def _is_recursive_force_rm(argv: list[str]) -> bool:
+    """Return True for ``rm`` with both recursive and force flags."""
+    if argv[0].lower() != "rm":
+        return False
+    recursive = False
+    force = False
+    for token in argv[1:]:
+        if token == "--no-preserve-root":
+            return True
+        if token.startswith("-") and len(token) > 1:
+            if "r" in token or "R" in token:
+                recursive = True
+            if "f" in token:
+                force = True
+    return recursive and force
+
+
+def _is_destructive_command(argv: list[str]) -> bool:
+    """Return True if *argv* looks like a destructive file operation."""
+    base = argv[0].split("/")[-1].lower()
+    if base in _FORBIDDEN_DESTRUCTIVE_COMMANDS:
+        return True
+    if _is_recursive_force_rm(argv):
+        return True
+    return bool(_is_dd_to_device(argv))
 
 
 def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
-    """Return (ok, violations) for a single Check.command string."""
+    """Return (ok, violations) for a single Check.command string.
+
+    The command is parsed into argv with :func:`shlex.split` and validated
+    against forbidden shell metacharacters, privilege escalation, and
+    destructive operations. This catches obfuscations such as
+    ``r\\m -\\rf /tmp`` (backslash splitting) because shlex resolves them to
+    ``['rm', '-rf', '/tmp']`` before policy checks run. Variable-expansion
+    tricks such as ``rm$IFS-rf`` are rejected because ``$`` is not permitted in
+    any token.
+    """
     local_violations: list[str] = []
 
-    if _contains_forbidden_shell_token(command):
+    if any(ch in command for ch in _FORBIDDEN_CONTROL_CHARACTERS):
+        local_violations.append(
+            f"Command contains forbidden shell token/operator: {command!r}"
+        )
+        return False, local_violations
+
+    argv, error = _parse_command_to_argv(command)
+    if argv is None:
+        local_violations.append(
+            f"Command is malformed and cannot be validated: {command!r} ({error})"
+        )
+        return False, local_violations
+
+    if _argv_contains_metacharacter(argv):
         local_violations.append(
             f"Command contains forbidden shell token/operator: {command!r}"
         )
 
-    if _has_forbidden_pattern(command):
-        local_violations.append(
-            f"Command contains forbidden pattern (sub-shell/backticks): {command!r}"
-        )
-
-    if _has_forbidden_substrings(command, _FORBIDDEN_PRIVILEGE_SUBSTRINGS):
+    if _is_privilege_escalation(argv):
         local_violations.append(
             f"Command contains privilege escalation: {command!r}"
         )
 
-    if _has_forbidden_substrings(command, _FORBIDDEN_DESTRUCTIVE_SUBSTRINGS):
+    if _is_destructive_command(argv):
         local_violations.append(
             f"Command contains destructive shell operation: {command!r}"
         )
@@ -196,20 +277,19 @@ def _validate_command_against_profile(
         violations.extend(check_violations)
         return violations
 
+    argv, _ = _parse_command_to_argv(command)
+    if argv is None:
+        return violations
+
     # Cross-check inferred docker-socket usage against profile.
-    if _has_forbidden_substrings(
-        command, _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
-    ) and profile.security.docker_socket == "deny":
+    if _is_docker_socket_command(argv) and profile.security.docker_socket == "deny":
         violations.append(
             "Command references docker socket but profile denies "
             f"docker_socket: {command!r}"
         )
 
     # Cross-check inferred destructive shell usage against profile.
-    if (
-        _is_destructive_command(command)
-        and profile.security.destructive_shell == "deny"
-    ):
+    if _is_destructive_command(argv) and profile.security.destructive_shell == "deny":
         violations.append(
             "Command is destructive but profile denies "
             f"destructive_shell: {command!r}"
@@ -263,19 +343,6 @@ def _validate_verification_commands(
             )
 
     return violations
-
-
-def _is_destructive_command(command: str) -> bool:
-    """Return True if *command* looks like a destructive file operation."""
-    lowered = command.lower()
-    # Classic recursive removal.
-    if "rm -r" in lowered or "rm -f" in lowered:
-        return True
-    # Formatting or direct block-device writes.
-    if "mkfs." in lowered or "dd if=" in lowered:
-        return True
-    # Explicit output redirection that can truncate files.
-    return ">" in command
 
 
 class PolicyEngine:
