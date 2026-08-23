@@ -18,8 +18,14 @@ class Approval(SQLModel, table=True):
 
     __table_args__ = (
         Index("ix_approval_task_id", "task_id"),
-        Index("ix_approval_idempotency_key", "idempotency_key", unique=True),
-        Index("ix_approval_task_type_actor", "task_id", "approval_type", "actor"),
+        Index(
+            "ix_approval_idempotency_key",
+            "task_id",
+            "idempotency_key",
+            "approval_type",
+            "actor",
+            unique=True,
+        ),
     )
 
     id: int | None = Field(default=None, primary_key=True)

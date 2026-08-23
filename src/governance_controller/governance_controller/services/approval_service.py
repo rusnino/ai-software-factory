@@ -142,10 +142,13 @@ class ApprovalService:
             )
 
         # 2. Idempotency: return existing task state if this exact key was
-        #    already processed.
+        #    already processed for this exact task, approval type, and actor.
         existing = await self.db.scalar(
             select(Approval).where(
-                Approval.idempotency_key == idempotency_key  # type: ignore[arg-type]
+                Approval.idempotency_key == idempotency_key,  # type: ignore[arg-type]
+                Approval.task_id == task.id,  # type: ignore[arg-type]
+                Approval.approval_type == approval_type.value,  # type: ignore[arg-type]
+                Approval.actor == actor,  # type: ignore[arg-type]
             )
         )
         if existing is not None:

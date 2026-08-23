@@ -14,6 +14,7 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.policy_engine import (
     PolicyEngine,
     PolicyViolationError,
@@ -196,6 +197,104 @@ class TestApprovalServiceIdempotency:
             Approval.__table__.select().where(Approval.task_id == task.id)
         )
         assert len(approvals.scalars().all()) == 1
+
+    async def test_idempotency_key_reuse_on_different_task_is_rejected(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+    ) -> None:
+        # A key that approved task-a must NOT make task-b report approved.
+        task_a = await _make_task(db_session, TaskState.PROPOSED, task_id="task-a")
+        task_b = await _make_task(db_session, TaskState.PROPOSED, task_id="task-b")
+        contract = _make_contract()
+        profile = _make_profile()
+
+        first = await service.approve(
+            task=task_a,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="plane",
+            actor="human-1",
+            idempotency_key="shared-key",
+        )
+        assert first.state == TaskState.PLAN_APPROVED
+
+        second = await service.approve(
+            task=task_b,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="plane",
+            actor="human-1",
+            idempotency_key="shared-key",
+        )
+
+        assert second.state == TaskState.PLAN_APPROVED
+        # Each task must have its own approval row even though the key matches.
+        approvals_a = await service.db.execute(
+            Approval.__table__.select().where(Approval.task_id == "task-a")
+        )
+        approvals_b = await service.db.execute(
+            Approval.__table__.select().where(Approval.task_id == "task-b")
+        )
+        assert len(approvals_a.scalars().all()) == 1
+        assert len(approvals_b.scalars().all()) == 1
+
+    async def test_idempotency_key_reuse_different_type_is_separate_approval(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        # Approval type is part of the idempotency scope: reusing the same key
+        # for a different type and different task must create a new approval.
+        service = ApprovalService(
+            db=db_session,
+            executor=AsyncMock(spec=MacroAgentExecutor),
+            permission_service=PermissionService(admins={"admin", "human-1"}),
+        )
+        service.executor.start.return_value = {"run_id": "run-test"}
+
+        task_plan = await _make_task(
+            db_session, TaskState.PROPOSED, task_id="task-plan"
+        )
+        task_plan2 = await _make_task(
+            db_session, TaskState.PROPOSED, task_id="task-plan2"
+        )
+        contract = _make_contract()
+        profile = _make_profile()
+
+        result_plan = await service.approve(
+            task=task_plan,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="telegram",
+            actor="human-1",
+            idempotency_key="shared-key",
+        )
+        assert result_plan.state == TaskState.PLAN_APPROVED
+
+        # Same key reused for PLAN on a different task must also be a fresh
+        # approval (not idempotent) because idempotency is scoped to task.
+        result_plan2 = await service.approve(
+            task=task_plan2,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="dashboard",
+            actor="human-1",
+            idempotency_key="shared-key",
+        )
+        assert result_plan2.state == TaskState.PLAN_APPROVED
+
+        approvals_a = await service.db.execute(
+            Approval.__table__.select().where(Approval.task_id == task_plan.id)
+        )
+        approvals_b = await service.db.execute(
+            Approval.__table__.select().where(Approval.task_id == task_plan2.id)
+        )
+        assert len(approvals_a.scalars().all()) == 1
+        assert len(approvals_b.scalars().all()) == 1
 
 
 
