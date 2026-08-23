@@ -95,6 +95,13 @@ _FORBIDDEN_CONTROL_CHARACTERS: set[str] = {"\n", "\r", "\x00"}
 # Only these argv[0] values are permitted. Wrappers and interpreters (bash -c,
 # env, xargs, nice, nohup, ssh, timeout, etc.) are excluded because they can
 # carry an arbitrary payload that token-level policy checks would not inspect.
+#
+# NOTE: ``python``/``python3`` are deliberately omitted from this allowlist
+# even though they are common verification tools. They are listed in
+# ``_FORBIDDEN_WRAPPER_COMMANDS`` and that check runs *before* the allowlist,
+# so any ``python ...`` command is rejected as a wrapper/interpreter (e.g.
+# ``python -c`` is arbitrary code execution). Prefixing with an allowlisted
+# runner such as ``uv`` (``uv run python -m pytest``) remains permitted.
 _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
     {
         # Package managers / build tools
@@ -120,8 +127,6 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         "pip3",
         "pnpm",
         "poetry",
-        "python",
-        "python3",
         "raco",
         "rake",
         "sbt",
@@ -144,6 +149,14 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         "rspec",
         "unittest",
         "vitest",
+        # Linters / formatters / type checkers
+        "bandit",
+        "black",
+        "flake8",
+        "mypy",
+        "pylint",
+        "pyright",
+        "ruff",
         # Shell utilities
         "cat",
         "cp",

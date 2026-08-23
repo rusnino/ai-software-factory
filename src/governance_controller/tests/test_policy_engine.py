@@ -437,10 +437,16 @@ class TestPolicyEngineCompletionContractShellAllowlist:
             "git status",
             "pytest -q",
             "make test",
+            "ruff check .",
+            "mypy governance_controller",
+            "black --check src",
+            "flake8 src",
+            "uv run ruff check .",
         ],
     )
     def test_allowed_verification_commands_pass(self, command: str) -> None:
-        # #127: common verification/build commands remain permitted.
+        # #127/#133: common verification/build/lint/type-check commands remain
+        # permitted when declared directly (not via an interpreter wrapper).
         contract = _make_contract(
             completion_contract=CompletionContract(
                 task_id="task-1",
@@ -570,6 +576,19 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is True
+
+    def test_python_argv0_is_rejected_as_wrapper(self) -> None:
+        # #133: ``python``/``python3`` are in the forbidden-wrapper list and must
+        # be rejected *before* the allowlist, even when the payload looks safe.
+        contract = _make_contract(
+            verification={"commands": ["python -m pytest -q"]},
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("wrapper/interpreter" in v for v in result.violations)
 
 
 class TestPolicyEngineShellObfuscationBypasses:
