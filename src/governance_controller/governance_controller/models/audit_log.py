@@ -145,15 +145,17 @@ _AUDITLOG_POSTGRES_FUNCTION = DDL(  # type: ignore[no-untyped-call]
     CREATE OR REPLACE FUNCTION auditlog_block_update_delete()
     RETURNS TRIGGER AS $$
     BEGIN
-        RAISE EXCEPTION 'AuditLog rows are append-only and cannot be %', TG_OP;
+        RAISE EXCEPTION 'AuditLog rows are append-only and cannot be %%', TG_OP;
     END;
     $$ LANGUAGE plpgsql
     """
 )
 
-_AUDITLOG_POSTGRES_TRIGGER = DDL(  # type: ignore[no-untyped-call]
+_AUDITLOG_POSTGRES_DROP_TRIGGER = DDL(  # type: ignore[no-untyped-call]
+    "DROP TRIGGER IF EXISTS auditlog_block_update_delete ON auditlog"
+)
+_AUDITLOG_POSTGRES_CREATE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
     """
-    DROP TRIGGER IF EXISTS auditlog_block_update_delete ON auditlog;
     CREATE TRIGGER auditlog_block_update_delete
         BEFORE UPDATE OR DELETE ON auditlog
         FOR EACH ROW EXECUTE FUNCTION auditlog_block_update_delete()
@@ -186,12 +188,17 @@ _AUDITLOG_SQLITE_DELETE_TRIGGER = DDL(  # type: ignore[no-untyped-call]
 )
 
 _POSTGRES_STMTS: frozenset[DDL] = frozenset(
-    {_AUDITLOG_POSTGRES_FUNCTION, _AUDITLOG_POSTGRES_TRIGGER}
+    {
+        _AUDITLOG_POSTGRES_FUNCTION,
+        _AUDITLOG_POSTGRES_DROP_TRIGGER,
+        _AUDITLOG_POSTGRES_CREATE_TRIGGER,
+    }
 )
 
 for _stmt in (
     _AUDITLOG_POSTGRES_FUNCTION,
-    _AUDITLOG_POSTGRES_TRIGGER,
+    _AUDITLOG_POSTGRES_DROP_TRIGGER,
+    _AUDITLOG_POSTGRES_CREATE_TRIGGER,
     _AUDITLOG_SQLITE_DROP_UPDATE,
     _AUDITLOG_SQLITE_DROP_DELETE,
     _AUDITLOG_SQLITE_UPDATE_TRIGGER,

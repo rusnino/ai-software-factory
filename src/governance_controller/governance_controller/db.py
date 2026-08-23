@@ -95,8 +95,9 @@ async def run_migrations() -> None:
 
         # Apply DB-level immutability triggers to existing tables (#120).
         from governance_controller.models.audit_log import (
+            _AUDITLOG_POSTGRES_CREATE_TRIGGER,
+            _AUDITLOG_POSTGRES_DROP_TRIGGER,
             _AUDITLOG_POSTGRES_FUNCTION,
-            _AUDITLOG_POSTGRES_TRIGGER,
             _AUDITLOG_SQLITE_DELETE_TRIGGER,
             _AUDITLOG_SQLITE_DROP_DELETE,
             _AUDITLOG_SQLITE_DROP_UPDATE,
@@ -105,7 +106,8 @@ async def run_migrations() -> None:
 
         if dialect_name == "postgresql":
             await conn.execute(_AUDITLOG_POSTGRES_FUNCTION)
-            await conn.execute(_AUDITLOG_POSTGRES_TRIGGER)
+            await conn.execute(_AUDITLOG_POSTGRES_DROP_TRIGGER)
+            await conn.execute(_AUDITLOG_POSTGRES_CREATE_TRIGGER)
         elif dialect_name == "sqlite":
             await conn.execute(_AUDITLOG_SQLITE_DROP_UPDATE)
             await conn.execute(_AUDITLOG_SQLITE_DROP_DELETE)

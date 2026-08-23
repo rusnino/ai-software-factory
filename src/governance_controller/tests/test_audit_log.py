@@ -1,11 +1,14 @@
 """Tests for the AuditLog model and AuditService."""
 
+import os
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
+from sqlmodel import SQLModel
 
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.audit_log import AuditLog
@@ -220,6 +223,71 @@ class TestAuditLogModel:
                 )
             )
             await db_session.commit()
+
+
+def _is_postgres(url: str) -> bool:
+    return url.startswith("postgresql")
+
+
+@pytest.mark.skipif(
+    not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+class TestAuditLogPostgresDDL:
+    async def test_postgres_create_all_and_run_migrations_succeed(
+        self,
+    ) -> None:
+        """#126: literal % in PL/pgSQL must not crash create_all/run_migrations."""
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        engine = create_async_engine(url, echo=False, future=True)
+        async with engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.drop_all)
+            await conn.run_sync(SQLModel.metadata.create_all)
+        await engine.dispose()
+
+    async def test_postgres_trigger_blocks_update_and_delete(
+        self, isolated_db: tuple[AsyncEngine, sessionmaker]
+    ) -> None:
+        """#126: trigger created by Postgres DDL blocks Core UPDATE/DELETE."""
+        engine, session_local = isolated_db
+        assert engine.dialect.name == "postgresql"
+        async with session_local() as session:
+            from sqlalchemy import delete, update
+
+            await AuditService.log(
+                db=session,
+                event_type="approval",
+                task_id="task-pg-trigger",
+                actor="human-1",
+                source="plane",
+            )
+
+            with pytest.raises(Exception, match="append-only"):
+                await session.execute(
+                    update(AuditLog)
+                    .where(AuditLog.task_id == "task-pg-trigger")
+                    .values(actor="tampered")
+                )
+                await session.commit()
+
+        async with session_local() as session:
+            from sqlalchemy import delete
+
+            await AuditService.log(
+                db=session,
+                event_type="approval",
+                task_id="task-pg-trigger-del",
+                actor="human-1",
+                source="plane",
+            )
+
+            with pytest.raises(Exception, match="append-only"):
+                await session.execute(
+                    delete(AuditLog).where(
+                        AuditLog.task_id == "task-pg-trigger-del"
+                    )
+                )
+                await session.commit()
 
 
 class TestAuditServiceSideEffects:
