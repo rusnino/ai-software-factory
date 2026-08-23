@@ -11,10 +11,13 @@ validates every ``Check.command`` before approval. The checks below are applied 
 2. Reject commands that cannot be parsed or that still contain shell
    metacharacters/operators after parsing (redirections, pipes, command
    substitution, globbing, variable expansion, etc.).
-3. Reject privilege escalation by argv[0]: ``sudo``, ``su``, ``doas``.
-4. Reject common destructive file-system operations: ``rm`` with recursive and
-   force flags, ``rm --no-preserve-root``, ``dd if=... of=...`` with device-ish
-   targets, ``mkfs.*``.
+3. Require an explicit allowlist match for ``argv[0]``. Only a small set of
+   common verification binaries is permitted; wrappers and interpreters such as
+   ``bash -c``, ``env``, ``xargs``, ``nice``, ``nohup``, ``ssh`` and similar are
+   not allowed because their payloads bypass token-level policy checks.
+4. Reject common destructive file-system operations inside the resolved argv:
+   ``rm`` with recursive and force flags, ``rm --no-preserve-root``,
+   ``dd if=... of=...`` with device-ish targets, ``mkfs.*``.
 5. Reject commands that reference Docker socket paths
    (``docker.sock``, ``/var/run/docker.sock``) unless the project profile
    permits it.
@@ -88,11 +91,134 @@ _FORBIDDEN_SHELL_METACHARACTERS: set[str] = {
 # when shlex splits the surrounding text into innocent-looking tokens.
 _FORBIDDEN_CONTROL_CHARACTERS: set[str] = {"\n", "\r", "\x00"}
 
-# Privilege-escalation base commands (argv[0] match).
+# Allowed base commands for verification/completion-contract shell checks.
+# Only these argv[0] values are permitted. Wrappers and interpreters (bash -c,
+# env, xargs, nice, nohup, ssh, timeout, etc.) are excluded because they can
+# carry an arbitrary payload that token-level policy checks would not inspect.
+_ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
+    {
+        # Package managers / build tools
+        "apt",
+        "apt-get",
+        "brew",
+        "cargo",
+        "cmake",
+        "composer",
+        "conan",
+        "dotnet",
+        "dpkg",
+        "gem",
+        "gradle",
+        "make",
+        "meson",
+        "mix",
+        "mvn",
+        "npm",
+        "npx",
+        "nuget",
+        "pip",
+        "pip3",
+        "pnpm",
+        "poetry",
+        "python",
+        "python3",
+        "raco",
+        "rake",
+        "sbt",
+        "stack",
+        "uv",
+        "yarn",
+        # VCS
+        "git",
+        "hg",
+        "svn",
+        # Verification / test runners
+        "pytest",
+        "tox",
+        "nox",
+        "jest",
+        "mocha",
+        "go",
+        "gotestsum",
+        "prove",
+        "rspec",
+        "unittest",
+        "vitest",
+        # Shell utilities
+        "cat",
+        "cp",
+        "curl",
+        "cut",
+        "date",
+        "diff",
+        "echo",
+        "find",
+        "grep",
+        "head",
+        "id",
+        "ls",
+        "mkdir",
+        "mv",
+        "pwd",
+        "rm",
+        "sed",
+        "sort",
+        "tail",
+        "tar",
+        "tee",
+        "test",
+        "touch",
+        "tr",
+        "uniq",
+        "unzip",
+        "wc",
+        "wget",
+        "which",
+        "whoami",
+        "zip",
+        # Container tools (profile still gates docker socket access)
+        "docker",
+        "docker-compose",
+        "podman",
+        "kubectl",
+    }
+)
+
+# Privilege-escalation base commands (checked against every argv token).
 _FORBIDDEN_PRIVILEGE_COMMANDS: frozenset[str] = frozenset({"sudo", "su", "doas"})
 
-# Destructive file-system base commands (argv[0] match).
+# Destructive file-system base commands (checked against every argv token).
 _FORBIDDEN_DESTRUCTIVE_COMMANDS: frozenset[str] = frozenset({"mkfs"})
+
+# Wrappers/interpreters whose payload would be executed by the shell but is not
+# part of the token-level argv we inspect. These are rejected at argv[0] so an
+# opaque payload cannot bypass policy.
+_FORBIDDEN_WRAPPER_COMMANDS: frozenset[str] = frozenset(
+    {
+        "bash",
+        "dash",
+        "sh",
+        "zsh",
+        "ssh",
+        "env",
+        "nice",
+        "nohup",
+        "timeout",
+        "xargs",
+        "command",
+        "exec",
+        "eval",
+        "busybox",
+        "install",
+        "perl",
+        "python",
+        "python3",
+        "ruby",
+        "node",
+        "php",
+        "lua",
+    }
+)
 
 # Docker-socket access substrings (checked against resolved argv tokens).
 _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS: tuple[str, ...] = (
@@ -160,10 +286,26 @@ def _argv_contains_metacharacter(argv: list[str]) -> bool:
     return False
 
 
+def _base_command(token: str) -> str:
+    """Return the lower-cased base command name for a token."""
+    return token.split("/")[-1].lower()
+
+
+def _is_allowed_argv0(argv: list[str]) -> bool:
+    """Return True if argv[0] is in the explicit allowlist."""
+    return _base_command(argv[0]) in _ALLOWED_VERIFICATION_COMMANDS
+
+
+def _is_forbidden_wrapper(argv: list[str]) -> bool:
+    """Return True if argv[0] is a known wrapper/interpreter."""
+    return _base_command(argv[0]) in _FORBIDDEN_WRAPPER_COMMANDS
+
+
 def _is_privilege_escalation(argv: list[str]) -> bool:
-    """Return True if argv[0] is a known privilege-escalation command."""
-    base = argv[0].split("/")[-1].lower()
-    return base in _FORBIDDEN_PRIVILEGE_COMMANDS
+    """Return True if any token is a known privilege-escalation command."""
+    return any(
+        _base_command(token) in _FORBIDDEN_PRIVILEGE_COMMANDS for token in argv
+    )
 
 
 def _is_docker_socket_command(argv: list[str]) -> bool:
@@ -176,7 +318,7 @@ def _is_docker_socket_command(argv: list[str]) -> bool:
 
 def _is_dd_to_device(argv: list[str]) -> bool:
     """Return True for ``dd if=... of=/dev/...`` or block-device-like targets."""
-    if argv[0].lower() != "dd":
+    if _base_command(argv[0]) != "dd":
         return False
     has_input = False
     has_device_output = False
@@ -192,7 +334,7 @@ def _is_dd_to_device(argv: list[str]) -> bool:
 
 def _is_recursive_force_rm(argv: list[str]) -> bool:
     """Return True for ``rm`` with both recursive and force flags."""
-    if argv[0].lower() != "rm":
+    if _base_command(argv[0]) != "rm":
         return False
     recursive = False
     force = False
@@ -209,8 +351,7 @@ def _is_recursive_force_rm(argv: list[str]) -> bool:
 
 def _is_destructive_command(argv: list[str]) -> bool:
     """Return True if *argv* looks like a destructive file operation."""
-    base = argv[0].split("/")[-1].lower()
-    if base in _FORBIDDEN_DESTRUCTIVE_COMMANDS:
+    if any(_base_command(token) in _FORBIDDEN_DESTRUCTIVE_COMMANDS for token in argv):
         return True
     if _is_recursive_force_rm(argv):
         return True
@@ -246,6 +387,16 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
     if _argv_contains_metacharacter(argv):
         local_violations.append(
             f"Command contains forbidden shell token/operator: {command!r}"
+        )
+
+    if _is_forbidden_wrapper(argv):
+        local_violations.append(
+            f"Command uses a wrapper/interpreter that can hide payloads: "
+            f"{command!r}"
+        )
+    elif not _is_allowed_argv0(argv):
+        local_violations.append(
+            f"Command argv[0] is not in the verification allowlist: {command!r}"
         )
 
     if _is_privilege_escalation(argv):

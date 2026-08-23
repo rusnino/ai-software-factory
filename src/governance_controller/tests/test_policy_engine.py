@@ -393,6 +393,68 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         assert result.allowed is False
         assert any("privilege escalation" in v for v in result.violations)
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'env rm -rf /tmp/gcpoc_wrap1',
+            'bash -c "sudo rm -rf /tmp/gcpoc_wrap2"',
+            'sh -c "rm -rf /tmp/gcpoc_wrap3"',
+            "nice sudo rm -rf /tmp/gcpoc_wrap4",
+            "xargs rm -rf",
+            "nohup rm -rf /tmp/gcpoc_wrap5",
+            "timeout 5 rm -rf /tmp/gcpoc_wrap6",
+            'ssh user@host rm -rf /',
+            'env -i rm -rf /tmp/gcpoc_wrap7',
+            'busybox rm -rf /tmp/gcpoc_wrap8',
+        ],
+    )
+    def test_wrapper_interpreter_payloads_are_rejected(self, command: str) -> None:
+        # #127: interpreter/wrapper argv[0] must not bypass destructive/privilege
+        # checks hidden in an opaque payload string.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="exec", command=command)],
+                scope_check=ScopeCheck(description="wrapper bypass check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "wrapper/interpreter" in v
+            or "privilege escalation" in v
+            or "destructive" in v
+            for v in result.violations
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "uv run pytest -q",
+            "git status",
+            "pytest -q",
+            "make test",
+        ],
+    )
+    def test_allowed_verification_commands_pass(self, command: str) -> None:
+        # #127: common verification/build commands remain permitted.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="test", command=command)],
+                scope_check=ScopeCheck(description="allowed check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+        assert result.violations == []
+
     def test_command_with_newline_rejected(self) -> None:
         # Embedded newlines (and carriage returns) let sh -c treat each line as
         # a separate statement, bypassing token-based checks on the payload.
