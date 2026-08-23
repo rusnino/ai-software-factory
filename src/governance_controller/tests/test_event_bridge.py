@@ -758,10 +758,12 @@ class TestEventBridgeTransitions:
         original_run_check = VerificationService._run_check
         commits_before_run_check = 0
 
-        async def _counting_run_check(check: Check) -> dict[str, object]:
+        async def _counting_run_check(
+            check: Check, timeout: float | None = None, cwd: str | None = None
+        ) -> dict[str, object]:
             nonlocal commits_before_run_check
             commits_before_run_check = counting_session.commit_count
-            return await original_run_check(check)
+            return await original_run_check(check, timeout=timeout, cwd=cwd)
 
         with patch.object(
             VerificationService, "_run_check", staticmethod(_counting_run_check)
@@ -815,10 +817,12 @@ class TestEventBridgeTransitions:
         original_run_check = VerificationService._run_check
         commits_before_run_check = 0
 
-        async def _counting_run_check(check: Check) -> dict[str, object]:
+        async def _counting_run_check(
+            check: Check, timeout: float | None = None, cwd: str | None = None
+        ) -> dict[str, object]:
             nonlocal commits_before_run_check
             commits_before_run_check = counting_session.commit_count
-            return await original_run_check(check)
+            return await original_run_check(check, timeout=timeout, cwd=cwd)
 
         with patch.object(
             VerificationService, "_run_check", staticmethod(_counting_run_check)

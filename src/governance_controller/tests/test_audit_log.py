@@ -112,6 +112,71 @@ class TestAuditLogModel:
         assert reloaded.event_id == original_event_id
         assert reloaded.payload == original_payload
 
+    async def test_hash_chain_links_rows(
+        self, db_session: AsyncSession
+    ) -> None:
+        first = await AuditService.log(
+            db=db_session,
+            event_type="state_change",
+            task_id="task-hash",
+            actor="human-1",
+            source="plane",
+            payload={"x": 1},
+        )
+        second = await AuditService.log(
+            db=db_session,
+            event_type="state_change",
+            task_id="task-hash",
+            actor="human-1",
+            source="plane",
+            payload={"x": 2},
+        )
+
+        assert first.row_hash is not None
+        assert second.row_hash is not None
+        assert first.row_hash != second.row_hash
+        assert second.previous_hash == first.row_hash
+
+        # Re-compute on a fresh load to verify stored state verifies.
+        from sqlalchemy import select
+
+        reloaded = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.id == second.id)
+            )
+        ).scalar_one()
+        assert reloaded.row_hash == reloaded.compute_hash()
+
+    async def test_audit_row_update_is_blocked(
+        self, db_session: AsyncSession
+    ) -> None:
+        entry = await AuditService.log(
+            db=db_session,
+            event_type="approval",
+            task_id="task-1",
+            actor="human-1",
+            source="plane",
+        )
+
+        entry.payload = {"tampered": True}
+        with pytest.raises(RuntimeError, match="append-only"):
+            await db_session.commit()
+
+    async def test_audit_row_delete_is_blocked(
+        self, db_session: AsyncSession
+    ) -> None:
+        entry = await AuditService.log(
+            db=db_session,
+            event_type="approval",
+            task_id="task-1",
+            actor="human-1",
+            source="plane",
+        )
+
+        await db_session.delete(entry)
+        with pytest.raises(RuntimeError, match="append-only"):
+            await db_session.flush()
+
 
 class TestAuditServiceSideEffects:
     async def test_structlog_event_is_emitted(
