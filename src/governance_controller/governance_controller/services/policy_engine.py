@@ -278,6 +278,7 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
 _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
     {
         "--to-command",
+        "--to-command=",
         "--remove-files",
         "--remove-file",
     }
