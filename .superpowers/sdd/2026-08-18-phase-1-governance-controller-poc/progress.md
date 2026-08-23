@@ -41,6 +41,9 @@
 - [x] Review 21 (REVIEW-021) verification — GAP-077/091 closed; GAP-093 concurrency race analyzed as not exploitable; accidentally found GAP-094 (SQLite pool-kwargs regression) while verifying (docs commit 541837d)
 - [x] Review 22 (REVIEW-022) verification — GAP-094 closed; gap ledger reached zero OPEN/IN_PROGRESS rows for the first time (docs commit b79ac5a)
 - [x] Review 23 (REVIEW-023) full fresh review — gate reopened: GAP-095/096/097 new HIGH (verification-lock/timeout, permission-blocklist bypass, retry dedup-on-exception); GAP-098-101/103/104/106 also found and closed; GAP-105 (SDD ledger staleness) initially marked ACCEPTED, later backfilled here instead per REVIEW-024's re-examination (docs commit ccf3617, gap closures 33ebf6b/59be68c)
+- [x] GitHub Issues migration — gap tracking moved from `reviews/GAPS.md`/`REVIEW-NNN-*.md` to GitHub Issues on `rusnino/ai-software-factory` (commit c857b92); frozen `reviews/` banners corrected to actual freeze date 2026-08-23
+- [x] Issues #107-#115 round — shell-command newline bypass, approval idempotency scope, verification isolation, scope check enforcement, 403 mapping, security-flag forwarding, review banner dates, hash-chain/mypy fix (commits 5ab5ea1..25dfeb6)
+- [x] Issues #116-#125 round — shlex-based argv policy validation, audit hash-chain FOR UPDATE locking, missing-worktree fallback + conditional event dedup, AuditLog startup migration + DB-level immutability triggers, Check.command NUL/control-char validation, verification env HOME scoping, Telegram constant-time secret comparison, NEXT_STEPS/progress ledger updates
 
 ## Preflight Rulings
 

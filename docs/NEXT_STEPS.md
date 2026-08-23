@@ -2,16 +2,17 @@
 
 ## Current State
 
-**Gap tracking lives in GitHub Issues now** (see `AGENTS.md` §"Review Findings and Gap Tracking"). A fresh full Phase 1 review on 2026-08-23 filed #107-#115; #107-#114 are `CLOSED` (fixed same day), #115 (mypy regression introduced by #114's fix) is still `OPEN` — check `gh issue list --repo rusnino/ai-software-factory --state open` before treating Phase 1 as gap-free.
+**Gap tracking lives in GitHub Issues now** (see `AGENTS.md` §"Review Findings and Gap Tracking"). A fresh full Phase 1 review on 2026-08-23 filed #107-#115; #107-#115 are `CLOSED` (fixed same day). A follow-on review filed #116-#125; check `gh issue list --repo rusnino/ai-software-factory --state open` before treating Phase 1 as gap-free.
 
 - `GAP-095` (`85a1fd8`): `_run_check` now spawns with `start_new_session=True` and kills the entire process group (`os.killpg`) on timeout, so shell-forked children cannot outlive the shell. Regression tests now assert elapsed time is near the timeout.
 - `GAP-097` (`85a1fd8`): `EventBridge.handle()` commits the `ProcessedEvent` dedup key inside the `finally` block before the exception propagates out of the handler, so `get_db()`'s rollback-on-exception does not discard it.
 - `#107`: `PolicyEngine`'s shell-command allowlist now rejects embedded newlines/carriage returns (previously bypassable — a smuggled second command separated by `\n` ran unblocked).
 - `#108`: `POST /approvals` idempotency lookup now scopes on `(task_id, approval_type, actor)` in addition to the key, closing a cross-task bypass where reusing a key for an unrelated task returned a false `approved: true`.
 - `#109`/`#110`/`#111`/`#112`/`#113`: verification subprocesses now run with an isolated `cwd`/filtered env; `CompletionContract.scope_check.allowed_paths` is now enforced (not just `forbidden_paths`); self-approval/permission-denial rejections now return 403 (not 422); Project Profile security flags are now forwarded to the macro-agent executor payload; `reviews/` freeze-date banners corrected to their actual commit date.
-- `#114`: `AuditLog` now hash-chains rows (`previous_hash`/`row_hash`, SHA-256) and rejects UPDATE/DELETE via SQLAlchemy events — but this introduced `#115` (6 new `mypy` errors in previously-clean production code), still open.
+- `#114`: `AuditLog` now hash-chains rows (`previous_hash`/`row_hash`, SHA-256) and rejects UPDATE/DELETE via SQLAlchemy events.
+- `#115`: mypy typing regression from `#114`'s event listeners fixed.
 
-Test status: **233 passed** on SQLite and PostgreSQL, `ruff` clean. `mypy --strict` on production code now has 6 new errors from `#114`'s fix (tracked as `#115`) in addition to the pre-existing test-file typing noise.
+Test status: **passing** on SQLite and PostgreSQL, `ruff` clean, `mypy governance_controller` clean.
 
 Implemented components:
 
