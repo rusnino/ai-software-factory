@@ -259,8 +259,8 @@ _FORBIDDEN_CONTAINER_ESCAPE_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-# Dangerous git config keys that accept arbitrary shell commands. Any git -c
-# override matching these keys is rejected, because values such as
+# Dangerous git config keys that accept arbitrary shell commands. #139: any
+# git -c override matching these keys is rejected, because values such as
 # core.sshCommand=<shell command> execute unconditionally when git touches SSH.
 _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
     {
@@ -274,6 +274,7 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 
 # Dangerous tar flags that execute arbitrary commands or delete files.
+# #140: --to-command runs an arbitrary shell command per extracted member.
 _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
     {
         "--to-command",
@@ -282,8 +283,8 @@ _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-# Dangerous find predicates and actions. -delete silently removes files; -exec
-# and -ok can run arbitrary commands.
+# Dangerous find predicates and actions. #135: -delete silently removes files;
+# -exec and -ok can run arbitrary commands.
 _FORBIDDEN_FIND_ACTIONS: frozenset[str] = frozenset(
     {
         "-delete",
