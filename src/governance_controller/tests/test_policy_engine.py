@@ -5,7 +5,11 @@ import pytest
 from governance_controller.constants import ApprovalType
 from governance_controller.harness import registry
 from governance_controller.harness.base import HarnessProvider
-from governance_controller.schemas import Check, CompletionContract, ScopeCheck
+from governance_controller.schemas import (
+    Check,
+    CompletionContract,
+    ScopeCheck,
+)
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
@@ -278,6 +282,8 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         assert result.allowed is True
 
     def test_docker_socket_command_rejected_when_profile_denies(self) -> None:
+        # #138: docker is removed from the verification allowlist entirely, so
+        # any docker command is rejected regardless of socket path.
         contract = _make_contract(
             completion_contract=CompletionContract(
                 task_id="task-1",
@@ -295,7 +301,10 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any("docker socket" in v for v in result.violations)
+        assert any(
+            "docker socket" in v or "not in the verification allowlist" in v
+            for v in result.violations
+        )
 
     def test_destructive_command_rejected_when_profile_denies(self) -> None:
         contract = _make_contract(
@@ -542,6 +551,7 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         assert any("privilege escalation" in v for v in result.violations)
 
     def test_verification_docker_socket_command_rejected_when_denied(self) -> None:
+        # #138: docker is removed from the verification allowlist entirely.
         contract = _make_contract(
             verification={
                 "commands": ["docker -H unix:///var/run/docker.sock ps"]
@@ -552,7 +562,10 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any("docker socket" in v for v in result.violations)
+        assert any(
+            "docker socket" in v or "not in the verification allowlist" in v
+            for v in result.violations
+        )
 
     def test_verification_destructive_command_rejected_when_denied(self) -> None:
         contract = _make_contract(
@@ -578,6 +591,47 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         assert result.allowed is True
 
     def test_python_argv0_is_rejected_as_wrapper(self) -> None:
+        # #133: ``python``/``python3`` are in the forbidden-wrapper list and must
+        # be rejected *before* the allowlist, even when the payload looks safe.
+        contract = _make_contract(
+            verification={"commands": ["python -m pytest -q"]},
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("wrapper/interpreter" in v for v in result.violations)
+
+
+class TestPolicyEngineContainerAllowlistRemoval:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "docker run --rm -v /:/host alpine chroot /host touch /root/pwned",
+            "podman run --rm -v /:/host alpine chroot /host touch /root/pwned",
+            "kubectl delete pod my-pod",
+        ],
+    )
+    def test_container_tools_not_in_allowlist(self, command: str) -> None:
+        # #138: docker/podman/kubectl removed from allowlist; bind-mount escape
+        # impossible to whitelist safely in Phase 1.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="container", command=command)],
+                scope_check=ScopeCheck(description="container tool bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "not in the verification allowlist" in v for v in result.violations
+        )
+
         # #133: ``python``/``python3`` are in the forbidden-wrapper list and must
         # be rejected *before* the allowlist, even when the payload looks safe.
         contract = _make_contract(

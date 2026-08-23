@@ -189,11 +189,9 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         "which",
         "whoami",
         "zip",
-        # Container tools (profile still gates docker socket access)
-        "docker",
-        "docker-compose",
-        "podman",
-        "kubectl",
+        # Container tools are intentionally omitted. docker/podman/kubectl
+        # allow bind mounts, privileged mode, and host namespace sharing that
+        # cannot be safely whitelisted at the argv level in Phase 1.
     }
 )
 
@@ -234,9 +232,31 @@ _FORBIDDEN_WRAPPER_COMMANDS: frozenset[str] = frozenset(
 )
 
 # Docker-socket access substrings (checked against resolved argv tokens).
+# NOTE: docker/podman/kubectl are intentionally absent from
+# ``_ALLOWED_VERIFICATION_COMMANDS`` because bind-mount and privileged flags
+# cannot be safely enumerated in Phase 1. These substrings remain for legacy
+# socket-reference detection on any other command that might mention them.
 _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS: tuple[str, ...] = (
     "docker.sock",
     "/var/run/docker.sock",
+)
+
+# Container flags that break isolation. Docker/podman/kubectl are not in the
+# allowlist; these patterns are kept as a defense-in-depth scan on any command
+# that somehow mentions them (e.g. wrapped by a future allowed helper).
+_FORBIDDEN_CONTAINER_ESCAPE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--privileged",
+        "--pid=host",
+        "--network=host",
+        "--ipc=host",
+        "--uts=host",
+        "--cap-add",
+        "--security-opt",
+        "--volume",
+        "-v",
+        "--mount",
+    }
 )
 
 
@@ -326,6 +346,17 @@ def _is_docker_socket_command(argv: list[str]) -> bool:
     lowered = [token.lower() for token in argv]
     return any(
         sub in token for token in lowered for sub in _FORBIDDEN_DOCKER_SOCKET_SUBSTRINGS
+    )
+
+
+def _is_container_escape_flag(argv: list[str]) -> bool:
+    """Return True if any token is a container flag that breaks isolation."""
+    return any(
+        any(
+            token == flag or token.startswith(flag + "=")
+            for flag in _FORBIDDEN_CONTAINER_ESCAPE_FLAGS
+        )
+        for token in argv
     )
 
 
@@ -420,6 +451,11 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
     if _is_destructive_command(argv):
         local_violations.append(
             f"Command contains destructive shell operation: {command!r}"
+        )
+
+    if _is_container_escape_flag(argv):
+        local_violations.append(
+            f"Command contains container isolation escape flag: {command!r}"
         )
 
     return not local_violations, local_violations
