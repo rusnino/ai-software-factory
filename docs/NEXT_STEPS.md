@@ -9,18 +9,20 @@ gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
 gh issue list --repo rusnino/ai-software-factory --state closed --label phase-1
 ```
 
-The most recent review rounds closed #131-#140. Highlights:
+Closed review round summaries are available via GitHub Issues rather than a
+static transcript:
 
-- `#131`: `NEXT_STEPS.md` and SDD progress updated for the #126-#130 round.
-- `#132`: `VerificationService._run_check` wraps `create_subprocess_shell` in OSError handling and returns a failed check result instead of propagating.
-- `#133`: verification-command allowlist extended with common linters and type checkers; `python`/`python3` remain forbidden wrappers.
-- `#134`: `PolicyEngine.evaluate` and `VerificationService.verify_execution` now extract path-like argv tokens from every `Check.command` and check them against forbidden paths, not just declared `inputs`/`deliverables`.
-- `#135`: destructive primitives on allowlisted binaries are now rejected: `find -delete`/`-exec`, `tar --to-command`/`--remove-files`, `git clean -f`/`-x`/`-d`.
-- `#136`: `.superpowers/sdd/.../progress.md` retired; gap tracking now fully in GitHub Issues.
-- `#137`: `run_migrations()` precondition guard (raise if `auditlog` table missing) covered by automated test.
-- `#138`: `docker`/`podman`/`kubectl` removed from the verification-command allowlist; bind-mount and privileged-flag escapes are not safely enumerable in Phase 1.
-- `#139`: `git -c` overrides for dangerous config keys (`core.sshCommand`, `core.fsmonitor`, `core.editor`, `credential.helper`, etc.) are rejected.
-- `#140`: `tar --to-command` and other extraction/deletion hooks are rejected.
+```bash
+gh issue list --repo rusnino/ai-software-factory --state closed --label phase-1
+```
+
+Architectural summary: command validation now uses an explicit `argv[0]`
+allowlist plus per-binary dangerous-construct checks. Known-resolved bypass
+classes include wrapper/interpreter smuggling, forbidden-path text scanning,
+destructive flags on allowlisted binaries, command-execution primitives such as
+`git -c`, `tar --to-command`, `find -exec`, and `sed` `s///e`, container escape
+flags, and removal of unauditable network/package-manager tools (`curl`,
+`wget`, `apt`, `apt-get`, `dpkg`).
 
 Test status: **passing** on SQLite and PostgreSQL, `ruff` clean, `mypy governance_controller` clean.
 
