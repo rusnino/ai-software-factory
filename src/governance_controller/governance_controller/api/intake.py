@@ -1,9 +1,10 @@
 """Intake API endpoints for Telegram, Email, and generic ideas."""
 
+import hashlib
 import hmac
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from governance_controller.adapters.email import EmailAdapter
 from governance_controller.adapters.telegram import (
@@ -24,12 +25,33 @@ class IntakeAuthError(Exception):
 
 
 def _require_intake_secret(
+    request: Request,
     x_intake_secret: str | None = Header(default=None, alias="X-Intake-Secret"),
+    x_intake_signature: str | None = Header(
+        default=None, alias="X-Intake-Signature"
+    ),
 ) -> None:
-    """Validate the generic intake shared secret when configured."""
+    """Validate intake webhooks using a shared secret or HMAC signature.
+
+    Email/webhook providers typically sign the request body with a shared
+    secret rather than sending the secret in a header. When
+    ``X-Intake-Signature`` is present we verify the HMAC-SHA256 hex digest of
+    the body against ``settings.intake_secret``. Otherwise we fall back to the
+    legacy ``X-Intake-Secret`` header comparison.
+    """
     configured = settings.intake_secret
     if not configured:
         return
+
+    if x_intake_signature is not None:
+        body = getattr(request.state, "raw_body", b"")
+        expected = hmac.new(
+            configured.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(x_intake_signature, expected):
+            raise IntakeAuthError("Invalid intake signature")
+        return
+
     if not hmac.compare_digest(x_intake_secret or "", configured):
         raise IntakeAuthError("Invalid or missing intake secret")
 

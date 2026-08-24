@@ -100,4 +100,9 @@ class WriteBodySizeLimitMiddleware:
                 return msg
             return await receive()
 
+        scope.setdefault("state", {})["raw_body"] = b"".join(
+            msg.get("body", b"")
+            for msg in buffered
+            if msg.get("type") == "http.request"
+        )
         await self.app(scope, _replay_receive, send)

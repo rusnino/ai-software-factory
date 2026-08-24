@@ -1,5 +1,7 @@
 """Tests for the intake adapter endpoints."""
 
+import hashlib
+import hmac
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -234,6 +236,46 @@ async def test_intake_email_accepts_valid_secret(
         headers={"X-Intake-Secret": "secret"},
     )
     assert response.status_code == 200
+
+
+async def test_intake_email_accepts_hmac_signature(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    body = (
+        b'{"message_id":"msg-2","from":{"address":"a@b.com"},'
+        b'"subject":"Feature","body_text":"Add dark mode"}'
+    )
+    signature = hmac.new(b"secret", body, hashlib.sha256).hexdigest()
+    response = await async_client.post(
+        "/intake/email",
+        content=body,
+        headers={
+            "X-Intake-Signature": signature,
+            "content-type": "application/json",
+        },
+    )
+    assert response.status_code == 200
+
+
+async def test_intake_email_rejects_bad_hmac_signature(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    body = b'{"message_id":"msg-2","subject":"X","body_text":"Y"}'
+    response = await async_client.post(
+        "/intake/email",
+        content=body,
+        headers={
+            "X-Intake-Signature": "bad",
+            "content-type": "application/json",
+        },
+    )
+    assert response.status_code == 401
 
 
 async def test_intake_email_rejects_oversized_body(
