@@ -1,0 +1,59 @@
+"""FastAPI entry point for the macro-agent service scaffold."""
+
+from fastapi import FastAPI, HTTPException, status
+
+from macro_agent_service.models import (
+    RunRequest,
+    RunResponse,
+    RunResult,
+    RunStatus,
+)
+from macro_agent_service.store import store
+
+app = FastAPI(
+    title="macro-agent service",
+    description="Phase 2 scaffold for macro-agent run lifecycle.",
+    version="0.1.0",
+)
+
+
+@app.post("/runs", status_code=status.HTTP_201_CREATED)
+async def start_run(request: RunRequest) -> RunResponse:
+    """Enqueue a new macro-agent run."""
+    return await store.create(request)
+
+
+@app.get("/runs/{run_id}")
+async def get_run(run_id: str) -> RunStatus:
+    """Get the status of a run."""
+    run = await store.get(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found",
+        )
+    return run
+
+
+@app.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str) -> RunStatus:
+    """Cancel an active run."""
+    run = await store.cancel(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found",
+        )
+    return run
+
+
+@app.get("/runs/{run_id}/collect")
+async def collect_run(run_id: str) -> RunResult:
+    """Collect the result of a run."""
+    result = await store.collect(run_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found",
+        )
+    return result
