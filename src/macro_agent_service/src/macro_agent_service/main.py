@@ -1,5 +1,6 @@
 """FastAPI entry point for the macro-agent service scaffold."""
 
+import hmac
 import os
 
 import uvicorn
@@ -30,7 +31,7 @@ def _require_secret(
     configured = config.api_secret
     if not configured:
         return
-    if x_macro_agent_secret != configured:
+    if not hmac.compare_digest(x_macro_agent_secret or "", configured):
         raise AuthError("Invalid or missing macro-agent service secret")
 
 

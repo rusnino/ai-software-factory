@@ -1,5 +1,6 @@
 """Intake API endpoints for Telegram, Email, and generic ideas."""
 
+import hmac
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -29,7 +30,7 @@ def _require_intake_secret(
     configured = settings.intake_secret
     if not configured:
         return
-    if x_intake_secret != configured:
+    if not hmac.compare_digest(x_intake_secret or "", configured):
         raise IntakeAuthError("Invalid or missing intake secret")
 
 

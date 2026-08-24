@@ -5,6 +5,7 @@ Translates Plane state-change webhooks into Controller approvals per SPEC-04
 """
 
 import contextlib
+import hmac
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -122,7 +123,7 @@ def _require_plane_secret(
     configured = settings.plane_webhook_secret
     if not configured:
         return
-    if x_plane_webhook_secret != configured:
+    if not hmac.compare_digest(x_plane_webhook_secret or "", configured):
         raise WebhookAuthError("Invalid or missing Plane webhook secret")
 
 
