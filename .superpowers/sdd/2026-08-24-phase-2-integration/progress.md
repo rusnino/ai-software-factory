@@ -18,9 +18,15 @@ Started: 2026-08-24
   - Added unit tests with httpx mocks and contract tests against local Plane CE.
   - Verified: 298 passed (SQLite), 301 passed (PostgreSQL), ruff + mypy clean.
 
+- **Task 2** (commit `c1b6648`): Plane webhook receiver
+  - Added `POST /webhooks/plane` that translates eligible Plane state changes into Controller approvals.
+  - Enforced human actor, single_update, known state maps, stale-state guard, and best-effort Plane revert on rejection.
+  - Added isolated-DB tests and fixed `test_db.py` module-reload leakage that broke later suites.
+  - Verified: 306 passed (SQLite), 309 passed (PostgreSQL), ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 2: Plane webhook receiver
+- Task 3: Controller → Plane projection service
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
