@@ -113,6 +113,31 @@ async def test_cycle_raises(fake_client: _FakePlaneClient) -> None:
         await materializer.materialize("P-1", "proj-1")
 
 
+async def test_deep_chain_does_not_crash_recursion(
+    fake_client: _FakePlaneClient,
+) -> None:
+    # Build a deep linear chain to validate recursion guard / iterative safety.
+    issues: dict[str, dict[str, Any]] = {}
+    dependencies: dict[str, list[str]] = {}
+    count = 50
+    for i in range(count):
+        issues[f"P-{i}"] = {
+            "id": f"P-{i}",
+            "name": f"Task {i}",
+            "state": {"name": "Approved"},
+            "custom_properties": {"opentasks_id": f"OT-{i}"},
+        }
+        dependencies[f"P-{i}"] = [f"P-{i + 1}"] if i < count - 1 else []
+    fake_client.issues = issues
+    fake_client.dependencies = dependencies
+
+    materializer = OpentasksMaterializer(client=fake_client)
+    dag = await materializer.materialize("P-0", "proj-1")
+
+    assert len(dag.tasks) == count
+    assert all(t.id.startswith("OT-") for t in dag.tasks)
+
+
 async def test_materialize_without_plane_config_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

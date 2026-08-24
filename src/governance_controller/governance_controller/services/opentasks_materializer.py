@@ -201,24 +201,41 @@ def _find_cycle(edges: dict[str, set[str]]) -> list[str] | None:
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[str, int] = dict.fromkeys(edges, WHITE)
     path: list[str] = []
+    recursion_depth = 0
+    max_recursion_depth = len(edges) + 1
 
     def visit(node: str) -> list[str] | None:
+        nonlocal recursion_depth
+        recursion_depth += 1
+        if recursion_depth > max_recursion_depth:
+            raise MaterializerError(
+                "Cycle detection exceeded safe recursion depth; graph may be "
+                "cyclic or degenerate"
+            )
         color[node] = GRAY
         path.append(node)
-        for neighbor in sorted(edges.get(node, set())):
-            if color.get(neighbor, WHITE) == GRAY:
-                return path[path.index(neighbor) :] + [neighbor]
-            if color.get(neighbor, WHITE) == WHITE:
-                cycle = visit(neighbor)
-                if cycle is not None:
-                    return cycle
-        path.pop()
-        color[node] = BLACK
+        try:
+            for neighbor in sorted(edges.get(node, set())):
+                if color.get(neighbor, WHITE) == GRAY:
+                    return path[path.index(neighbor) :] + [neighbor]
+                if color.get(neighbor, WHITE) == WHITE:
+                    cycle = visit(neighbor)
+                    if cycle is not None:
+                        return cycle
+        finally:
+            path.pop()
+            color[node] = BLACK
+            recursion_depth -= 1
         return None
 
-    for node in sorted(edges):
-        if color[node] == WHITE:
-            cycle = visit(node)
-            if cycle is not None:
-                return cycle
+    try:
+        for node in sorted(edges):
+            if color[node] == WHITE:
+                cycle = visit(node)
+                if cycle is not None:
+                    return cycle
+    except RecursionError as exc:
+        raise MaterializerError(
+            "Cycle detection hit Python recursion limit"
+        ) from exc
     return None
