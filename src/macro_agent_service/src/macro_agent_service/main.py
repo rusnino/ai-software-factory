@@ -1,7 +1,11 @@
 """FastAPI entry point for the macro-agent service scaffold."""
 
+import os
+
+import uvicorn
 from fastapi import FastAPI, HTTPException, status
 
+from macro_agent_service.config import config
 from macro_agent_service.models import (
     RunRequest,
     RunResponse,
@@ -57,3 +61,11 @@ async def collect_run(run_id: str) -> RunResult:
             detail=f"Run {run_id} not found",
         )
     return result
+
+
+def main() -> None:
+    """CLI entry point for the macro-agent service."""
+    # Re-read environment so callers that set env vars after import see them.
+    config.host = os.environ.get("MACRO_AGENT_SERVICE_HOST", config.host)
+    config.port = int(os.environ.get("MACRO_AGENT_SERVICE_PORT", str(config.port)))
+    uvicorn.run(app, host=config.host, port=config.port)

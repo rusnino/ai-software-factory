@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     database_pool_pre_ping: bool = True
     macro_agent_base_url: str = "http://localhost:3000"
     macro_agent_timeout_seconds: float = 30.0
+    # When true, the Governance Controller starts the local macro-agent service
+    # scaffold as a subprocess and points MacroAgentClient at it. Intended for
+    # dev/integration testing only.
+    macro_agent_start_local: bool = False
+    macro_agent_local_port: int = 3000
+    macro_agent_local_host: str = "127.0.0.1"
 
     # Plane CE integration. Leave empty to run with the in-memory Plane adapter.
     plane_base_url: str = ""
