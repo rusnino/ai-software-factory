@@ -160,7 +160,9 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         # Shell utilities
         "cat",
         "cp",
-        "curl",
+        # Network fetch tools removed: curl/wget config files (-K/--config)
+        # and file:// schemes allow local file read/write/exfiltration that is
+        # not enumerable at the argv level in Phase 1. See #142.
         "cut",
         "date",
         "diff",
@@ -185,7 +187,6 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         "uniq",
         "unzip",
         "wc",
-        "wget",
         "which",
         "whoami",
         "zip",
