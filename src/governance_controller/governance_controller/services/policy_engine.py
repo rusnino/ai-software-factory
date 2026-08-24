@@ -4,29 +4,41 @@ Command-shell allowlist
 -----------------------
 CompletionContract checks run system commands during verification, so PolicyEngine
 validates every ``Check.command`` before approval. The checks below are applied in
-``_check_completion_contract_commands``:
+``_validate_completion_contract_commands``:
 
 1. Parse the command with :func:`shlex.split` to obtain the resolved argv that
    the shell would actually execute.
 2. Reject commands that cannot be parsed or that still contain shell
    metacharacters/operators after parsing (redirections, pipes, command
    substitution, globbing, variable expansion, etc.).
-3. Require an explicit allowlist match for ``argv[0]``. Only a small set of
-   common verification binaries is permitted; wrappers and interpreters such as
-   ``bash -c``, ``env``, ``xargs``, ``nice``, ``nohup``, ``ssh`` and similar are
-   not allowed because their payloads bypass token-level policy checks.
-4. Reject common destructive file-system operations inside the resolved argv:
+3. Reject common wrappers and interpreters at ``argv[0]`` (``bash -c``,
+   ``env``, ``xargs``, ``nice``, ``nohup``, ``ssh``, ``python``, ``node``, etc.)
+   because their payloads bypass token-level policy checks.
+4. Require an explicit allowlist match for ``argv[0]``. Only a small set of
+   common verification binaries is permitted.
+5. Reject common destructive file-system operations inside the resolved argv:
    ``rm`` with recursive and force flags, ``rm --no-preserve-root``,
-   ``dd if=... of=...`` with device-ish targets, ``mkfs.*``.
-5. Reject commands that reference Docker socket paths
+   ``dd if=... of=...`` with device-ish targets, ``mkfs.*``,
+   ``find -delete``/``-exec``/``-ok``, ``tar --to-command``/``--remove-files``,
+   and ``git clean -f``/``-x``/``-d``.
+6. Reject command-execution primitives on allowlisted binaries: ``git -c``
+   overrides for dangerous config keys (``core.sshCommand``,
+   ``core.fsmonitor``, ``core.editor``, ``credential.helper``, etc.) and
+   ``sed`` ``s///e``/``<addr>e`` both run arbitrary shell commands.
+7. Reject container isolation escape flags (``--privileged``, ``--network=host``,
+   ``-v``, ``--mount``, etc.) as defense-in-depth in case a future allowed
+   helper wraps a container binary. ``docker``/``podman``/``kubectl`` themselves
+   are already absent from the verification allowlist.
+8. Reject commands that reference Docker socket paths
    (``docker.sock``, ``/var/run/docker.sock``) unless the project profile
-   permits it.
-    6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell``
-       in the ExecutionConfig unless the corresponding project profile security
-       field explicitly allows it.
-
-    7. Reject network fetch tools whose payloads cannot be audited at the argv
-       level (``curl`` and ``wget`` removed in Phase 1; see #142).
+   explicitly allows docker-socket access. Because the container tools are
+   removed from the allowlist, this check now only fires for non-container
+   commands that mention the socket path (e.g. ``curl --unix-socket ...``).
+9. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell``
+   in the ExecutionConfig unless the corresponding project profile security
+   field explicitly allows it.
+10. Reject network fetch tools whose payloads cannot be audited at the argv
+    level (``curl`` and ``wget`` removed in Phase 1; see #142).
 
 This is an explicit allowlist approach: if a command matches any forbidden
 pattern, approval is denied with a human-readable violation. Commands that are
