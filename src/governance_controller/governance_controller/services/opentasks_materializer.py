@@ -197,45 +197,44 @@ def _dependency_id(item: dict[str, Any]) -> str | None:
 
 
 def _find_cycle(edges: dict[str, set[str]]) -> list[str] | None:
-    """Return a cycle if the directed graph contains one, else None."""
-    WHITE, GRAY, BLACK = 0, 1, 2
+    """Return a cycle if the directed graph contains one, else None.
+
+    Implemented iteratively so deep but acyclic dependency chains do not
+    trigger false-positive cycle reports based on recursion depth.
+    """
+    WHITE, GRAY = 0, 1
     color: dict[str, int] = dict.fromkeys(edges, WHITE)
-    path: list[str] = []
-    recursion_depth = 0
-    max_recursion_depth = len(edges) + 1
+    parent: dict[str, str] = {}
 
-    def visit(node: str) -> list[str] | None:
-        nonlocal recursion_depth
-        recursion_depth += 1
-        if recursion_depth > max_recursion_depth:
-            raise MaterializerError(
-                "Cycle detection exceeded safe recursion depth; graph may be "
-                "cyclic or degenerate"
-            )
-        color[node] = GRAY
-        path.append(node)
-        try:
-            for neighbor in sorted(edges.get(node, set())):
-                if color.get(neighbor, WHITE) == GRAY:
-                    return path[path.index(neighbor) :] + [neighbor]
-                if color.get(neighbor, WHITE) == WHITE:
-                    cycle = visit(neighbor)
-                    if cycle is not None:
-                        return cycle
-        finally:
-            path.pop()
-            color[node] = BLACK
-            recursion_depth -= 1
-        return None
+    for start in sorted(edges):
+        if color.get(start, WHITE) != WHITE:
+            continue
+        stack = [(start, iter(sorted(edges.get(start, set()))))]
+        color[start] = GRAY
+        parent[start] = ""
 
-    try:
-        for node in sorted(edges):
-            if color[node] == WHITE:
-                cycle = visit(node)
-                if cycle is not None:
-                    return cycle
-    except RecursionError as exc:
-        raise MaterializerError(
-            "Cycle detection hit Python recursion limit"
-        ) from exc
+        while stack:
+            node, children = stack[-1]
+            try:
+                child = next(children)
+            except StopIteration:
+                color[node] = WHITE
+                stack.pop()
+                continue
+
+            child_color = color.get(child, WHITE)
+            if child_color == GRAY:
+                # Found a cycle: reconstruct the path from child to node.
+                cycle = [child]
+                current = node
+                while current != child and current in parent:
+                    cycle.append(current)
+                    current = parent.get(current, "")
+                cycle.append(child)
+                return list(reversed(cycle))
+            if child_color == WHITE:
+                color[child] = GRAY
+                parent[child] = node
+                stack.append((child, iter(sorted(edges.get(child, set())))))
+
     return None
