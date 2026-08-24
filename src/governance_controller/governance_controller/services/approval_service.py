@@ -511,6 +511,7 @@ class ApprovalService:
 
         execution.macro_agent_run_id = result["run_id"]
         execution.state = TaskState.RUNNING
+        task.latest_macro_agent_run_id = execution.macro_agent_run_id
         await self.db.flush()
 
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
