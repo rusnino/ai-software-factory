@@ -3,6 +3,7 @@
 from typing import Any
 
 import pytest
+import structlog
 
 from governance_controller.constants import TaskState
 from governance_controller.models.task import Task
@@ -120,12 +121,29 @@ async def test_without_plane_config_only_logs(
 async def test_plane_comment_failure_is_swallowed(
     fake_plane: _FakePlaneClient,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     async def raise_exc(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Plane down")
 
     fake_plane.add_comment = raise_exc
     service = AlertService(plane_client=fake_plane)
+
+    # Configure structlog to capture into stdlib logging so caplog works.
+    structlog.configure(
+        processors=[
+            structlog.stdlib.filter_by_level,
+            structlog.stdlib.add_logger_name,
+            structlog.stdlib.add_log_level,
+            structlog.processors.format_exc_info,
+            structlog.processors.UnicodeDecoder(),
+            structlog.stdlib.render_to_log_kwargs,
+        ],
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
 
     # Should not raise.
     await service.notify_terminal_failure(
@@ -135,4 +153,4 @@ async def test_plane_comment_failure_is_swallowed(
         reason="plane_unreachable",
     )
 
-    assert True
+    assert any("plane_comment_failed" in r.message for r in caplog.records)
