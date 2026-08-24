@@ -44,6 +44,17 @@ class _FakePlaneClient:
         deps = self.dependencies.get(issue_id, [])
         return {"results": [{"related_issue": {"id": dep}} for dep in deps]}
 
+    async def list_states(
+        self,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "results": [
+                {"id": "state-in-progress", "name": "In Progress"},
+                {"id": "state-approved", "name": "Approved"},
+            ]
+        }
+
 
 @pytest.fixture
 def fake_client() -> _FakePlaneClient:
@@ -121,6 +132,27 @@ async def test_state_mismatch_reported(
     assert divs[0].plane_value == "Done"
     assert divs[0].controller_value == "HUMAN_REVIEW"
     assert divs[0].severity == "project"
+
+
+async def test_state_uuid_resolved_to_name(
+    fake_client: _FakePlaneClient,
+) -> None:
+    # Plane sometimes returns a state UUID instead of a state name dict.
+    fake_client.issues = [
+        {
+            "id": "P-uuid-state",
+            "name": "Task with UUID state",
+            "state": "state-in-progress",
+        }
+    ]
+    service = ReconciliationService(plane_client=fake_client)
+    report = await service.reconcile(
+        controller_tasks=[("P-uuid-state", TaskState.RUNNING, "proj-1")],
+        project_id="proj-1",
+    )
+
+    assert report.checked == 1
+    assert not any(d.field == "state" for d in report.divergences)
 
 
 async def test_dag_validation_failure_reported(

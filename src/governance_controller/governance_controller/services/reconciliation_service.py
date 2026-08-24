@@ -120,11 +120,15 @@ class ReconciliationService:
                 project_id=effective_project_id,
                 params={"page_size": 1000},
             )
+            states_response = await client.list_states(
+                project_id=effective_project_id
+            )
         except Exception as exc:
             raise RuntimeError(
                 "Failed to list Plane issues for reconciliation"
             ) from exc
 
+        state_names = _build_state_name_map(states_response)
         plane_issues = {
             issue.get("id", ""): issue
             for issue in _result_items(issues_response)
@@ -147,7 +151,7 @@ class ReconciliationService:
                 )
                 continue
 
-            plane_state = _issue_state_name(plane_issue)
+            plane_state = _issue_state_name(plane_issue, state_names)
             expected_plane = _controller_state_to_plane(state)
             if plane_state != expected_plane:
                 report.divergences.append(
@@ -254,11 +258,34 @@ def _result_items(result: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
-def _issue_state_name(issue: dict[str, Any]) -> str:
+def _issue_state_name(
+    issue: dict[str, Any], state_name_map: dict[str, str]
+) -> str:
+    """Return the human-readable Plane state name for an issue.
+
+    Plane issues may carry either a state UUID string or a state dict. UUIDs
+    are resolved against ``state_name_map`` built from ``list_states``.
+    """
     state = issue.get("state")
+    state_id: str | None = None
     if isinstance(state, dict):
         return state.get("name") or ""
-    return str(state) if state is not None else ""
+    if isinstance(state, str):
+        state_id = state
+    return state_name_map.get(state_id or "", state_id or "")
+
+
+def _build_state_name_map(states_response: dict[str, Any]) -> dict[str, str]:
+    """Build a {state_uuid: state_name} map from Plane list_states response."""
+    result: dict[str, str] = {}
+    for item in _result_items(states_response):
+        if not isinstance(item, dict):
+            continue
+        state_id = item.get("id")
+        name = item.get("name")
+        if isinstance(state_id, str) and isinstance(name, str):
+            result[state_id] = name
+    return result
 
 
 def _controller_state_to_plane(state: TaskState) -> str:
