@@ -56,13 +56,35 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-- Deploy Plane CE.
-- Build Plane adapter for bidirectional sync.
-- Meta Orch integration: OpenCode + BMAD + OpenSpec.
-- Intake adapter (Telegram/Email/API).
-- Idea Ingestion Service.
-- Human Triage queue in Plane.
-- Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller retains state machine, approval store, and audit log.
+**Status (2026-08-24): implemented, not gate-clean.** All items below have landed in code with
+passing unit tests, but the first adversarial review round of this code (mirroring the 5-round
+process that hardened `policy_engine.py` in Phase 1) found 13 open issues, including one
+`severity:critical` and four `severity:high` — see `gh issue list --repo rusnino/ai-software-factory
+--state open --label phase-2`. Do not treat any item below as "done" independent of that list; it is
+the authoritative status, not this checklist.
+
+- [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
+- [x] Build Plane adapter for bidirectional sync. *(webhook receiver has no authentication — `#154`
+  CRITICAL; Controller→Plane projection exists but is never wired into the live app — `#156` HIGH;
+  rejection "revert" only posts a comment, never actually reverts Plane's state — `#156`)*
+- [ ] Meta Orch integration: OpenCode + BMAD + OpenSpec. *(not started — intake→triage path exists,
+  the decomposition/planning engine does not)*
+- [x] Intake adapter (Telegram/Email/API). *(`/intake/email`/`/intake/idea` have no auth and no
+  body-size limit — `#157` HIGH)*
+- [x] Idea Ingestion Service. *(real classifier exists but has zero direct test coverage — `#160`)*
+- [ ] Human Triage queue in Plane. *(drafts land in Plane; no dedicated triage-queue view/workflow
+  built beyond that)*
+- [x] Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller
+  retains state machine, approval store, and audit log. *(built, but enabling it bypasses 100% of
+  Phase 1's command-validation hardening with no equivalent Rego policy shipped — `#152` HIGH;
+  its own fail-closed behavior has a network-error gap — `#158`)*
+
+Additional Phase 2 work landed beyond this section's original scope: macro-agent service scaffold
+and executor client (a self-declared Python stand-in, not the real `macro-agent` package — `#151`),
+opentasks runtime DAG materializer (unbounded recursion crashes on deep dependency chains, leaving
+tasks stuck in `READY` — `#155` HIGH), reconciliation service/CLI (functionally inert — `#156` HIGH),
+verification-failure alerting (human-facing only; the macro-agent-facing feedback half of SPEC-09
+§9.6 step 2 was never built — `#153`).
 
 ## 10.3 Phase 3 — Hardening and Runtime Diversity
 
