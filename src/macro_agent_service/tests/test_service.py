@@ -19,9 +19,11 @@ def _client() -> AsyncClient:
 def fresh_store(monkeypatch: pytest.MonkeyPatch) -> RunStore:
     """Provide an isolated run store for each test."""
     from macro_agent_service import store as store_module
+    from macro_agent_service.config import config
 
     isolated = RunStore()
     monkeypatch.setattr(store_module, "store", isolated)
+    monkeypatch.setattr(config, "api_secret", "")
     return isolated
 
 
@@ -98,3 +100,34 @@ async def test_collect_run(fresh_store: RunStore) -> None:
 
     assert response.status_code == 200
     assert response.json()["run_id"] == run_id
+
+
+async def test_missing_secret_returns_401(
+    fresh_store: RunStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macro_agent_service.config import config
+
+    monkeypatch.setattr(config, "api_secret", "secret")
+    async with _client() as client:
+        response = await client.post(
+            "/runs",
+            json={"task_id": "task-1", "objective": "x"},
+        )
+    assert response.status_code == 401
+
+
+async def test_valid_secret_allowed(
+    fresh_store: RunStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from macro_agent_service.config import config
+
+    monkeypatch.setattr(config, "api_secret", "secret")
+    async with _client() as client:
+        response = await client.post(
+            "/runs",
+            json={"task_id": "task-1", "objective": "x"},
+            headers={"X-Macro-Agent-Secret": "secret"},
+        )
+    assert response.status_code == 201
