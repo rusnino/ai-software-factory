@@ -392,7 +392,7 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         contract = _make_contract(
             completion_contract=CompletionContract(
                 task_id="task-1",
-                required=[Check(type="install", command="sudo apt update")],
+                required=[Check(type="install", command="sudo make install")],
                 scope_check=ScopeCheck(description="install check"),
             )
         )
@@ -542,7 +542,7 @@ class TestPolicyEngineVerificationCommandsAllowlist:
 
     def test_verification_sudo_command_rejected(self) -> None:
         contract = _make_contract(
-            verification={"commands": ["sudo apt update"]},
+            verification={"commands": ["sudo make install"]},
         )
         profile = _make_profile()
 
@@ -696,6 +696,33 @@ class TestPolicyEngineCommandExecutionPrimitives:
 
         assert result.allowed is False
         assert any("destructive shell operation" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "dpkg -i /tmp/evil.deb",
+            "apt-get install ./evil.deb",
+            "apt install ./evil.deb",
+        ],
+    )
+    def test_apt_dpkg_removed_from_allowlist(self, command: str) -> None:
+        # #144: apt/apt-get/dpkg install local .deb packages that execute
+        # maintainer scripts; removed from the verification allowlist in Phase 1.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="install", command=command)],
+                scope_check=ScopeCheck(description="apt/dpkg removal"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "not in the verification allowlist" in v for v in result.violations
+        )
 
     def test_git_clean_force_is_rejected(self) -> None:
         # #135: git clean -fdx removes untracked files forcibly.

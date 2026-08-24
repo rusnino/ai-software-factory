@@ -117,16 +117,16 @@ _FORBIDDEN_CONTROL_CHARACTERS: set[str] = {"\n", "\r", "\x00"}
 # runner such as ``uv`` (``uv run python -m pytest``) remains permitted.
 _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
     {
-        # Package managers / build tools
-        "apt",
-        "apt-get",
+        # Build tools / package managers.
+        # Note: apt, apt-get, and dpkg are intentionally omitted. Installing a
+        # local .deb executes arbitrary maintainer scripts; this is not safely
+        # enumerable at the argv level in Phase 1. See #144.
         "brew",
         "cargo",
         "cmake",
         "composer",
         "conan",
         "dotnet",
-        "dpkg",
         "gem",
         "gradle",
         "make",
