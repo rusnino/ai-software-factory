@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from typing import Any
 
@@ -48,6 +49,9 @@ class OpentasksMaterializer:
         cycles and missing dependencies.
         """
         client = self._client_or_raise()
+        max_size = settings.opentasks_max_dag_size
+        concurrency = settings.opentasks_materializer_concurrency
+        semaphore = asyncio.Semaphore(concurrency)
 
         # Fetch the root issue to confirm it exists and read its details.
         root_issue = await client.get_issue(root_plane_task_id, project_id=project_id)
@@ -62,40 +66,58 @@ class OpentasksMaterializer:
         plane_edges: dict[str, set[str]] = {}
         plane_to_opentasks: dict[str, str] = {}
 
+        async def _fetch_node(plane_id: str) -> tuple[str, dict[str, Any], set[str]]:
+            async with semaphore:
+                try:
+                    issue = await client.get_issue(
+                        plane_id, project_id=project_id
+                    )
+                except Exception as exc:
+                    raise MaterializerError(
+                        f"Failed to fetch Plane issue {plane_id}"
+                    ) from exc
+                dependencies = await self._fetch_dependency_ids(
+                    plane_id, project_id=project_id
+                )
+                return plane_id, issue, dependencies
+
         while queue:
-            plane_id = queue.popleft()
-            if plane_id in seen:
+            batch: list[asyncio.Task[tuple[str, dict[str, Any], set[str]]]] = []
+            while queue and len(batch) < concurrency:
+                plane_id = queue.popleft()
+                if plane_id in seen:
+                    continue
+                seen.add(plane_id)
+                if len(seen) > max_size:
+                    raise MaterializerError(
+                        f"DAG exceeded maximum size of {max_size} tasks"
+                    )
+                batch.append(asyncio.create_task(_fetch_node(plane_id)))
+
+            if not batch:
                 continue
-            seen.add(plane_id)
 
-            try:
-                issue = await client.get_issue(plane_id, project_id=project_id)
-            except Exception as exc:
-                raise MaterializerError(
-                    f"Failed to fetch Plane issue {plane_id}"
-                ) from exc
+            for coro in asyncio.as_completed(batch):
+                plane_id, issue, dependencies = await coro
 
-            opentasks_id = _opentasks_id(issue)
-            plane_to_opentasks[plane_id] = opentasks_id
-            dependencies = await self._fetch_dependency_ids(
-                plane_id, project_id=project_id
-            )
-            plane_edges[plane_id] = dependencies
+                opentasks_id = _opentasks_id(issue)
+                plane_to_opentasks[plane_id] = opentasks_id
+                plane_edges[plane_id] = dependencies
 
-            tasks[opentasks_id] = OpentasksTask(
-                id=opentasks_id,
-                plane_task_id=plane_id,
-                objective=_issue_name(issue),
-                acceptance=[_issue_description(issue)],
-                metadata={
-                    "plane_state": _issue_state(issue),
-                    "plane_project_id": project_id,
-                },
-            )
+                tasks[opentasks_id] = OpentasksTask(
+                    id=opentasks_id,
+                    plane_task_id=plane_id,
+                    objective=_issue_name(issue),
+                    acceptance=[_issue_description(issue)],
+                    metadata={
+                        "plane_state": _issue_state(issue),
+                        "plane_project_id": project_id,
+                    },
+                )
 
-            for dep_id in dependencies:
-                if dep_id not in seen:
-                    queue.append(dep_id)
+                for dep_id in dependencies:
+                    if dep_id not in seen:
+                        queue.append(dep_id)
 
         missing = {
             dep

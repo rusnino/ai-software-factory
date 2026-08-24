@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     opa_timeout_seconds: float = 5.0
     opa_policy_path: str = "governance/approve"
 
+    # Runtime DAG materialization limits. These bound the work an agent can be
+    # handed in a single execution and prevent unbounded Plane API fan-out.
+    opentasks_max_dag_size: int = 1000
+    opentasks_materializer_concurrency: int = 10
+
     @field_validator("database_pool_size", "database_max_overflow")
     @classmethod
     def _positive_pool_setting(cls, value: int) -> int:

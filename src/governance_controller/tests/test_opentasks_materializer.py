@@ -113,6 +113,30 @@ async def test_cycle_raises(fake_client: _FakePlaneClient) -> None:
         await materializer.materialize("P-1", "proj-1")
 
 
+async def test_materializer_enforces_max_dag_size(
+    fake_client: _FakePlaneClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A DAG larger than opentasks_max_dag_size is rejected."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.opentasks_max_dag_size", 2
+    )
+    fake_client.issues = {
+        "root": {"id": "root", "name": "Root"},
+        "a": {"id": "a", "name": "A", "description_html": "desc A"},
+        "b": {"id": "b", "name": "B", "description_html": "desc B"},
+        "c": {"id": "c", "name": "C", "description_html": "desc C"},
+    }
+    fake_client.dependencies = {
+        "root": ["a"],
+        "a": ["b"],
+        "b": ["c"],
+    }
+
+    materializer = OpentasksMaterializer(client=fake_client)
+    with pytest.raises(MaterializerError, match="exceeded maximum size"):
+        await materializer.materialize("root", project_id="proj-1")
+
+
 async def test_deep_chain_does_not_crash_recursion(
     fake_client: _FakePlaneClient,
 ) -> None:
