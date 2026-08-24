@@ -4,6 +4,7 @@ This is the real implementation used in Phase 2 to project Controller state to
 Plane CE and to read task/dependency data for runtime DAG materialization.
 """
 
+import json
 from typing import Any, cast
 
 import httpx
@@ -48,23 +49,50 @@ class PlaneClient:
             headers={"X-API-Key": self.api_key},
         )
 
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """Execute an HTTP request and return JSON, wrapping all failures.
+
+        Catches transport-level errors (timeouts, connection failures),
+        HTTP-status errors, and malformed JSON and re-raises them as
+        ``PlaneClientError`` so callers do not leak raw httpx exceptions.
+        """
+        url = self._url(path)
+        try:
+            async with self._client() as client:
+                response = await client.request(method, url, **kwargs)
+                self._raise_for_status(response)
+                return cast(dict[str, Any], response.json())
+        except PlaneClientError:
+            raise
+        except httpx.HTTPError as exc:
+            raise PlaneClientError(
+                f"Plane request failed: {exc}"
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise PlaneClientError(
+                f"Plane returned invalid JSON: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise PlaneClientError(
+                f"Unexpected Plane request error: {exc}"
+            ) from exc
+
     def _url(self, path: str) -> str:
         return f"{self.base_url}/api/v1/workspaces/{self.workspace_slug}{path}"
 
     async def list_projects(self) -> dict[str, Any]:
         """List projects in the workspace."""
-        async with self._client() as client:
-            response = await client.get(self._url("/projects/"))
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request("GET", "/projects/")
 
     async def get_project(self, project_id: str | None = None) -> dict[str, Any]:
         """Get a project by ID."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(self._url(f"/projects/{project_id}/"))
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request("GET", f"/projects/{project_id}/")
 
     async def list_issues(
         self,
@@ -73,13 +101,11 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """List issues in a project."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/issues/"),
-                params=params or {},
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "GET",
+            f"/projects/{project_id}/issues/",
+            params=params or {},
+        )
 
     async def get_issue(
         self,
@@ -88,12 +114,9 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """Get a single issue."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/issues/{issue_id}/")
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "GET", f"/projects/{project_id}/issues/{issue_id}/"
+        )
 
     async def create_issue(
         self,
@@ -121,13 +144,11 @@ class PlaneClient:
         if extra is not None:
             payload.update(extra)
 
-        async with self._client() as client:
-            response = await client.post(
-                self._url(f"/projects/{project_id}/issues/"),
-                json=payload,
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "POST",
+            f"/projects/{project_id}/issues/",
+            json=payload,
+        )
 
     async def update_issue(
         self,
@@ -137,13 +158,11 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """Update one or more issue fields."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.patch(
-                self._url(f"/projects/{project_id}/issues/{issue_id}/"),
-                json=fields,
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "PATCH",
+            f"/projects/{project_id}/issues/{issue_id}/",
+            json=fields,
+        )
 
     async def update_issue_state(
         self,
@@ -163,12 +182,9 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """List comments on an issue."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/issues/{issue_id}/comments/")
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "GET", f"/projects/{project_id}/issues/{issue_id}/comments/"
+        )
 
     async def add_comment(
         self,
@@ -178,13 +194,11 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """Add a comment to an issue."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.post(
-                self._url(f"/projects/{project_id}/issues/{issue_id}/comments/"),
-                json={"comment_html": text},
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "POST",
+            f"/projects/{project_id}/issues/{issue_id}/comments/",
+            json={"comment_html": text},
+        )
 
     async def list_issue_dependencies(
         self,
@@ -193,12 +207,9 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """List dependencies for an issue."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/issues/{issue_id}/dependencies/")
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request(
+            "GET", f"/projects/{project_id}/issues/{issue_id}/dependencies/"
+        )
 
     async def list_all_issues(
         self,
@@ -217,23 +228,21 @@ class PlaneClient:
         next_cursor: str | None = None
         last_page: dict[str, Any] = {}
 
-        async with self._client() as client:
-            while True:
-                if next_cursor is not None:
-                    params["cursor"] = next_cursor
-                response = await client.get(
-                    self._url(f"/projects/{project_id}/issues/"),
-                    params=params,
-                )
-                self._raise_for_status(response)
-                page = cast(dict[str, Any], response.json())
-                last_page = page
-                items = page.get("results")
-                if isinstance(items, list):
-                    all_results.extend(items)
-                next_cursor = page.get("next_cursor")
-                if not next_cursor:
-                    break
+        while True:
+            if next_cursor is not None:
+                params["cursor"] = next_cursor
+            page = await self._request(
+                "GET",
+                f"/projects/{project_id}/issues/",
+                params=params,
+            )
+            last_page = page
+            items = page.get("results")
+            if isinstance(items, list):
+                all_results.extend(items)
+            next_cursor = page.get("next_cursor")
+            if not next_cursor:
+                break
 
         merged = dict(last_page)
         merged["results"] = all_results
@@ -245,19 +254,11 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """List states available in a project."""
         project_id = project_id or self.project_id
-        async with self._client() as client:
-            response = await client.get(self._url(f"/projects/{project_id}/states/"))
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request("GET", f"/projects/{project_id}/states/")
 
     async def list_workspace_members(self) -> dict[str, Any]:
         """List members of the workspace."""
-        async with self._client() as client:
-            response = await client.get(
-                self._url("/members/"),
-            )
-            self._raise_for_status(response)
-            return cast(dict[str, Any], response.json())
+        return await self._request("GET", "/members/")
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         try:

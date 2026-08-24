@@ -1,5 +1,6 @@
 """Tests for the Plane CE HTTP client."""
 
+import httpx
 import pytest
 
 from governance_controller.adapters.plane_client import PlaneClient, PlaneClientError
@@ -151,6 +152,28 @@ async def test_api_error_raises_plane_client_error(
 
     with pytest.raises(PlaneClientError):
         await client.get_issue("missing")
+
+
+async def test_network_error_raises_plane_client_error(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """Transport errors are wrapped in PlaneClientError."""
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"))
+    client = PlaneClient()
+
+    with pytest.raises(PlaneClientError, match="Plane request failed"):
+        await client.list_projects()
+
+
+async def test_malformed_json_raises_plane_client_error(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """Malformed JSON responses are wrapped in PlaneClientError."""
+    httpx_mock.add_response(text="not json")
+    client = PlaneClient()
+
+    with pytest.raises(PlaneClientError, match="invalid JSON"):
+        await client.list_projects()
 
 
 async def test_update_issue_accepts_extra_fields(
