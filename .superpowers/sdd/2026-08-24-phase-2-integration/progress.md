@@ -43,9 +43,15 @@ Started: 2026-08-24
   - Integration tests prove local service starts and handles runs; all suites green.
   - Verified: 313 passed SQLite, 316 passed PostgreSQL, ruff + mypy clean.
 
+- **Task 6** (commit `a6d8eda`): opentasks runtime DAG materializer
+  - `OpentasksMaterializer` walks Plane dependencies from a root issue and produces `OpentasksDAG`.
+  - Validates DAG for missing dependencies and cycles.
+  - Wired into `EXEC_APPROVED -> READY` transition; DAG attached to `TaskContract` sent to macro-agent.
+  - Verified: 318 passed SQLite, 321 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 6: opentasks runtime DAG materializer
+- Task 7: Reconciliation job
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
