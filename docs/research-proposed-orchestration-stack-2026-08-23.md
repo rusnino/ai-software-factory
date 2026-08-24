@@ -462,3 +462,130 @@ duplicate entries were observed: "San," "CliDeck," "pi-reflect," "Data Olympus,"
 "grite"), so treat any single entry's claimed feature set or star count as a
 starting point for verification, not a finding, before it informs a real decision
 — exactly the standard applied to macro-agent above.
+
+## 9. Addendum (2026-08-25): what agent-orchestrator (AO) could and couldn't close
+
+Follow-up question: what parts of ai-software-factory could `Untrivial-ai/agent-orchestrator`
+(AO) actually replace, why couldn't AO + the Governance Controller close the entire
+project alone, and what does the combined resource footprint of Plane + Controller
++ AO look like? Answered by reading AO's actual README, `docs/STATUS.md`, and by
+measuring the currently-running Plane deployment directly (not estimating).
+
+### 9.1 What AO could plausibly close
+
+AO's shipped feature set (`docs/STATUS.md`, verified 2026-08-25) maps closely onto
+**macro-agent's execution-orchestration role** specifically:
+
+- **Worker lifecycle** (spawn/kill/restore/rename/rollback/cleanup) over a Go
+  daemon with a durable SQLite-backed session store — comparable to macro-agent's
+  `AgentManager`/`YamlDrivenTopology`.
+- **Per-task git isolation**: every Git-backed worker gets its own branch and
+  worktree (non-git work gets an "AO-managed branchless directory") — comparable
+  to `git-cascade`'s worktree/stream role, though without the "cascade rebase for
+  stacked streams" concept SPEC-05 describes.
+- **PR/CI/review feedback loop**: an SCM observer polls GitHub, feeds PR facts
+  into a lifecycle reducer, and "sends agent nudges for CI failures, review
+  feedback, and merge conflicts" — a real, shipped equivalent of the
+  conflict-recovery/event-translation role that `SPEC-05`'s Event Bridge plus
+  macro-agent's `ConflictRecoveryStrategy` cover today.
+- **26 harness adapters** (Claude Code, Codex, Cursor, OpenCode, Aider, Copilot,
+  Goose, and 19 more) via a registry-based adapter platform — a broader,
+  already-built version of the Harness Provider Registry this project is building
+  incrementally.
+- **A built-in "project orchestrator" agent** that can decompose a plan into
+  tasks and spawn/redirect workers — a partial, AI-driven analogue of the planned
+  Meta Orchestrator's decomposition role (though not the deterministic
+  BMAD/OpenSpec pipeline SPEC-01/02 describe).
+- **A live Kanban** deriving card position from session + PR + CI + review state —
+  a real-time *technical* execution view.
+
+If the team ever runs the bake-off flagged in §8.3, this is the concrete shape it
+would take: AO in place of macro-agent, with the Controller still owning
+everything in §9.2.
+
+### 9.2 Why AO + Controller alone could not close the whole project
+
+`docs/STATUS.md`'s own framing is the clearest evidence: *"Current `main` ships a
+working **single-user local loop**... Loopback-only HTTP daemon."* This is a
+structural mismatch, not a missing-feature gap that a future release fixes:
+
+1. **No pre-execution approval gate.** AO's workers start the moment a human (or
+   AO's own orchestrator agent) creates them — there is no concept of a task
+   sitting in a `PLAN_APPROVED`/`EXEC_APPROVED`-equivalent state awaiting a
+   recorded human decision before code starts changing. "Approvals" in AO's shipped
+   feature list refers to per-tool-call permission prompts inside a single agent
+   session (e.g., "allow this shell command?"), not an organizational
+   approve-before-work-starts gate. Grafting the Controller's state machine onto
+   it would mean building the entire `POST /approvals` → policy-check → "only then
+   tell AO to spawn a worker" integration from scratch — which is most of what the
+   Controller already does today; AO doesn't reduce that work; it just relocates
+   where execution happens.
+2. **Single-user, loopback-only, desktop deployment model.** AO is explicitly "a
+   local desktop workspace" (Electron app) with a daemon that binds to loopback
+   only, built for one developer supervising their own machine. Ai-software-factory
+   needs an always-on, unattended, server-side component that reacts to tasks
+   arriving at any hour via Telegram/Email intake with no human present — a
+   fundamentally different deployment shape than "a developer has AO open on their
+   laptop."
+3. **No durable, policy-aware task DAG.** AO's Kanban positions derive from live
+   git/PR/CI facts per worker, not from a materialized, dependency-validated
+   graph the way `opentasks` (fed by the Controller from an approved Plane
+   subgraph) provides. Sequencing across many tasks lives in the ad-hoc planning
+   conversation of AO's project-orchestrator agent, not in a deterministic,
+   replayable structure.
+4. **No human-facing PM/idea board.** AO's Kanban is a technical, developer-facing
+   execution view. It has no equivalent of Plane's role as the cross-project,
+   non-technical-stakeholder-visible backlog/epic system, and no Intake Adapter
+   equivalent for Telegram/Email idea ingestion.
+5. **No policy engine.** Nothing in AO's shipped feature set enforces
+   `forbidden_paths`, per-project sandbox levels, allowed-harness lists, or a
+   Completion Contract's deterministic acceptance checklist. It supervises agents
+   operationally; it does not gate what they're allowed to do per-project policy.
+6. **No tamper-evident audit log.** AO's SQLite store plus change-data-capture
+   (`change_log`) is an operational event stream for driving its own UI, not an
+   append-only, actor-attributed compliance record — the same category of gap
+   ADR-001 already identified in Temporal's Event History and this memo's §8.3
+   identified in Hatchet's audit logs.
+7. **Outbound telemetry by default.** AO's README discloses it "record[s] the
+   GitHub organization or account that owns a project" for product analytics.
+   For a project whose Project Profile schema explicitly models per-project
+   network egress policy (`SPEC-08 §8.5`), this is a concrete data-egress channel
+   that would need review/disabling before adoption, not a blocker but a real
+   checklist item.
+
+In short: AO is a strong, already-built candidate for the **execution** half of
+the stack, but the entire reason ai-software-factory has a Governance Controller
+at all — durable pre-execution approval, policy enforcement, tamper-evident audit,
+and a task graph independent of any one tool's UI — is precisely the half AO does
+not attempt to solve, by its own stated design ("single-user local loop").
+Replacing macro-agent with AO would not shrink the project down to "AO + Controller
+already covers it"; it would still leave Plane (human PM layer), the Meta
+Orchestrator (deterministic decomposition), the Intake Adapter, and the Policy
+Engine's project-level rules to build exactly as planned.
+
+### 9.3 Resource footprint: Plane + Controller + AO
+
+Measured directly on the machine this session is running on, not estimated,
+wherever a live instance was available:
+
+| Component | Footprint | How measured |
+|---|---|---|
+| **Plane CE** (full stack: web, admin, space, api, worker, beat-worker, live, proxy, postgres, redis, rabbitmq, minio — 12 containers) | **~998 MiB RAM total, ~0% CPU idle** | `docker stats --no-stream` against the live `plane` docker-compose project already running on this host (see `docker ps`/`docker compose ls` output from earlier in this session) |
+| **Governance Controller — Postgres** | **~69.5 MiB RAM** (measured while under incidental load from a concurrent session's test run, hence 45% CPU at that instant — otherwise idle load is lower) | `docker stats` against `gc-test-postgres`, the project's own `postgres:16-alpine` container, already running |
+| **Governance Controller — API process** | **~50-100 MiB RAM (estimated)** | Not currently running as a process to measure directly; estimate based on a single-worker `uvicorn` + FastAPI + `asyncpg` process with the project's actual minimal dependency set (`pyproject.toml`: fastapi, pydantic, sqlmodel, asyncpg, httpx, structlog, typer, uvicorn — no ORM-heavy or ML dependencies) |
+| **agent-orchestrator (AO)** | **Not measurable here** (Electron desktop app; this session has no GUI) — reasoned estimate only | Electron apps typically carry a baseline of roughly 150-300 MiB RAM for the shell process alone (bundled Chromium + Node runtime), *on top of* which AO explicitly gives **each active worker its own isolated embedded browser** for live preview — a Chromium `WebContentsView` per worker, not a shared one. With, say, 3-5 concurrently active workers with preview open, total AO memory could plausibly reach several hundred MiB to 1+ GiB, scaling roughly linearly with the number of simultaneously open workers, not with a fixed platform cost |
+
+**The important structural difference, not just the numbers:** Plane and the
+Controller are **shared, server-side costs** — one instance serves the whole team/
+organization, paid once regardless of how many humans or tasks use it. AO's cost is
+**per-developer-desktop** — it is a local app that would need to run on every
+individual contributor's machine who wants to supervise agents through it, and its
+footprint scales with how many workers *that one person* has open, not with team
+size. That makes "Plane + Controller + AO" a mixed bag to size as a single number:
+Plane + Controller together is a modest, fixed ~1.1-1.3 GiB shared-infrastructure
+cost that fits comfortably even on the constrained Hermes VM profiled in
+`docs/research-self-hosted-deployment-constraints-2026-08-24.md` (which had ~5.2
+GiB free); AO's cost is a separate, variable, client-side cost that does not
+consolidate onto shared infrastructure the way the rest of this stack does — a
+relevant factor if the goal is a fully unattended, server-driven pipeline rather
+than a human-supervised desktop workflow.
