@@ -89,6 +89,56 @@ async def test_backend_uses_opa_when_configured(
     assert fake.calls[0]["approval_type"] == "plan"
 
 
+async def test_backend_runs_embedded_before_opa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedded hardening must run even when OPA is configured."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "opa_base_url", "http://opa.example.com")
+
+    fake = _FakeOPAClient({"allow": True, "violations": []})
+    backend = PolicyEngineBackend(opa_client=fake)
+
+    contract = TaskContract(
+        task_id="T-1",
+        project_id="P-1",
+        proposed_by="agent",
+        objective="Do work",
+        acceptance=["Pass"],
+        execution=ExecutionConfig(harness="opencode"),
+        # Embedding a forbidden shell metacharacter should be rejected by the
+        # embedded engine regardless of OPA.
+        completion_contract={
+            "task_id": "T-1",
+            "required": [
+                {
+                    "type": "malicious",
+                    "command": "sed '1e touch /tmp/x' file.txt",
+                    "expect_exit": 0,
+                }
+            ],
+            "forbidden_path_check": {"paths": []},
+            "scope_check": {
+                "description": "No scope constraints",
+                "allowed_paths": [],
+                "forbidden_paths": [],
+            },
+        },
+    )
+    profile = ProjectProfile(
+        project_id="P-1",
+        project_name="Test",
+        repository=RepositoryConfig(path="/repo"),
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    result = await backend.evaluate(contract, profile, ApprovalType.PLAN)
+
+    assert result.allowed is False
+    assert any("sed" in v.lower() for v in result.violations)
+
+
 async def test_backend_falls_back_to_embedded_when_opa_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

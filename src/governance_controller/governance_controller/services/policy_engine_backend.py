@@ -1,8 +1,11 @@
 """Pluggable policy backend selector.
 
-The Controller keeps policy enforcement logic in PolicyEngine but can delegate
- the actual evaluation to an external Open Policy Agent (OPA) when configured.
- When OPA is not configured, the embedded evaluator is used.
+The Controller always runs the embedded PolicyEngine first. When an external
+Open Policy Agent (OPA) is configured, it is consulted as an additional
+enforcement layer on top of the embedded checks, never as a replacement.
+This guarantees that the hardened Phase 1 rules (wrapper/interpreter rejection,
+forbidden-path checks, destructive-flag checks, git-config checks,
+container-escape checks, etc.) cannot be silently bypassed by enabling OPA.
 """
 
 
@@ -30,11 +33,28 @@ class PolicyEngineBackend:
         approval_type: ApprovalType,
         policy_engine: type[PolicyEngine] | None = None,
     ) -> PolicyResult:
-        """Return a PolicyResult using OPA if configured, else embedded engine."""
-        if settings.opa_base_url:
-            return await self._evaluate_opa(contract, profile, approval_type)
+        """Return a PolicyResult.
+
+        Always runs the embedded PolicyEngine first. If OPA is configured, the
+        embedded result must be allowed before OPA is consulted; OPA can add
+        extra violations but cannot override an embedded denial.
+        """
         engine = policy_engine or PolicyEngine
-        return engine.evaluate(contract, profile, approval_type)
+        embedded = engine.evaluate(contract, profile, approval_type)
+        if not embedded.allowed:
+            return embedded
+
+        if settings.opa_base_url:
+            opa = await self._evaluate_opa(contract, profile, approval_type)
+            if not opa.allowed:
+                return opa
+            # Both allowed: merge violations (should be empty) and return.
+            return PolicyResult(
+                allowed=True,
+                violations=list({*embedded.violations, *opa.violations}),
+            )
+
+        return embedded
 
     async def _evaluate_opa(
         self,
