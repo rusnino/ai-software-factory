@@ -25,6 +25,9 @@ from governance_controller.services.policy_engine import (
     PolicyResult,
     PolicyViolationError,
 )
+from governance_controller.services.policy_engine_backend import (
+    PolicyEngineBackend,
+)
 from governance_controller.services.state_machine import StateMachine
 
 _APPROVAL_TARGET_STATES: dict[ApprovalType, TaskState] = {
@@ -43,6 +46,7 @@ class ApprovalService:
         policy_engine: type[PolicyEngine] | None = None,
         executor: MacroAgentExecutor | None = None,
         permission_service: PermissionService | None = None,
+        policy_backend: PolicyEngineBackend | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -53,11 +57,16 @@ class ApprovalService:
             executor: Macro-agent executor to invoke on EXECUTION approvals.
             permission_service: Permission validator. Defaults to the embedded
                 PermissionService.
+            policy_backend: Optional pluggable policy backend. Defaults to one
+                that uses OPA when configured, otherwise the embedded engine.
         """
         self.db = db
         self.policy_engine = policy_engine or PolicyEngine
         self.executor = executor or MacroAgentExecutor()
         self.permission_service = permission_service or PermissionService()
+        self.policy_backend = policy_backend or PolicyEngineBackend(
+            opa_client=None,
+        )
 
     async def approve(
         self,
@@ -129,8 +138,8 @@ class ApprovalService:
             )
 
         # 1. Policy evaluation must happen before any state change or record.
-        policy_result: PolicyResult = self.policy_engine.evaluate(
-            contract, profile, approval_type
+        policy_result: PolicyResult = await self.policy_backend.evaluate(
+            contract, profile, approval_type, policy_engine=self.policy_engine
         )
         if not policy_result.allowed:
             await AuditService.log(

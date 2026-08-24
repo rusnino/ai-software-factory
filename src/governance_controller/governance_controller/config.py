@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     # header to ``TelegramAdapter`` to validate that updates come from Telegram.
     telegram_webhook_secret_token: str = ""
 
+    # Optional Open Policy Agent (OPA) backend. When configured, the embedded
+    # PolicyEngine delegates policy evaluation to OPA. Controller keeps the
+    # state machine, approvals, and audit log authoritative.
+    opa_base_url: str = ""
+    opa_timeout_seconds: float = 5.0
+    opa_policy_path: str = "governance/approve"
+
     @field_validator("database_pool_size", "database_max_overflow")
     @classmethod
     def _positive_pool_setting(cls, value: int) -> int:
