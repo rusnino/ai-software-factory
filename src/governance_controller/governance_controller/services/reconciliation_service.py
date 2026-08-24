@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
@@ -64,10 +67,12 @@ class ReconciliationService:
         plane_client: PlaneClient | None = None,
         materializer: OpentasksMaterializer | None = None,
         projection_service: PlaneProjectionService | None = None,
+        db: AsyncSession | None = None,
     ) -> None:
         self._client = plane_client
         self._materializer = materializer
         self._projection = projection_service
+        self._db = db
 
     def _client_or_none(self) -> PlaneClient | None:
         if self._client is not None:
@@ -216,8 +221,33 @@ class ReconciliationService:
         expected_plane: str,
         report: ReconciliationReport,
     ) -> None:
-        """Update Plane state to match Controller and record the fix."""
+        """Update Plane state to match Controller and record the fix.
+
+        Before applying the fix, re-read the Controller task from the database
+        to ensure its state has not changed since the divergence was detected.
+        This prevents a stale reconciliation pass from overwriting Plane with
+        an out-of-date state under a race.
+        """
         try:
+            if self._db is not None and not await self._task_still_in_state(
+                controller_task_id, state
+            ):
+                report.divergences.append(
+                    Divergence(
+                        plane_task_id=plane_issue_id,
+                        controller_task_id=controller_task_id,
+                        field="state",
+                        plane_value=None,
+                        controller_value=state.value,
+                        severity="alert",
+                        message=(
+                            f"Controller task {controller_task_id} state "
+                            f"changed during reconciliation; fix skipped"
+                        ),
+                    )
+                )
+                return
+
             updated = await projection.update_state(
                 controller_task_id=controller_task_id,
                 plane_issue_id=plane_issue_id,
@@ -244,6 +274,20 @@ class ReconciliationService:
             raise ReconciliationError(
                 f"Failed to apply Plane state fix for {controller_task_id}"
             ) from exc
+
+    async def _task_still_in_state(
+        self, task_id: str, state: TaskState
+    ) -> bool:
+        """Return True if the Controller task still has ``state``."""
+        if self._db is None:
+            return True
+        from governance_controller.models import Task
+
+        result = await self._db.execute(
+            select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
+        )
+        task_obj = result.scalar_one_or_none()
+        return task_obj is not None and task_obj.state == state.value
 
     def _materializer_or_default(self) -> OpentasksMaterializer:
         return self._materializer or OpentasksMaterializer(
