@@ -12,11 +12,23 @@ Started: 2026-08-24
 
 ## Completed Tasks
 
-None yet.
+- **Task 1** (commit `7c0bd5c`): Real Plane CE HTTP client
+  - Added `PlaneClient` with endpoints for projects, issues, comments, dependencies, states.
+  - Added `GC_PLANE_BASE_URL`, `GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, `GC_PLANE_PROJECT_ID` config.
+  - Added unit tests with httpx mocks and contract tests against local Plane CE.
+  - Verified: 298 passed (SQLite), 301 passed (PostgreSQL), ruff + mypy clean.
 
 ## Open Tasks
 
-See `plan.md`.
+- Task 2: Plane webhook receiver
+- Task 3: Controller → Plane projection service
+- Task 4: macro-agent service scaffold
+- Task 5: Real macro-agent executor client
+- Task 6: opentasks runtime DAG materializer
+- Task 7: Reconciliation job
+- Task 8: Intake adapter (Telegram + Email)
+- Task 9: Verification failure feedback + terminal alerting
+- Task 10: Optional OPA backend client
 
 ## Blockers
 
