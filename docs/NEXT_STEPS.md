@@ -3,9 +3,15 @@
 ## Current State
 
 **Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
-**Phase 2 is complete** (all `phase-2`-labeled `severity:critical`/`severity:high` issues closed
-after the 2026-08-24 review round; remaining open phase-2 issues are none). The live issue list is
-still the authoritative source of truth; run the queries below before declaring anything done.
+**Phase 2 is NOT gate-clean.** The fix round that landed after the first review closed 12 of 13
+issues genuinely, but independent re-verification found `#152`'s fix (the "parity" OPA Rego policy)
+does not actually work — the shipped `governance.rego` fails to parse in a real OPA server (`opa
+check` reports a syntax error), is missing the `#141` `sed` RCE check, and is architecturally a
+denylist rather than a mirror of the embedded engine's allowlist. `#152` has been reopened with the
+full evidence. A separate small `#164` bundles three minor residuals (no `--fix` flag on the
+`reconcile` CLI, zero test coverage on the new macro-agent feedback path, a missing RISK
+cross-reference) that don't reopen their original issues but are worth closing. The live issue list
+is the authoritative source of truth; run the queries below before declaring anything done.
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
@@ -28,8 +34,11 @@ Python stand-in service (real `macro-agent` package deferred to Phase 3 — see
 Plane dependencies with guarded cycle detection; a reconciliation service/CLI that reads Controller
 DB state and can fix Plane state divergences; authenticated intake adapters (Telegram/Email/generic)
 creating HTML-escaped Plane drafts; verification failure feedback to macro-agent and terminal
-alerting; optional OPA policy backend with a parity Rego policy. All Phase 2 review findings were
-closed with code or documented decisions.
+alerting; optional OPA policy backend whose network-level fail-closed handling is fixed (`#158`)
+but whose shipped "parity" Rego policy does not actually work (`#152`, reopened — the file fails to
+parse in real OPA, is missing the `#141` sed check, and isn't an allowlist). Most Phase 2 review
+findings were closed with code or documented decisions; `#152` and the small `#164` follow-ups
+were not.
 
 Test status: **351 passed / 5 skipped** on SQLite, **354 passed / 2 skipped** on PostgreSQL,
 `ruff` clean, `mypy governance_controller` clean (66 source files); `macro_agent_service` tests
@@ -79,12 +88,16 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`: real Plane sync,
 macro-agent client/service scaffold, opentasks materializer, reconciliation, intake adapter,
 verification feedback + alerting, and optional OPA backend. The 2026-08-24 review round opened 13
-issues; all have been closed. Phase 2 is **gate-clean** as of this update, subject to re-verifying
-the live issue list above.
+issues; 12 were genuinely closed on independent re-verification. `#152` was reopened — its "parity"
+OPA Rego policy doesn't parse in a real OPA server, is missing the `#141` sed check, and isn't an
+allowlist. **Phase 2 is NOT gate-clean.** Do not enable `GC_OPA_BASE_URL` against the shipped policy
+outside a test until `#152` closes for real.
 
-## Immediate Next Step: Phase 3 — Hardening and Runtime Diversity
+## Immediate Next Step: Close #152 and #164, Then Phase 3
 
-Phase 3 scope (from SPEC-10 §10.3):
+Close the reopened `#152` (OPA parity policy) and the small `#164` follow-ups before treating Phase
+2 as done. Once the live issue list genuinely has no open `phase-2` issues, Phase 3 scope (from
+SPEC-10 §10.3) is:
 
 - Docker sandboxing for verification/execution. See
   `docs/research-verification-sandboxing-scope-2026-08-24.md`.

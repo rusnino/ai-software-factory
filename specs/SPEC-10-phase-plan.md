@@ -56,12 +56,16 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-24): implemented and gate-clean.** All originally-scoped items and the extended
+**Status (2026-08-24): implemented, NOT gate-clean.** All originally-scoped items and the extended
 SDD task list (Plane client/webhook/projection, macro-agent service/client, opentasks materializer,
 reconciliation, intake adapter, verification feedback + alerting, OPA backend) have landed in `main`
 with passing unit tests. The first adversarial review round opened 13 issues, including one
-`severity:critical` (`#154`) and four `severity:high` (`#152`, `#155`, `#156`, `#157`); all were
-closed and the gate is clean. Re-verify with the live issue list before starting Phase 3.
+`severity:critical` (`#154`) and four `severity:high` (`#152`, `#155`, `#156`, `#157`). Twelve were
+genuinely closed on independent re-verification — but `#152`'s fix does not actually work
+(`policies/opa/governance.rego` fails to parse in a real OPA server, is missing the `#141` sed
+check, and is a denylist rather than a mirror of the embedded engine's allowlist) and has been
+reopened. `#164` tracks three smaller residuals from otherwise-genuine fixes. Re-verify with the
+live issue list before starting Phase 3 or before ever setting `GC_OPA_BASE_URL` outside a test.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync.
@@ -71,8 +75,9 @@ closed and the gate is clean. Re-verify with the live issue list before starting
 - [x] Idea Ingestion Service.
 - [ ] Human Triage queue in Plane. *(drafts land in Plane; no dedicated triage-queue view/workflow
   built beyond that)*
-- [x] Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller
-  retains state machine, approval store, and audit log.
+- [ ] Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller
+  retains state machine, approval store, and audit log. *(client-side fail-closed handling is
+  correct; the shipped Rego policy itself does not parse — `#152`, reopened)*
 
 ## 10.3 Phase 3 — Hardening and Runtime Diversity
 
