@@ -119,8 +119,28 @@ async def test_client_uses_configurable_timeout(
         "governance_controller.adapters.macro_agent.client.settings"
     ) as mock_settings:
         mock_settings.macro_agent_timeout_seconds = 12.5
+        mock_settings.macro_agent_api_secret = ""
         client = MacroAgentClient(base_url="https://example.com")
         await client.start({"task_id": "task-1"})
 
     request = httpx_mock.get_request()
     assert request is not None
+
+
+@pytest.mark.asyncio
+async def test_client_sends_auth_secret(
+    httpx_mock: pytest_httpx.HTTPXMock,
+) -> None:
+    httpx_mock.add_response(json={"run_id": "run-abc"})
+
+    with patch(
+        "governance_controller.adapters.macro_agent.client.settings"
+    ) as mock_settings:
+        mock_settings.macro_agent_timeout_seconds = 12.5
+        mock_settings.macro_agent_api_secret = "secret"
+        client = MacroAgentClient(base_url="https://example.com")
+        await client.start({"task_id": "task-1"})
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert request.headers["X-Macro-Agent-Secret"] == "secret"

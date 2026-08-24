@@ -52,4 +52,10 @@ class MacroAgentClient:
 
     def _client(self) -> httpx.AsyncClient:
         """Return a configured httpx client with explicit timeouts."""
-        return httpx.AsyncClient(timeout=settings.macro_agent_timeout_seconds)
+        headers: dict[str, str] = {}
+        if settings.macro_agent_api_secret:
+            headers["X-Macro-Agent-Secret"] = settings.macro_agent_api_secret
+        return httpx.AsyncClient(
+            timeout=settings.macro_agent_timeout_seconds,
+            headers=headers,
+        )
