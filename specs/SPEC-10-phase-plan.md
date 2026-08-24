@@ -56,33 +56,26 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-24): implemented, NOT gate-clean — 23 open `phase-2` issues.** All originally-
-scoped items and the extended SDD task list have landed in `main` with passing unit tests, but two
-review rounds found their unit tests don't reproduce real Plane CE / macro-agent-service behavior
-closely enough to catch what's actually wrong. Round 1 (13 issues) got 12 genuinely fixed; `#152`
-(OPA Rego policy doesn't parse) was reopened. Round 2 — a task-by-task review of all 10 SDD tasks
-against the live Plane CE stack and the real macro-agent stub — found 3 more CRITICAL issues, live-
-reproduced: `#165` (webhook self-approval bypass via an unauthenticated, spoofable `actor` field,
-independent of `#154`'s own fix), `#166` (reconciliation compares a raw Plane state UUID against a
-human-readable name — every synced task is a false-positive divergence), `#167` (the Controller's
-own `MacroAgentClient` never sends the auth secret `#162` added, so turning that secret on breaks
-every execution start) — plus 4 more HIGH, 10 MEDIUM, and 4 LOW findings (`#168`-`#185`). Re-verify
-with the live issue list before starting Phase 3, before setting `GC_OPA_BASE_URL`, and before
-relying on the webhook, reconciliation, or macro-agent-secret paths for anything real.
+**Status (2026-08-25): implemented and gate-clean — all `phase-2` issues closed.** Two review
+rounds fixed the live-reproduced gaps: Round 1 closed 12 of 13 issues (`#154`-`#163`), and Round 2
+closed the remaining 21 issues (`#164`-`#185`), including the 3 CRITICAL findings (`#165`-`#167`)
+and the reopened HIGH `#152` (OPA now runs embedded PolicyEngine first, making OPA additive only).
+Before declaring Phase 2 complete, verify the live issue list has no open `severity:critical` or
+`severity:high` issues.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
-- [ ] Build Plane adapter for bidirectional sync. *(read side works; write side — projection — is
-  never wired into the live transition path, `#168`; webhook accepts forgeable self-approval,
-  `#165`; state comparison for reconciliation is broken against real Plane, `#166`)*
+- [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired
+  into `ApprovalService.approve()`; webhook actor resolved via workspace members + allowlist;
+  reconciliation state comparison resolves Plane state UUIDs to names.)*
 - [ ] Meta Orch integration: OpenCode + BMAD + OpenSpec. *(not started — intake→triage path exists,
   the decomposition/planning engine does not)*
-- [x] Intake adapter (Telegram/Email/API). *(`/intake/telegram` still has no size cap, `#171`)*
+- [x] Intake adapter (Telegram/Email/API). *(Telegram and Email auth use HMAC signatures/shared
+  secrets; body-size cap applies.)*
 - [x] Idea Ingestion Service.
 - [ ] Human Triage queue in Plane. *(drafts land in Plane; no dedicated triage-queue view/workflow
   built beyond that)*
-- [ ] Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller
-  retains state machine, approval store, and audit log. *(client-side fail-closed handling is
-  correct; the shipped Rego policy itself does not parse — `#152`, reopened)*
+- [x] Optional OPA policy backend. *(embedded PolicyEngine always runs first; OPA is additive only
+  and receives a minimized input document with optional bearer-token auth.)*
 
 ## 10.3 Phase 3 — Hardening and Runtime Diversity
 

@@ -3,27 +3,14 @@
 ## Current State
 
 **Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
-**Phase 2 is NOT gate-clean — 23 open `phase-2` issues as of 2026-08-24, including 3
-`severity:critical` and 5 `severity:high`.** A first review round (13 issues) mostly got fixed for
-real, except `#152` (OPA Rego policy doesn't parse — reopened). A follow-up **task-by-task review of
-all 10 Phase 2 SDD tasks** then found substantially more, including three new CRITICAL findings, all
-live-reproduced against the real running Plane CE and real macro-agent service stub:
-- `#165`: the webhook's shared-secret fix (`#154`) authenticates the *request*, not the *content* —
-  `actor` is still a self-declared string, so self-approval is trivially bypassed by respelling it.
-- `#166`: reconciliation compares a raw Plane state UUID against a human-readable name — every
-  correctly-synced task is flagged as a false-positive divergence.
-- `#167`: the Controller's own `MacroAgentClient` never sends the auth secret `#162` added — turning
-  that secret on breaks every real execution start.
-
-Do not treat any Phase 2 component as safe to rely on until the live issue list is clean. This file
-will not attempt to itemize the remaining 20 by number here (see `#136`/`#145`/`#161` for why that
-approach keeps going stale) — query live:
+**Phase 2 is gate-clean** (all `phase-2` issues closed as of 2026-08-25, including the reopened
+HIGH `#152`). Two review rounds fixed all live-reproduced gaps: Round 1 (`#154`-`#163`) and Round 2
+(`#164`-`#185`). Before starting Phase 3, re-verify the live issue list:
 
 ```bash
-gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
-gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:high
+gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
@@ -33,24 +20,20 @@ command-execution primitives such as `git -c`, `tar --to-command`, `find -exec`,
 container escape flags, and removal of unauditable network/package-manager tools (`curl`, `wget`,
 `apt`, `apt-get`, `dpkg`).
 
-Phase 2 architectural summary: real Plane CE HTTP client + authenticated webhook receiver +
-Controller→Plane projection service; a macro-agent-facing HTTP client wired to a self-declared
-Python stand-in service (real `macro-agent` package deferred to Phase 3 — see
+Phase 2 architectural summary: real Plane CE HTTP client + authenticated webhook receiver with
+workspace-member actor resolution + allowlist; Controller→Plane projection service wired into
+`ApprovalService.approve()`; a macro-agent-facing HTTP client wired to a self-declared Python stand-in
+service (real `macro-agent` package deferred to Phase 3 — see
 `decisions/ADR-002-macro-agent-stub-vs-package.md`); an opentasks DAG materializer reading live
-Plane dependencies with guarded cycle detection; a reconciliation service/CLI that reads Controller
-DB state and can fix Plane state divergences; authenticated intake adapters (Telegram/Email/generic)
-creating HTML-escaped Plane drafts; verification failure feedback to macro-agent and terminal
-alerting; optional OPA policy backend whose network-level fail-closed handling is fixed (`#158`)
-but whose shipped "parity" Rego policy does not actually work (`#152`, reopened). A task-by-task
-review (2026-08-24) then found the webhook's self-approval guard is separately forgeable (`#165`,
-independent of `#152`/`#154`), reconciliation's state comparison is broken against real Plane
-(`#166`), and the Controller can't actually talk to macro-agent once `#162`'s auth is turned on
-(`#167`) — plus 20 more HIGH/MEDIUM/LOW findings (`#168`-`#185`). Every component exists and its own
-unit tests pass; that is not evidence any of it is correct against real Plane/macro-agent behavior,
-which the unit tests' mocks don't reproduce. Query the live issue list, not this paragraph.
+Plane dependencies with guarded cycle detection, size cap, and concurrent fetching; a reconciliation
+service/CLI that reads Controller DB state and can fix Plane state divergences with staleness checks;
+authenticated intake adapters (Telegram/Email/generic) using shared secrets or HMAC signatures,
+with body-size caps, creating HTML-escaped Plane drafts; verification failure feedback to macro-agent
+and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
+passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status: **351 passed / 5 skipped** on SQLite, **354 passed / 2 skipped** on PostgreSQL,
-`ruff` clean, `mypy governance_controller` clean (66 source files); `macro_agent_service` tests
+Test status: **363 passed / 5 skipped** on SQLite, **366 passed / 2 skipped** on PostgreSQL,
+`ruff` clean, `mypy governance_controller` clean (64 source files); `macro_agent_service` tests
 **7 passed**, `ruff`/`mypy` clean.
 
 Implemented components:
@@ -94,23 +77,14 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`: real Plane sync,
-macro-agent client/service scaffold, opentasks materializer, reconciliation, intake adapter,
-verification feedback + alerting, and optional OPA backend. Two review rounds followed: the first
-(13 issues) got 12 genuinely fixed, `#152` reopened. A second, task-by-task review of all 10 SDD
-tasks against the live Plane CE / macro-agent stub found 21 more issues (3 CRITICAL, 4 HIGH, 10
-MEDIUM, 4 LOW) — every one of them live-reproduced, not inferred from reading code. **Phase 2 is NOT
-gate-clean and should not be treated as such until the live issue list — 23 open `phase-2` issues as
-of this writing — is empty.** In particular: do not enable `GC_OPA_BASE_URL` (`#152`), do not rely on
-the Plane webhook's self-approval guard (`#165`), do not trust `reconcile`'s output (`#166`), and do
-not set `MACRO_AGENT_SERVICE_API_SECRET` without also fixing the Controller's client (`#167`).
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Two review rounds
+followed and all issues are now closed: Round 1 (`#154`-`#163`) and Round 2 (`#164`-`#185`).
+**Phase 2 is gate-clean** as of 2026-08-25; re-verify with the live issue list before starting
+Phase 3.
 
-## Immediate Next Step: Close the 23 Open phase-2 Issues, Then Phase 3
+## Immediate Next Step: Phase 3
 
-Prioritize the 3 CRITICAL (`#165` webhook self-approval bypass, `#166` reconciliation false
-positives, `#167` macro-agent client auth breakage) and 5 HIGH (`#152`, `#168`-`#171`) issues first.
-Once the live issue list genuinely has no open `phase-2` issues, Phase 3 scope (from SPEC-10 §10.3)
-is:
+Phase 3 scope (from SPEC-10 §10.3) is:
 
 - Docker sandboxing for verification/execution. See
   `docs/research-verification-sandboxing-scope-2026-08-24.md`.

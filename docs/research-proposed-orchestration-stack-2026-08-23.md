@@ -333,12 +333,42 @@ that this specific number is stable and not a snapshot artifact.
 Genuinely under the `google` GitHub organization. Smaller and slightly less active
 than agent-orchestrator (last push 4 days before this check, vs. same-day for
 agent-orchestrator) but real, with plausible fork/issue engagement for its size.
-Described as "an open source distributed agent runtime" with suspend/resume and a
-durable event log — architecturally close to macro-agent's role, but delivered via
-a Kubernetes-native "Agent Substrate," which conflicts with `SPEC-10 §10.5`'s
-explicit "Explicitly Postponed: Kubernetes" stance. Adopting it would trade one risk
-(macro-agent's concentration, below) for another (a Kubernetes dependency this
-project has deliberately avoided).
+
+**Correction (2026-08-25):** the initial framing above ("Kubernetes-native,"
+implying a mandatory K8s dependency) overstated the case. Direct inspection of the
+actual README and `go.mod` (not just the one-line catalog description) shows AX has
+three genuinely distinct deployment modes with very different overhead:
+
+1. **Local mode** (`ax --input "..."`) — a single statically-compiled Go binary,
+   no server, no external dependency. Event log defaults to a local SQLite file
+   (`eventlog/log.sqlite`). Overhead is essentially that of invoking any CLI
+   harness — comparable to or lighter than macro-agent's Node.js process.
+2. **Server mode** (`ax serve`) — one long-running Go daemon (gRPC server) backed
+   by SQLite by default; `go.mod` also vendors `jackc/pgx/v5`, so Postgres is an
+   optional backend, never a hard requirement. No broker, no cache layer, no
+   cluster — lighter than even a minimal Hatchet deployment (which needs at least
+   Postgres + a broker).
+3. **Production mode** (README: "recommended deployment option for production
+   use") — requires [`agent-substrate/substrate`](https://github.com/agent-substrate/substrate)
+   running on Kubernetes as the control service that suspends/resumes per-execution
+   pods. This is the only mode that actually conflicts with `SPEC-10 §10.5`'s
+   "Explicitly Postponed: Kubernetes" stance. Verified via GitHub API: real,
+   active project (1,614 stars, 266 forks, 402 open issues, pushed today), but
+   young (created 2026-05-13, ~3 months old at time of writing).
+
+Net: a Phase 1/2-scale bake-off against macro-agent would **not** require adopting
+Kubernetes at all — modes 1 and 2 are self-contained and arguably lighter than
+macro-agent's current footprint. The Kubernetes tradeoff only applies if/when AX is
+pushed into its recommended production topology, and even then it buys something
+concrete in return (suspending idle agent workloads waiting on human approval,
+rather than an idle Node/Python process holding memory the whole time).
+
+**Separate, non-resource caveat:** the README carries an explicit maturity warning —
+"🚧 AX is in active early development... will introduce major breaking changes
+prior to a stable release... temporarily pausing the acceptance of external Pull
+Requests." This is a different risk category than macro-agent's bus-factor-of-one:
+not a single unmonitored maintainer, but an actively-iterating team explicitly
+telling users the API isn't stable yet.
 
 ### 8.3 alexngai/macro-agent — verified, and this is the important finding
 
