@@ -49,9 +49,16 @@ Started: 2026-08-24
   - Wired into `EXEC_APPROVED -> READY` transition; DAG attached to `TaskContract` sent to macro-agent.
   - Verified: 318 passed SQLite, 321 passed PostgreSQL, ruff + mypy clean.
 
+- **Task 7** (commit `74d1387`): Reconciliation job
+  - `ReconciliationService` compares Plane issue states with authoritative Controller state.
+  - Validates runtime DAG for tasks past `PLAN_APPROVED`.
+  - Divergences classified as `project` (Controller wins) or `alert` (human attention).
+  - Added `reconcile` CLI command and updated existing CLI tests.
+  - Verified: 323 passed SQLite, 326 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 7: Reconciliation job
+- Task 8: Intake adapter (Telegram + Email)
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
