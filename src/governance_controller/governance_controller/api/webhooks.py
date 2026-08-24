@@ -7,7 +7,7 @@ Translates Plane state-change webhooks into Controller approvals per SPEC-04
 import contextlib
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,15 +101,35 @@ def _may_translate(
     return approval_type, previous, current
 
 
+class WebhookAuthError(Exception):
+    """Raised when a webhook fails authentication."""
+
+
+def _require_plane_secret(
+    x_plane_webhook_secret: str | None = Header(
+        default=None, alias="X-Plane-Webhook-Secret"
+    ),
+) -> None:
+    """Validate the Plane webhook shared secret when configured."""
+    configured = settings.plane_webhook_secret
+    if not configured:
+        return
+    if x_plane_webhook_secret != configured:
+        raise WebhookAuthError("Invalid or missing Plane webhook secret")
+
+
 @router.post("/plane", status_code=status.HTTP_204_NO_CONTENT)
 async def receive_plane_webhook(
     event: PlaneWebhookEvent,
     db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(_require_plane_secret),
 ) -> None:
     """Receive a Plane state-change webhook and translate it to an approval.
 
-    If the request is rejected, the Controller reverts the Plane state and
-    comments with the reason, because the Controller owns execution status.
+    Requires ``X-Plane-Webhook-Secret`` header when ``GC_PLANE_WEBHOOK_SECRET``
+    is configured. If the request is rejected, the Controller reverts the
+    Plane state and comments with the reason, because the Controller owns
+    execution status.
     """
     translation = _may_translate(event)
 

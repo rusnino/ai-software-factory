@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # header to ``TelegramAdapter`` to validate that updates come from Telegram.
     telegram_webhook_secret_token: str = ""
 
+    # Plane webhook authentication. Plane CE does not natively sign webhooks,
+    # so we require a shared secret in the ``X-Plane-Webhook-Secret`` header.
+    # Leave empty ONLY for local/dev where the endpoint is not exposed.
+    plane_webhook_secret: str = ""
+
     # Optional Open Policy Agent (OPA) backend. When configured, the embedded
     # PolicyEngine delegates policy evaluation to OPA. Controller keeps the
     # state machine, approvals, and audit log authoritative.

@@ -3,7 +3,8 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
 
 from governance_controller.api import approvals as approvals_api
 from governance_controller.api import audit as audit_api
@@ -13,6 +14,7 @@ from governance_controller.api import health as health_api
 from governance_controller.api import intake as intake_api
 from governance_controller.api import tasks as tasks_api
 from governance_controller.api import webhooks as webhooks_api
+from governance_controller.api.webhooks import WebhookAuthError
 from governance_controller.config import settings
 from governance_controller.db import init_db
 from governance_controller.middleware import WriteBodySizeLimitMiddleware
@@ -43,6 +45,18 @@ app = FastAPI(
 )
 
 app.add_middleware(WriteBodySizeLimitMiddleware)
+
+
+@app.exception_handler(WebhookAuthError)
+async def _webhook_auth_exception_handler(
+    _request: Request,
+    exc: WebhookAuthError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": str(exc)},
+    )
+
 
 app.include_router(health_api.router)
 app.include_router(tasks_api.router)
