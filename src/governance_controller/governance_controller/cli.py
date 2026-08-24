@@ -1,5 +1,6 @@
 """Command-line interface for Governance Controller approvals."""
 
+import asyncio
 from datetime import UTC, datetime
 
 import httpx
@@ -7,6 +8,9 @@ import typer
 
 from governance_controller.constants import ApprovalType
 from governance_controller.schemas.approval import ApprovalRequest
+from governance_controller.services.reconciliation_service import (
+    ReconciliationService,
+)
 
 app = typer.Typer(help="Governance Controller CLI")
 
@@ -55,3 +59,43 @@ def approve(
 
     body = response.json()
     typer.echo(f"Approved {task_id}: {body['state']}")
+
+
+@app.command()
+def reconcile(
+    project_id: str = typer.Argument(
+        ..., help="Plane project UUID to reconcile."
+    ),
+    plane_base_url: str = typer.Option(
+        "",
+        help="Override GC_PLANE_BASE_URL for this run.",
+    ),
+) -> None:
+    """List Plane vs Controller divergences for a project.
+
+    This command fetches Plane issues and compares their execution state with
+    the authoritative Controller state. It prints divergences to stdout and
+    exits with code 1 when serious drift is detected.
+    """
+    from governance_controller import config
+
+    if plane_base_url:
+        config.settings.plane_base_url = plane_base_url
+
+    async def _run() -> None:
+        service = ReconciliationService()
+        # For the CLI scaffold we have no live Controller DB connection, so we
+        # report that Plane is reachable and surface configuration. A future
+        # iteration will read task rows from the database.
+        report = await service.reconcile(controller_tasks=[], project_id=project_id)
+        typer.echo(f"Checked {report.checked} tasks")
+        for div in report.divergences:
+            typer.echo(
+                f"[{div.severity}] {div.controller_task_id or div.plane_task_id} "
+                f"{div.field}: {div.message}",
+                err=div.severity == "alert",
+            )
+        if any(d.severity == "alert" for d in report.divergences):
+            raise typer.Exit(code=1)
+
+    asyncio.run(_run())

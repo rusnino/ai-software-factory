@@ -30,6 +30,7 @@ class TestCliApprove:
             result = runner.invoke(
                 app,
                 [
+                    "approve",
                     "TASK-1",
                     "--type",
                     "execution",
@@ -69,6 +70,7 @@ class TestCliApprove:
             result = runner.invoke(
                 app,
                 [
+                    "approve",
                     "TASK-2",
                     "--base-url",
                     "http://localhost:8000",
