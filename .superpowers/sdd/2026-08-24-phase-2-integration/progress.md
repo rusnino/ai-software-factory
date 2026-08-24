@@ -70,9 +70,16 @@ Started: 2026-08-24
   - Unit tests cover comment posting, no-Plane config, and swallowed errors.
   - Verified: 332 passed SQLite, 335 passed PostgreSQL, ruff + mypy clean.
 
+- **Task 10** (commit `4715c22`): Optional OPA backend client
+  - `OPAClient` for OPA Data API v1.
+  - `PolicyEngineBackend` delegates to OPA when `GC_OPA_BASE_URL` is set, else embedded `PolicyEngine`.
+  - `ApprovalService` uses the backend; custom `policy_engine` still injectable for tests.
+  - Fail-closed on OPA errors.
+  - Verified: 338 passed SQLite, 341 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 10: Optional OPA backend client
+All Phase 2 integration tasks complete.
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
