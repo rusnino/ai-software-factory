@@ -86,9 +86,7 @@ def reconcile(
         config.settings.plane_base_url = plane_base_url
 
     async def _run() -> None:
-        service = ReconciliationService()
-        db = await get_db_session()
-        async with db:
+        async with get_db_session() as db:
             result = await db.execute(
                 select(Task.id, Task.state, Task.project_id)  # type: ignore[call-overload]
             )
@@ -97,11 +95,11 @@ def reconcile(
                 (str(row.id), row.state, row.project_id or project_id)
                 for row in rows
             ]
-
-        report = await service.reconcile(
-            controller_tasks=controller_tasks,
-            project_id=project_id,
-        )
+            service = ReconciliationService(db=db)
+            report = await service.reconcile(
+                controller_tasks=controller_tasks,
+                project_id=project_id,
+            )
         typer.echo(f"Checked {report.checked} tasks")
         for div in report.divergences:
             typer.echo(

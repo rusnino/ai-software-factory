@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import (
@@ -165,8 +166,20 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
             raise
 
 
-async def get_db_session() -> AsyncSession:
-    """Return a standalone async DB session for non-FastAPI callers."""
+@asynccontextmanager
+async def get_db_session() -> AsyncGenerator[AsyncSession]:
+    """Provide a standalone async DB session for non-FastAPI callers.
+
+    Yields a session inside an ``async with`` block so that connections are
+    returned to the pool even when callers forget to close the session. This
+    prevents connection leaks/crashes on repeated in-process invocation.
+    """
     if settings.database_url.startswith("sqlite"):
         await ensure_sqlite_tables()
-    return AsyncSessionLocal()
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await session.rollback()
+            raise
