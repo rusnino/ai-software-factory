@@ -120,10 +120,24 @@ def test_file_based_sqlite_uses_tuned_pool(tmp_path, monkeypatch):
     from governance_controller import config
     from governance_controller import db as db_module
 
-    with patch.dict(os.environ, {"GC_DATABASE_URL": str(db_url)}):
-        importlib.reload(config)
-        importlib.reload(db_module)
+    # Preserve module-level objects that other tests rely on via import.
+    original_engine = db_module.engine
+    original_session_local = db_module.AsyncSessionLocal
+    original_get_db = db_module.get_db
+    original_config_settings = config.settings
 
-    assert db_module.engine.url.database == str(db_file)
-    assert db_module.engine.pool.size() == 3
-    assert db_module.engine.pool.timeout() == 5
+    try:
+        with patch.dict(os.environ, {"GC_DATABASE_URL": str(db_url)}):
+            importlib.reload(config)
+            importlib.reload(db_module)
+
+        assert db_module.engine.url.database == str(db_file)
+        assert db_module.engine.pool.size() == 3
+        assert db_module.engine.pool.timeout() == 5
+    finally:
+        # Restore so subsequent tests that patch db_module attributes see the
+        # original module objects again.
+        db_module.engine = original_engine
+        db_module.AsyncSessionLocal = original_session_local
+        db_module.get_db = original_get_db
+        config.settings = original_config_settings

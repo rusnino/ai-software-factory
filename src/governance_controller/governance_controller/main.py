@@ -11,6 +11,7 @@ from governance_controller.api import events as events_api
 from governance_controller.api import executions as executions_api
 from governance_controller.api import health as health_api
 from governance_controller.api import tasks as tasks_api
+from governance_controller.api import webhooks as webhooks_api
 from governance_controller.config import settings
 from governance_controller.db import init_db
 from governance_controller.middleware import WriteBodySizeLimitMiddleware
@@ -48,3 +49,4 @@ app.include_router(approvals_api.router)
 app.include_router(events_api.router)
 app.include_router(executions_api.router)
 app.include_router(audit_api.router)
+app.include_router(webhooks_api.router)
