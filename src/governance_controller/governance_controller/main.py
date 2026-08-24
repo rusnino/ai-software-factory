@@ -10,6 +10,7 @@ from governance_controller.api import audit as audit_api
 from governance_controller.api import events as events_api
 from governance_controller.api import executions as executions_api
 from governance_controller.api import health as health_api
+from governance_controller.api import intake as intake_api
 from governance_controller.api import tasks as tasks_api
 from governance_controller.api import webhooks as webhooks_api
 from governance_controller.config import settings
@@ -50,3 +51,4 @@ app.include_router(events_api.router)
 app.include_router(executions_api.router)
 app.include_router(audit_api.router)
 app.include_router(webhooks_api.router)
+app.include_router(intake_api.router)
