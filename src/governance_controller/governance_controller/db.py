@@ -163,3 +163,10 @@ async def get_db() -> AsyncGenerator[AsyncSession]:
         except BaseException:
             await session.rollback()
             raise
+
+
+async def get_db_session() -> AsyncSession:
+    """Return a standalone async DB session for non-FastAPI callers."""
+    if settings.database_url.startswith("sqlite"):
+        await ensure_sqlite_tables()
+    return AsyncSessionLocal()

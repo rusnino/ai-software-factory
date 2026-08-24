@@ -12,6 +12,9 @@ from governance_controller.services.opentasks_materializer import (
     MaterializerError,
     OpentasksMaterializer,
 )
+from governance_controller.services.plane_projection import (
+    PlaneProjectionService,
+)
 
 
 @dataclass
@@ -38,6 +41,10 @@ class ReconciliationReport:
     )
 
 
+class ReconciliationError(Exception):
+    """Raised when a reconciliation fix cannot be applied."""
+
+
 class ReconciliationService:
     """Compare Plane state with Controller state and report/fix divergences.
 
@@ -49,15 +56,18 @@ class ReconciliationService:
     Args:
         plane_client: Optional PlaneClient override.
         materializer: Optional OpentasksMaterializer override.
+        projection_service: Optional PlaneProjectionService override.
     """
 
     def __init__(
         self,
         plane_client: PlaneClient | None = None,
         materializer: OpentasksMaterializer | None = None,
+        projection_service: PlaneProjectionService | None = None,
     ) -> None:
         self._client = plane_client
         self._materializer = materializer
+        self._projection = projection_service
 
     def _client_or_none(self) -> PlaneClient | None:
         if self._client is not None:
@@ -66,16 +76,31 @@ class ReconciliationService:
             return None
         return PlaneClient()
 
+    def _projection_service(self) -> PlaneProjectionService | None:
+        if self._projection is not None:
+            return self._projection
+        client = self._client_or_none()
+        if client is None:
+            return None
+        return PlaneProjectionService(client=client)
+
     async def reconcile(
         self,
         controller_tasks: list[tuple[str, TaskState, str]],
         project_id: str | None = None,
+        dry_run: bool = False,
+        fix: bool = False,
     ) -> ReconciliationReport:
         """Reconcile a list of Controller tasks against Plane.
 
         ``controller_tasks`` is a list of ``(task_id, state, project_id)``
         tuples. When ``project_id`` is not provided, the project ID from the
         first task is used.
+
+        When ``fix`` is True, the service attempts to correct Plane state for
+        ``project``-severity divergences and writes an explanatory comment. It
+        never creates missing Plane issues or overwrites content on Plane; those
+        remain ``alert`` divergences requiring human attention.
         """
         client = self._client_or_none()
         report = ReconciliationReport()
@@ -85,6 +110,7 @@ class ReconciliationService:
         if not controller_tasks:
             return report
 
+        projection = self._projection_service()
         effective_project_id = (
             project_id or controller_tasks[0][2]
         )
@@ -138,6 +164,15 @@ class ReconciliationService:
                         ),
                     )
                 )
+                if fix and projection is not None and not dry_run:
+                    await self._apply_state_fix(
+                        projection=projection,
+                        plane_issue_id=plane_issue.get("id", ""),
+                        controller_task_id=task_id,
+                        state=state,
+                        expected_plane=expected_plane,
+                        report=report,
+                    )
 
             report.checked += 1
 
@@ -167,6 +202,44 @@ class ReconciliationService:
                 )
 
         return report
+
+    async def _apply_state_fix(
+        self,
+        projection: PlaneProjectionService,
+        plane_issue_id: str,
+        controller_task_id: str,
+        state: TaskState,
+        expected_plane: str,
+        report: ReconciliationReport,
+    ) -> None:
+        """Update Plane state to match Controller and record the fix."""
+        try:
+            updated = await projection.update_state(
+                controller_task_id=controller_task_id,
+                plane_issue_id=plane_issue_id,
+                state=state,
+            )
+            if updated is None:
+                return
+            report.projection_fixes.append(
+                (
+                    controller_task_id,
+                    plane_issue_id,
+                    {"state": state.value},
+                )
+            )
+            await projection.add_comment(
+                plane_issue_id=plane_issue_id,
+                text=(
+                    "Reconciliation: Plane state was adjusted to match the "
+                    f"authoritative Controller state '{state.value}' "
+                    f"(expected Plane state '{expected_plane}')."
+                ),
+            )
+        except Exception as exc:
+            raise ReconciliationError(
+                f"Failed to apply Plane state fix for {controller_task_id}"
+            ) from exc
 
     def _materializer_or_default(self) -> OpentasksMaterializer:
         return self._materializer or OpentasksMaterializer(

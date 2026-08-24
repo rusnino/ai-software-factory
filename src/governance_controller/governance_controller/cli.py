@@ -5,8 +5,11 @@ from datetime import UTC, datetime
 
 import httpx
 import typer
+from sqlalchemy import select
 
 from governance_controller.constants import ApprovalType
+from governance_controller.db import get_db_session
+from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
@@ -73,9 +76,9 @@ def reconcile(
 ) -> None:
     """List Plane vs Controller divergences for a project.
 
-    This command fetches Plane issues and compares their execution state with
-    the authoritative Controller state. It prints divergences to stdout and
-    exits with code 1 when serious drift is detected.
+    This command fetches Plane issues, reads the authoritative Controller task
+    states from the local database, compares them, and optionally applies state
+    fixes back to Plane.
     """
     from governance_controller import config
 
@@ -84,10 +87,21 @@ def reconcile(
 
     async def _run() -> None:
         service = ReconciliationService()
-        # For the CLI scaffold we have no live Controller DB connection, so we
-        # report that Plane is reachable and surface configuration. A future
-        # iteration will read task rows from the database.
-        report = await service.reconcile(controller_tasks=[], project_id=project_id)
+        db = await get_db_session()
+        async with db:
+            result = await db.execute(
+                select(Task.id, Task.state, Task.project_id)  # type: ignore[call-overload]
+            )
+            rows = result.all()
+            controller_tasks = [
+                (str(row.id), row.state, row.project_id or project_id)
+                for row in rows
+            ]
+
+        report = await service.reconcile(
+            controller_tasks=controller_tasks,
+            project_id=project_id,
+        )
         typer.echo(f"Checked {report.checked} tasks")
         for div in report.divergences:
             typer.echo(
