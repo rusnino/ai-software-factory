@@ -24,9 +24,15 @@ Started: 2026-08-24
   - Added isolated-DB tests and fixed `test_db.py` module-reload leakage that broke later suites.
   - Verified: 306 passed (SQLite), 309 passed (PostgreSQL), ruff + mypy clean.
 
+- **Task 3** (commit `ddc7671`): Controller → Plane projection service
+  - Added `PlaneProjectionService` with issue create, state update, and comment helpers.
+  - Runtime Plane state UUID resolution by display name.
+  - No-op when Plane is not configured; unit-tested with fake client.
+  - Verified: 311 passed (SQLite), 314 passed (PostgreSQL), ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 3: Controller → Plane projection service
+- Task 4: macro-agent service scaffold
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
