@@ -20,6 +20,9 @@ from governance_controller.services.opentasks_materializer import (
     OpentasksMaterializer,
 )
 from governance_controller.services.permission_service import PermissionService
+from governance_controller.services.plane_projection import (
+    PlaneProjectionService,
+)
 from governance_controller.services.policy_engine import (
     PolicyEngine,
     PolicyResult,
@@ -47,6 +50,7 @@ class ApprovalService:
         executor: MacroAgentExecutor | None = None,
         permission_service: PermissionService | None = None,
         policy_backend: PolicyEngineBackend | None = None,
+        plane_projection: PlaneProjectionService | None = None,
     ) -> None:
         """Initialize the service.
 
@@ -67,6 +71,7 @@ class ApprovalService:
         self.policy_backend = policy_backend or PolicyEngineBackend(
             opa_client=None,
         )
+        self.plane_projection = plane_projection
 
     async def approve(
         self,
@@ -276,12 +281,56 @@ class ApprovalService:
             },
         )
 
+        await self._project_state_to_plane(
+            task_id=task.id,
+            state=target_state,
+            approval_type=approval_type,
+        )
+
         if approval_type == ApprovalType.EXECUTION:
             return await self._trigger_execution(
                 task, contract, profile, actor, source, previous_state
             )
 
         return task
+
+    async def _project_state_to_plane(
+        self,
+        task_id: str,
+        state: TaskState,
+        approval_type: ApprovalType,
+    ) -> None:
+        """Project the new Controller state to Plane when configured.
+
+        Failures are logged and swallowed so a Plane projection outage does not
+        block the authoritative Controller state machine.
+        """
+        projection = self.plane_projection
+        if projection is None and settings.plane_base_url:
+            projection = PlaneProjectionService()
+        if projection is None:
+            return
+
+        try:
+            await projection.update_state(
+                controller_task_id=task_id,
+                plane_issue_id=task_id,
+                state=state,
+            )
+        except Exception as exc:
+            await AuditService.log(
+                db=self.db,
+                event_type="plane_projection_failed",
+                task_id=task_id,
+                actor="system",
+                source="approval_service",
+                payload={
+                    "state": state.value,
+                    "approval_type": approval_type.value,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     async def _log_rejection_and_raise(
         self,

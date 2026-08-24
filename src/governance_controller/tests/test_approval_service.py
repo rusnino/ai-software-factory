@@ -1,5 +1,6 @@
 """Tests for the ApprovalService."""
 
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -19,6 +20,26 @@ from governance_controller.services.policy_engine import (
     PolicyEngine,
     PolicyViolationError,
 )
+
+
+class _FakePlaneProjection:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def update_state(
+        self,
+        controller_task_id: str,
+        plane_issue_id: str,
+        state: Any,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "controller_task_id": controller_task_id,
+                "plane_issue_id": plane_issue_id,
+                "state": state,
+            }
+        )
+        return {"id": plane_issue_id}
 
 
 async def _audit_rows_for_task(
@@ -155,6 +176,34 @@ class TestApprovalServiceStateTransitions:
         )
 
         assert result.state == TaskState.DONE
+
+    async def test_approval_projects_state_to_plane(
+        self,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        fake_projection = _FakePlaneProjection()
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            plane_projection=fake_projection,
+        )
+        task = await _make_task(db_session, TaskState.PROPOSED)
+        contract = _make_contract()
+        profile = _make_profile()
+
+        await service.approve(
+            task=task,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="plane",
+            actor="human-1",
+            idempotency_key="key-plan-projection",
+        )
+
+        assert len(fake_projection.calls) == 1
+        assert fake_projection.calls[0]["state"] == TaskState.PLAN_APPROVED
 
 
 class TestApprovalServiceIdempotency:
