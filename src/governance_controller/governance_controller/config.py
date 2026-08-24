@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     database_pool_pre_ping: bool = True
     macro_agent_base_url: str = "http://localhost:3000"
     macro_agent_timeout_seconds: float = 30.0
+
+    # Plane CE integration. Leave empty to run with the in-memory Plane adapter.
+    plane_base_url: str = ""
+    plane_api_token: str = ""
+    plane_workspace_slug: str = ""
+    plane_project_id: str = ""
+
     log_level: str = "info"
 
     # Telegram webhook authentication. The secret token is sent by Telegram in
