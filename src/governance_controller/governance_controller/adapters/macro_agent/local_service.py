@@ -103,7 +103,8 @@ class LocalMacroAgentService:
         )
 
         # Use ``uv run`` inside the service directory so the service sees its
-        # own virtual environment and dependencies.
+        # own virtual environment and dependencies. Start a new process group so
+        # we can terminate the whole process tree (uv wrapper + python child).
         self._proc = subprocess.Popen(
             [
                 "uv",
@@ -117,6 +118,7 @@ class LocalMacroAgentService:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
 
         if not self._wait_for_port(self.host, self.port, self.startup_timeout):
@@ -159,16 +161,19 @@ class LocalMacroAgentService:
         if proc is None:
             return
 
-        with contextlib.suppress(ProcessLookupError):
-            proc.terminate()
+        pgid = getattr(proc, "pid", None)
+        if pgid is not None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(pgid, 15)  # SIGTERM the whole process group
         try:
             await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(None, proc.wait),
                 timeout=5.0,
             )
         except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, 9)  # SIGKILL the whole process group
             await asyncio.get_event_loop().run_in_executor(None, proc.wait)
 
         logger.info("local_macro_agent_service_stopped")
