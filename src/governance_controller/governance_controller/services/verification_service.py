@@ -25,6 +25,7 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.completion_contract import Check
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.alert_service import AlertService
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.policy_engine import (
     _extract_command_paths,
@@ -415,10 +416,23 @@ class VerificationService:
         # FAILED, so the scoped FAILED -> RUNNING transition verifies the row is
         # in FAILED and has the just-incremented version.
         if target_state == TaskState.FAILED:
+            await AlertService().notify_verification_failure(
+                task=task,
+                contract=contract,
+                report=report,
+                attempt=task.execution_attempts,
+                max_retries=getattr(contract.execution, "max_retries", 2),
+            )
             max_retries = getattr(contract.execution, "max_retries", 2)
             if task.execution_attempts >= max_retries:
                 await service._alert_human_terminal_failure(
                     db=db,
+                    task=task,
+                    contract=contract,
+                    report=report,
+                    reason="max_retries_exhausted",
+                )
+                await AlertService().notify_terminal_failure(
                     task=task,
                     contract=contract,
                     report=report,
