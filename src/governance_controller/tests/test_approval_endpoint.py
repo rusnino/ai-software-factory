@@ -98,9 +98,7 @@ class TestApprovalEndpoint:
         sample_profile: ProjectProfile,
     ) -> None:
         await _create_task(async_client, sample_contract, sample_profile)
-        payload = _approval_payload(
-            "approval-task-1", ApprovalType.EXECUTION
-        )
+        payload = _approval_payload("approval-task-1", ApprovalType.EXECUTION)
 
         response = await async_client.post("/approvals", json=payload)
 

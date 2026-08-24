@@ -101,6 +101,7 @@ async def client_db_session(
     await _create_tables(test_db_url, test_engine)
 
     async with test_session_local() as session:
+
         def _make_override():
             async def _override_get_db() -> AsyncGenerator[AsyncSession]:
                 yield session
@@ -109,9 +110,7 @@ async def client_db_session(
 
         # Patch the module-level engine/sessionmaker too, so code that touches
         # default_engine (e.g. get_db, EventBridge helpers) uses the test DB.
-        monkeypatch.setattr(
-            "governance_controller.db.get_db", _make_override()
-        )
+        monkeypatch.setattr("governance_controller.db.get_db", _make_override())
         monkeypatch.setattr("governance_controller.db.engine", test_engine)
         monkeypatch.setattr(
             "governance_controller.db.AsyncSessionLocal", test_session_local
@@ -147,6 +146,3 @@ async def patched_db(isolated_db: tuple[AsyncEngine, sessionmaker]):
     db_module.engine = original_engine
     db_module.AsyncSessionLocal = original_session_local
     db_module.settings.database_url = original_database_url
-
-
-

@@ -41,16 +41,12 @@ class TestStateMachineValidTransitions:
         assert result.updated_at != before
 
     def test_human_review_to_done(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.HUMAN_REVIEW
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.HUMAN_REVIEW)
         result = StateMachine.transition(task, TaskState.DONE)
         assert result.state == TaskState.DONE
 
     def test_exec_approved_to_ready(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.EXEC_APPROVED
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.EXEC_APPROVED)
         result = StateMachine.transition(task, TaskState.READY)
         assert result.state == TaskState.READY
 
@@ -70,9 +66,7 @@ class TestStateMachineValidTransitions:
         assert result.state == TaskState.BLOCKED
 
     def test_agent_review_to_human_review(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.AGENT_REVIEW
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.AGENT_REVIEW)
         result = StateMachine.transition(task, TaskState.HUMAN_REVIEW)
         assert result.state == TaskState.HUMAN_REVIEW
 
@@ -82,9 +76,7 @@ class TestStateMachineValidTransitions:
         assert result.state == TaskState.RUNNING
 
     def test_human_review_to_running_is_forbidden(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.HUMAN_REVIEW
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.HUMAN_REVIEW)
         with pytest.raises(ValueError, match="HUMAN_REVIEW -> RUNNING"):
             StateMachine.transition(task, TaskState.RUNNING)
 
@@ -106,16 +98,12 @@ class TestStateMachineInvalidTransitions:
             StateMachine.transition(task, TaskState.EXEC_APPROVED)
 
     def test_plan_approved_to_ready_requires_exec_approval(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.PLAN_APPROVED
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.PLAN_APPROVED)
         with pytest.raises(ValueError, match="PLAN_APPROVED -> READY"):
             StateMachine.transition(task, TaskState.READY)
 
     def test_exec_approved_to_running_requires_ready(self) -> None:
-        task = Task(
-            id="task-1", project_id="proj-1", state=TaskState.EXEC_APPROVED
-        )
+        task = Task(id="task-1", project_id="proj-1", state=TaskState.EXEC_APPROVED)
         with pytest.raises(ValueError, match="EXEC_APPROVED -> RUNNING"):
             StateMachine.transition(task, TaskState.RUNNING)
 

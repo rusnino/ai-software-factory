@@ -85,7 +85,5 @@ async def test_profile_update_logs_only_when_content_changes(
 
 
 async def _count_audit_events(db_session: AsyncSession, task_id: str) -> int:
-    rows = await db_session.execute(
-        select(AuditLog).where(AuditLog.task_id == task_id)
-    )
+    rows = await db_session.execute(select(AuditLog).where(AuditLog.task_id == task_id))
     return len(rows.scalars().all())

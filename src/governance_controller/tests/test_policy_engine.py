@@ -147,8 +147,7 @@ class TestPolicyEngineRejections:
 
         assert result.allowed is False
         assert any(
-            "max_retries (5) exceeds project cap (2)" in v
-            for v in result.violations
+            "max_retries (5) exceeds project cap (2)" in v for v in result.violations
         )
 
     def test_git_settings_enforced_for_merge(self) -> None:
@@ -206,8 +205,7 @@ class TestPolicyEngineRejections:
 
         assert result.allowed is False
         assert any(
-            "Task touches forbidden path: /etc/shadow" in v
-            for v in result.violations
+            "Task touches forbidden path: /etc/shadow" in v for v in result.violations
         )
 
     def test_nested_forbidden_path_is_rejected(self) -> None:
@@ -219,8 +217,7 @@ class TestPolicyEngineRejections:
 
         assert result.allowed is False
         assert any(
-            "Task touches forbidden path: ~/.ssh/id_rsa" in v
-            for v in result.violations
+            "Task touches forbidden path: ~/.ssh/id_rsa" in v for v in result.violations
         )
 
     def test_sibling_of_forbidden_path_is_allowed(self) -> None:
@@ -262,8 +259,7 @@ class TestPolicyEngineRejections:
 
         assert result.allowed is False
         assert any(
-            "Task touches forbidden path: /etc/shadow" in v
-            for v in result.violations
+            "Task touches forbidden path: /etc/shadow" in v for v in result.violations
         )
 
 
@@ -406,16 +402,16 @@ class TestPolicyEngineCompletionContractShellAllowlist:
     @pytest.mark.parametrize(
         "command",
         [
-            'env rm -rf /tmp/gcpoc_wrap1',
+            "env rm -rf /tmp/gcpoc_wrap1",
             'bash -c "sudo rm -rf /tmp/gcpoc_wrap2"',
             'sh -c "rm -rf /tmp/gcpoc_wrap3"',
             "nice sudo rm -rf /tmp/gcpoc_wrap4",
             "xargs rm -rf",
             "nohup rm -rf /tmp/gcpoc_wrap5",
             "timeout 5 rm -rf /tmp/gcpoc_wrap6",
-            'ssh user@host rm -rf /',
-            'env -i rm -rf /tmp/gcpoc_wrap7',
-            'busybox rm -rf /tmp/gcpoc_wrap8',
+            "ssh user@host rm -rf /",
+            "env -i rm -rf /tmp/gcpoc_wrap7",
+            "busybox rm -rf /tmp/gcpoc_wrap8",
         ],
     )
     def test_wrapper_interpreter_payloads_are_rejected(self, command: str) -> None:
@@ -521,16 +517,12 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any(
-            "forbidden shell token" in v for v in result.violations
-        )
+        assert any("forbidden shell token" in v for v in result.violations)
 
 
 class TestPolicyEngineVerificationCommandsAllowlist:
     def test_safe_verification_command_passes(self) -> None:
-        contract = _make_contract(
-            verification={"commands": ["uv run pytest -q"]}
-        )
+        contract = _make_contract(verification={"commands": ["uv run pytest -q"]})
         profile = _make_profile()
 
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
@@ -580,9 +572,7 @@ class TestPolicyEngineVerificationCommandsAllowlist:
     def test_verification_docker_socket_command_rejected_when_denied(self) -> None:
         # #138: docker is removed from the verification allowlist entirely.
         contract = _make_contract(
-            verification={
-                "commands": ["docker -H unix:///var/run/docker.sock ps"]
-            },
+            verification={"commands": ["docker -H unix:///var/run/docker.sock ps"]},
         )
         profile = _make_profile()
 
@@ -616,8 +606,6 @@ class TestPolicyEngineVerificationCommandsAllowlist:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is True
-
-
 
 
 class TestPolicyEngineCommandExecutionPrimitives:
@@ -662,8 +650,7 @@ class TestPolicyEngineCommandExecutionPrimitives:
 
         assert result.allowed is False
         assert any(
-            "destructive shell operation" in v
-            or "command-execution primitive" in v
+            "destructive shell operation" in v or "command-execution primitive" in v
             for v in result.violations
         )
 
@@ -692,9 +679,7 @@ class TestPolicyEngineCommandExecutionPrimitives:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any(
-            "not in the verification allowlist" in v for v in result.violations
-        )
+        assert any("not in the verification allowlist" in v for v in result.violations)
 
     def test_find_delete_is_rejected(self) -> None:
         # #135: find -delete silently removes files recursively.
@@ -735,9 +720,7 @@ class TestPolicyEngineCommandExecutionPrimitives:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any(
-            "not in the verification allowlist" in v for v in result.violations
-        )
+        assert any("not in the verification allowlist" in v for v in result.violations)
 
     def test_git_clean_force_is_rejected(self) -> None:
         # #135: git clean -fdx removes untracked files forcibly.
@@ -778,9 +761,7 @@ class TestPolicyEngineCommandExecutionPrimitives:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any(
-            "command-execution primitive" in v for v in result.violations
-        )
+        assert any("command-execution primitive" in v for v in result.violations)
 
 
 class TestPolicyEngineForbiddenPathsInCommands:
@@ -861,9 +842,7 @@ class TestPolicyEngineContainerAllowlistRemoval:
         result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
 
         assert result.allowed is False
-        assert any(
-            "not in the verification allowlist" in v for v in result.violations
-        )
+        assert any("not in the verification allowlist" in v for v in result.violations)
 
     def test_python_argv0_is_rejected_as_wrapper(self) -> None:
         # #133: ``python``/``python3`` are in the forbidden-wrapper list and must

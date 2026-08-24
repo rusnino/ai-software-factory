@@ -25,9 +25,7 @@ async def _make_task(
     state: TaskState = TaskState.PROPOSED,
     task_id: str = "task-1",
 ) -> Task:
-    task = Task(
-        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
-    )
+    task = Task(id=task_id, project_id="proj-1", state=state, proposed_by="agent-1")
     db.add(task)
     await db.flush()
     return task
@@ -116,9 +114,7 @@ class TestAuditLogModel:
         assert reloaded.event_id == original_event_id
         assert reloaded.payload == original_payload
 
-    async def test_hash_chain_links_rows(
-        self, db_session: AsyncSession
-    ) -> None:
+    async def test_hash_chain_links_rows(self, db_session: AsyncSession) -> None:
         first = await AuditService.log(
             db=db_session,
             event_type="state_change",
@@ -145,15 +141,11 @@ class TestAuditLogModel:
         from sqlalchemy import select
 
         reloaded = (
-            await db_session.execute(
-                select(AuditLog).where(AuditLog.id == second.id)
-            )
+            await db_session.execute(select(AuditLog).where(AuditLog.id == second.id))
         ).scalar_one()
         assert reloaded.row_hash == reloaded.compute_hash()
 
-    async def test_audit_row_update_is_blocked(
-        self, db_session: AsyncSession
-    ) -> None:
+    async def test_audit_row_update_is_blocked(self, db_session: AsyncSession) -> None:
         entry = await AuditService.log(
             db=db_session,
             event_type="approval",
@@ -166,9 +158,7 @@ class TestAuditLogModel:
         with pytest.raises(RuntimeError, match="append-only"):
             await db_session.commit()
 
-    async def test_audit_row_delete_is_blocked(
-        self, db_session: AsyncSession
-    ) -> None:
+    async def test_audit_row_delete_is_blocked(self, db_session: AsyncSession) -> None:
         entry = await AuditService.log(
             db=db_session,
             event_type="approval",
@@ -181,9 +171,7 @@ class TestAuditLogModel:
         with pytest.raises(RuntimeError, match="append-only"):
             await db_session.flush()
 
-    async def test_core_bulk_update_is_blocked(
-        self, db_session: AsyncSession
-    ) -> None:
+    async def test_core_bulk_update_is_blocked(self, db_session: AsyncSession) -> None:
         """#120: Core-style update() must not bypass ORM immutability events."""
         from sqlalchemy import update
 
@@ -197,15 +185,13 @@ class TestAuditLogModel:
 
         with pytest.raises(Exception, match="append-only"):
             await db_session.execute(
-                update(AuditLog).where(
-                    AuditLog.task_id == "task-core-update"
-                ).values(actor="tampered")
+                update(AuditLog)
+                .where(AuditLog.task_id == "task-core-update")
+                .values(actor="tampered")
             )
             await db_session.commit()
 
-    async def test_core_bulk_delete_is_blocked(
-        self, db_session: AsyncSession
-    ) -> None:
+    async def test_core_bulk_delete_is_blocked(self, db_session: AsyncSession) -> None:
         """#120: Core-style delete() must not bypass ORM immutability events."""
         from sqlalchemy import delete
 
@@ -219,9 +205,7 @@ class TestAuditLogModel:
 
         with pytest.raises(Exception, match="append-only"):
             await db_session.execute(
-                delete(AuditLog).where(
-                    AuditLog.task_id == "task-core-delete"
-                )
+                delete(AuditLog).where(AuditLog.task_id == "task-core-delete")
             )
             await db_session.commit()
 
@@ -437,9 +421,7 @@ class TestAuditLogPostgresDDL:
 
             with pytest.raises(Exception, match="append-only"):
                 await session.execute(
-                    delete(AuditLog).where(
-                        AuditLog.task_id == "task-pg-trigger-del"
-                    )
+                    delete(AuditLog).where(AuditLog.task_id == "task-pg-trigger-del")
                 )
                 await session.commit()
 

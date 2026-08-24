@@ -8,12 +8,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.opentasks_materializer import (
+    MaterializerError,
+    OpentasksMaterializer,
+)
 from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.policy_engine import (
     PolicyEngine,
@@ -327,9 +332,7 @@ class ApprovalService:
         """
         # Atomically advance EXEC_APPROVED -> READY. If another caller already
         # moved the task, the UPDATE affects 0 rows and we fail loudly.
-        if not await StateMachine.atomic_transition(
-            self.db, task, TaskState.READY
-        ):
+        if not await StateMachine.atomic_transition(self.db, task, TaskState.READY):
             await AuditService.log(
                 db=self.db,
                 event_type="concurrent_modification",
@@ -377,6 +380,33 @@ class ApprovalService:
         # released before the live, potentially slow macro-agent call.
         await self.db.commit()
 
+        # Materialize the approved runtime DAG from Plane when configured.
+        opentasks_dag: dict[str, object] | None = None
+        if settings.plane_base_url:
+            try:
+                dag = await OpentasksMaterializer().materialize(
+                    root_plane_task_id=task.id,
+                    project_id=task.project_id,
+                )
+                opentasks_dag = dag.model_dump(mode="json")
+            except MaterializerError as exc:
+                await AuditService.log(
+                    db=self.db,
+                    event_type="opentasks_materialization_failed",
+                    task_id=task.id,
+                    actor=actor,
+                    source=source,
+                    execution_id=execution.id,
+                    payload={"error": str(exc)},
+                )
+                await self.db.commit()
+                raise RuntimeError(
+                    f"Failed to materialize opentasks DAG: {exc}"
+                ) from exc
+
+        if opentasks_dag is not None:
+            contract.opentasks_dag = opentasks_dag
+
         try:
             result = await self.executor.start(
                 contract,
@@ -385,9 +415,7 @@ class ApprovalService:
                 max_parallel_agents=profile.execution.max_parallel_agents,
             )
         except Exception as exc:  # pragma: no cover - broad error shield
-            if await StateMachine.atomic_transition(
-                self.db, task, TaskState.FAILED
-            ):
+            if await StateMachine.atomic_transition(self.db, task, TaskState.FAILED):
                 execution.state = TaskState.FAILED
                 execution.ended_at = datetime.now(UTC)
                 await self.db.flush()
@@ -427,9 +455,7 @@ class ApprovalService:
         execution.state = TaskState.RUNNING
         await self.db.flush()
 
-        if not await StateMachine.atomic_transition(
-            self.db, task, TaskState.RUNNING
-        ):
+        if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
             await AuditService.log(
                 db=self.db,
                 event_type="concurrent_modification",

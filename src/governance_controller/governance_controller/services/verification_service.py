@@ -118,9 +118,7 @@ class VerificationService:
             }
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             actual_exit = proc.returncode or 0
             status = "passed" if actual_exit == check.expect_exit else "failed"
         except TimeoutError:
@@ -210,8 +208,8 @@ class VerificationService:
 
         # Always execute TaskContract.verification.commands (SPEC-03 §3.5),
         # even when there is no CompletionContract.
-        contract_verification_checks = (
-            cls._verification_commands_from_contract(contract)
+        contract_verification_checks = cls._verification_commands_from_contract(
+            contract
         )
         for check in contract_verification_checks:
             result = await cls._run_check(check, cwd=cwd)
@@ -278,15 +276,12 @@ class VerificationService:
             scope_conflicts: set[str] = set()
 
             allowed_paths = [
-                path
-                for path in scope.allowed_paths
-                if path and isinstance(path, str)
+                path for path in scope.allowed_paths if path and isinstance(path, str)
             ]
             if allowed_paths:
                 for touched in touched_paths:
                     if not any(
-                        cls._is_prefixed_by(touched, prefix)
-                        for prefix in allowed_paths
+                        cls._is_prefixed_by(touched, prefix) for prefix in allowed_paths
                     ):
                         scope_conflicts.add(touched)
 
@@ -505,15 +500,9 @@ class VerificationService:
         await db.commit()
 
         try:
-            sandbox = (
-                profile.execution.sandbox
-                if profile is not None
-                else "worktree"
-            )
+            sandbox = profile.execution.sandbox if profile is not None else "worktree"
             max_parallel_agents = (
-                profile.execution.max_parallel_agents
-                if profile is not None
-                else 3
+                profile.execution.max_parallel_agents if profile is not None else 3
             )
             result = await self.executor.start(
                 contract,
@@ -543,9 +532,7 @@ class VerificationService:
             # own; move it to terminal FAILED so humans are alerted.
             await StateMachine.atomic_transition(db, task, TaskState.FAILED)
             await db.commit()
-            raise RuntimeError(
-                f"retry macro-agent start failed: {exc}"
-            ) from exc
+            raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
         execution.macro_agent_run_id = result["run_id"]
         await db.flush()

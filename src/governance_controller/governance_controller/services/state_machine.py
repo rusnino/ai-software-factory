@@ -171,4 +171,3 @@ class StateMachine:
             task.updated_at = datetime.now(UTC)
             return True
         return False
-

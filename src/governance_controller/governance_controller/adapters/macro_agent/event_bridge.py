@@ -106,9 +106,7 @@ class EventBridge:
 
         target_state = _EVENT_TO_STATE.get(event_type)
         audit_event_type = (
-            "macro_agent_other"
-            if target_state is None
-            else f"macro_agent_{event_type}"
+            "macro_agent_other" if target_state is None else f"macro_agent_{event_type}"
         )
 
         result = await db.execute(select(Task).where(Task.id == task_id))
@@ -144,9 +142,7 @@ class EventBridge:
                     valid_transition = False
 
                 if valid_transition:
-                    if not await StateMachine.atomic_transition(
-                        db, task, target_state
-                    ):
+                    if not await StateMachine.atomic_transition(db, task, target_state):
                         raise ValueError(
                             "Concurrent modification detected: "
                             "task state changed during event handling"
@@ -178,9 +174,7 @@ class EventBridge:
             # potentially slow subprocess execution (GAP-095).
             await db.commit()
             verifier = verification_service or VerificationService()
-            contract = TaskContract(
-                **cast(dict[str, Any], task.task_contract_json)
-            )
+            contract = TaskContract(**cast(dict[str, Any], task.task_contract_json))
             # Profile is optional in Phase 1; retry execution falls back to
             # defaults if no profile is available.
             profile = None

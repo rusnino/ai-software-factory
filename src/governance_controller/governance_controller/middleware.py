@@ -63,9 +63,8 @@ class WriteBodySizeLimitMiddleware:
                         tail = await receive()
                         if tail.get("type") == "http.disconnect":
                             return
-                        complete = (
-                            tail.get("type") == "http.request"
-                            and not tail.get("more_body", False)
+                        complete = tail.get("type") == "http.request" and not tail.get(
+                            "more_body", False
                         )
                     await send(
                         {

@@ -86,15 +86,23 @@ class TaskService:
         dialect = self.db.bind.dialect.name if self.db.bind else "sqlite"
         stmt: Any
         if dialect == "postgresql":
-            stmt = pg_insert(ProjectProfileModel).values(
-                project_id=project_profile.project_id,
-                profile_json=project_profile_json,
-            ).on_conflict_do_nothing(index_elements=["project_id"])
+            stmt = (
+                pg_insert(ProjectProfileModel)
+                .values(
+                    project_id=project_profile.project_id,
+                    profile_json=project_profile_json,
+                )
+                .on_conflict_do_nothing(index_elements=["project_id"])
+            )
         else:
-            stmt = sqlite_insert(ProjectProfileModel).values(
-                project_id=project_profile.project_id,
-                profile_json=project_profile_json,
-            ).on_conflict_do_nothing(index_elements=["project_id"])
+            stmt = (
+                sqlite_insert(ProjectProfileModel)
+                .values(
+                    project_id=project_profile.project_id,
+                    profile_json=project_profile_json,
+                )
+                .on_conflict_do_nothing(index_elements=["project_id"])
+            )
 
         result = await self.db.execute(stmt)
         did_insert = bool(getattr(result, "rowcount", 1))
@@ -136,9 +144,7 @@ class TaskService:
                 },
             )
 
-    async def get_profile_by_project_id(
-        self, project_id: str
-    ) -> ProjectProfile | None:
+    async def get_profile_by_project_id(self, project_id: str) -> ProjectProfile | None:
         """Return the stored project profile for a project, or None."""
         row = await self.db.scalar(
             select(ProjectProfileModel).where(

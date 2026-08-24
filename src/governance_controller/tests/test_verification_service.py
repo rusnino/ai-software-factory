@@ -577,15 +577,17 @@ async def test_verify_and_advance_logs_cwd_fallback_when_worktree_missing(
     )
 
     audits = (
-        await db_session.execute(
-            select(AuditLog).where(AuditLog.task_id == "task-fallback-audit")
+        (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == "task-fallback-audit")
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     events = [a.event_type for a in audits]
     assert "verification_cwd_fallback" in events
-    fallback = next(
-        a for a in audits if a.event_type == "verification_cwd_fallback"
-    )
+    fallback = next(a for a in audits if a.event_type == "verification_cwd_fallback")
     assert fallback.payload["reason"] == "guessed worktree directory does not exist"
     assert "/nonexistent/repo/path" in fallback.payload["expected_worktree"]
 
@@ -633,9 +635,7 @@ class TestVerificationConcurrency:
         ) -> bool:
             return False
 
-        with patch.object(
-            StateMachine, "atomic_transition", staticmethod(_patched)
-        ):
+        with patch.object(StateMachine, "atomic_transition", staticmethod(_patched)):
             contract = TaskContract(
                 task_id="task-verify-cas",
                 project_id="proj-1",
@@ -644,22 +644,16 @@ class TestVerificationConcurrency:
                 acceptance=["audit survives"],
             )
 
-            with pytest.raises(
-                ValueError, match="Concurrent modification detected"
-            ):
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
                 async with asynccontextmanager(get_db)() as db:
                     task = await db.scalar(
                         select(Task).where(Task.id == "task-verify-cas")
                     )
                     assert task is not None
-                    await VerificationService.verify_and_advance(
-                        db, task, contract
-                    )
+                    await VerificationService.verify_and_advance(db, task, contract)
 
         async with local_session() as check:
-            task = await check.scalar(
-                select(Task).where(Task.id == "task-verify-cas")
-            )
+            task = await check.scalar(select(Task).where(Task.id == "task-verify-cas"))
             assert task is not None
             assert task.state == TaskState.AGENT_REVIEW
             assert task.version == 0

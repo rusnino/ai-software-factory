@@ -58,9 +58,7 @@ class TestCliApprove:
         )
         assert "Approved TASK-1: EXEC_APPROVED" in result.output
 
-    def test_approve_exits_with_code_one_on_http_error(
-        self, runner: CliRunner
-    ) -> None:
+    def test_approve_exits_with_code_one_on_http_error(self, runner: CliRunner) -> None:
         mock_response = MagicMock()
         mock_response.status_code = 404
         mock_response.text = "Not Found"

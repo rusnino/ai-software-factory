@@ -20,9 +20,7 @@ async def _make_task(
     state: TaskState = TaskState.PLAN_APPROVED,
     task_id: str = "task-exec",
 ) -> Task:
-    task = Task(
-        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
-    )
+    task = Task(id=task_id, project_id="proj-1", state=state, proposed_by="agent-1")
     db.add(task)
     await db.flush()
     return task
@@ -110,9 +108,9 @@ class TestExecutionTrigger:
                 profile=profile,
                 approval_type=ApprovalType.EXECUTION,
                 source="telegram",
-            actor="admin",
-            idempotency_key="key-exec-fail",
-        )
+                actor="admin",
+                idempotency_key="key-exec-fail",
+            )
 
         assert task.state == TaskState.FAILED
 

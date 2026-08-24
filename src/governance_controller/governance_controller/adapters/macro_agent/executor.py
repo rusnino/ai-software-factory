@@ -45,6 +45,8 @@ class MacroAgentExecutor:
                 "project_id": task_contract.project_id,
             },
         }
+        if task_contract.opentasks_dag is not None:
+            payload["opentasks_dag"] = task_contract.opentasks_dag
         return await self.client.start(payload)
 
     async def status(self, run_id: str) -> dict[str, Any]:

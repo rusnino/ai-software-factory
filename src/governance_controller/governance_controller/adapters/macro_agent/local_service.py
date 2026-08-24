@@ -89,9 +89,7 @@ class LocalMacroAgentService:
     async def __aenter__(self) -> Self:
         service_root = self._service_root()
         if not os.path.isdir(service_root):
-            raise RuntimeError(
-                f"Local macro-agent service not found at {service_root}"
-            )
+            raise RuntimeError(f"Local macro-agent service not found at {service_root}")
 
         env = os.environ.copy()
         env["MACRO_AGENT_SERVICE_PORT"] = str(self.port)

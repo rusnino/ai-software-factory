@@ -94,16 +94,12 @@ async def test_post_event_409_on_lost_cas(
 
     # Session A reads the task but does not commit a change yet.
     session_a = local_session()
-    task_a = await session_a.scalar(
-        select(Task).where(Task.id == "event-task-2")
-    )
+    task_a = await session_a.scalar(select(Task).where(Task.id == "event-task-2"))
     assert task_a is not None
 
     # Session B advances the task to AGENT_REVIEW and commits first.
     async with local_session() as session_b:
-        task_b = await session_b.scalar(
-            select(Task).where(Task.id == "event-task-2")
-        )
+        task_b = await session_b.scalar(select(Task).where(Task.id == "event-task-2"))
         assert task_b is not None
 
         await EventBridge.handle(
@@ -122,9 +118,7 @@ async def test_post_event_409_on_lost_cas(
         ) as client:
             response = await client.post(
                 "/events",
-                json=_make_event(
-                    "landing:completed", task_a.id, event_id="evt-race"
-                ),
+                json=_make_event("landing:completed", task_a.id, event_id="evt-race"),
             )
     finally:
         app.dependency_overrides.pop(get_db, None)

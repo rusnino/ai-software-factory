@@ -42,9 +42,7 @@ async def _make_task(
     state: TaskState = TaskState.PROPOSED,
     task_id: str = "task-1",
 ) -> Task:
-    task = Task(
-        id=task_id, project_id="proj-1", state=state, proposed_by="agent-1"
-    )
+    task = Task(id=task_id, project_id="proj-1", state=state, proposed_by="agent-1")
     db.add(task)
     await db.flush()
     return task
@@ -297,7 +295,6 @@ class TestApprovalServiceIdempotency:
         assert len(approvals_b.scalars().all()) == 1
 
 
-
 class TestApprovalServicePolicyViolations:
     async def test_policy_violation_raises_value_error(
         self,
@@ -355,9 +352,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
 
-        with pytest.raises(
-            PolicyViolationError, match="cannot approve their own task"
-        ):
+        with pytest.raises(PolicyViolationError, match="cannot approve their own task"):
             await service.approve(
                 task=task,
                 contract=_make_contract(),
@@ -420,8 +415,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
 
         entries = await _audit_rows_for_task(db_session, task.id)
         assert any(
-            e.event_type == "approval_rejected"
-            and "violations" in e.payload
+            e.event_type == "approval_rejected" and "violations" in e.payload
             for e in entries
         )
 
@@ -516,9 +510,7 @@ class TestApprovalServiceSelfApprovalPrevention:
         service = ApprovalService(db=db_session)
         task = await _make_task(db_session, TaskState.PROPOSED)
         # Simulate the proposer attempting to approve their own task.
-        with pytest.raises(
-            PolicyViolationError, match="cannot approve their own task"
-        ):
+        with pytest.raises(PolicyViolationError, match="cannot approve their own task"):
             await service.approve(
                 task=task,
                 contract=_make_contract(),

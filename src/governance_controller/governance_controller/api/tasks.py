@@ -26,6 +26,7 @@ def _is_task_id_duplicate_error(exc: IntegrityError) -> bool:
     msg = str(orig) if orig else str(exc)
     return ("task_pkey" in msg or "task." in msg) and "UNIQUE" in msg.upper()
 
+
 router = APIRouter(tags=["tasks"])
 
 

@@ -208,8 +208,6 @@ for _stmt in (
         AuditLog.__table__,  # type: ignore[attr-defined]
         "after_create",
         _stmt.execute_if(
-            dialect=(
-                "postgresql" if _stmt in _POSTGRES_STMTS else "sqlite"
-            )
+            dialect=("postgresql" if _stmt in _POSTGRES_STMTS else "sqlite")
         ),
     )

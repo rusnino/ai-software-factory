@@ -62,9 +62,7 @@ class PlaneClient:
         """Get a project by ID."""
         project_id = project_id or self.project_id
         async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/")
-            )
+            response = await client.get(self._url(f"/projects/{project_id}/"))
             self._raise_for_status(response)
             return cast(dict[str, Any], response.json())
 
@@ -197,9 +195,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         async with self._client() as client:
             response = await client.get(
-                self._url(
-                    f"/projects/{project_id}/issues/{issue_id}/dependencies/"
-                )
+                self._url(f"/projects/{project_id}/issues/{issue_id}/dependencies/")
             )
             self._raise_for_status(response)
             return cast(dict[str, Any], response.json())
@@ -211,9 +207,7 @@ class PlaneClient:
         """List states available in a project."""
         project_id = project_id or self.project_id
         async with self._client() as client:
-            response = await client.get(
-                self._url(f"/projects/{project_id}/states/")
-            )
+            response = await client.get(self._url(f"/projects/{project_id}/states/"))
             self._raise_for_status(response)
             return cast(dict[str, Any], response.json())
 

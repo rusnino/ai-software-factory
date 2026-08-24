@@ -98,9 +98,7 @@ async def test_post_approvals_rejects_oversized_body_without_content_length(
 async def test_disconnect_mid_oversized_body_does_not_spin(
     async_client: AsyncClient,
 ) -> None:
-    body = _json.dumps(
-        {"type": "x", "payload": "y" * (70 * 1024)}
-    ).encode()
+    body = _json.dumps({"type": "x", "payload": "y" * (70 * 1024)}).encode()
 
     # Build a generator that yields the first chunk and then a disconnect,
     # simulating a client that abandons the stream before finishing the body.
@@ -132,9 +130,7 @@ async def test_disconnect_mid_oversized_body_does_not_spin(
     middleware = WriteBodySizeLimitMiddleware(app)
     import asyncio
 
-    await asyncio.wait_for(
-        middleware(scope, _receive, _send), timeout=2.0
-    )
+    await asyncio.wait_for(middleware(scope, _receive, _send), timeout=2.0)
 
     # We should have bailed early and never sent an HTTP response.
     assert len(sent) == 0

@@ -1,6 +1,5 @@
 """Tests for the Plane CE HTTP client."""
 
-
 import pytest
 
 from governance_controller.adapters.plane_client import PlaneClient, PlaneClientError

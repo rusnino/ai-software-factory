@@ -434,9 +434,7 @@ def _is_forbidden_wrapper(argv: list[str]) -> bool:
 
 def _is_privilege_escalation(argv: list[str]) -> bool:
     """Return True if any token is a known privilege-escalation command."""
-    return any(
-        _base_command(token) in _FORBIDDEN_PRIVILEGE_COMMANDS for token in argv
-    )
+    return any(_base_command(token) in _FORBIDDEN_PRIVILEGE_COMMANDS for token in argv)
 
 
 def _is_docker_socket_command(argv: list[str]) -> bool:
@@ -528,8 +526,10 @@ def _has_git_clean_destructive(argv: list[str]) -> bool:
     for token in argv[2:]:
         if token in {"-f", "--force", "-x", "-d"}:
             return True
-        if token.startswith("-") and len(token) > 1 and any(
-            ch in token for ch in "fxd"
+        if (
+            token.startswith("-")
+            and len(token) > 1
+            and any(ch in token for ch in "fxd")
         ):
             return True
     return False
@@ -611,10 +611,7 @@ def _is_recursive_force_rm(argv: list[str]) -> bool:
 def _is_destructive_command(argv: list[str]) -> bool:
     """Return True if *argv* looks like a destructive file operation."""
     return bool(
-        any(
-            _base_command(token) in _FORBIDDEN_DESTRUCTIVE_COMMANDS
-            for token in argv
-        )
+        any(_base_command(token) in _FORBIDDEN_DESTRUCTIVE_COMMANDS for token in argv)
         or _is_recursive_force_rm(argv)
         or _is_dd_to_device(argv)
         or _has_find_dangerous_action(argv)
@@ -666,8 +663,7 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
 
     if _is_forbidden_wrapper(argv):
         local_violations.append(
-            f"Command uses a wrapper/interpreter that can hide payloads: "
-            f"{command!r}"
+            f"Command uses a wrapper/interpreter that can hide payloads: {command!r}"
         )
     elif not _is_allowed_argv0(argv):
         local_violations.append(
@@ -675,9 +671,7 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
         )
 
     if _is_privilege_escalation(argv):
-        local_violations.append(
-            f"Command contains privilege escalation: {command!r}"
-        )
+        local_violations.append(f"Command contains privilege escalation: {command!r}")
 
     if _is_destructive_command(argv):
         local_violations.append(
@@ -727,8 +721,7 @@ def _validate_command_against_profile(
     # Cross-check inferred destructive shell usage against profile.
     if _is_destructive_command(argv) and profile.security.destructive_shell == "deny":
         violations.append(
-            "Command is destructive but profile denies "
-            f"destructive_shell: {command!r}"
+            f"Command is destructive but profile denies destructive_shell: {command!r}"
         )
 
     return violations
@@ -774,9 +767,7 @@ def _validate_verification_commands(
 
     for command in commands:
         if isinstance(command, str):
-            violations.extend(
-                _validate_command_against_profile(command, profile)
-            )
+            violations.extend(_validate_command_against_profile(command, profile))
 
     return violations
 

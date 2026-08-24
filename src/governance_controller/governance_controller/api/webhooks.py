@@ -240,6 +240,4 @@ async def _revert_plane_state(
     # the state list; as a pragmatic fallback we comment the reason. Failures
     # are swallowed so Plane projection errors do not mask the HTTP response.
     with contextlib.suppress(Exception):
-        await client.add_comment(
-            task_id, f"Controller rejected state change: {reason}"
-        )
+        await client.add_comment(task_id, f"Controller rejected state change: {reason}")

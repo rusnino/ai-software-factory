@@ -31,9 +31,7 @@ def _make_idempotency_key(
     try:
         parsed = datetime.fromisoformat(timestamp)
     except ValueError as exc:
-        raise ValueError(
-            f"Invalid timestamp format: {timestamp}"
-        ) from exc
+        raise ValueError(f"Invalid timestamp format: {timestamp}") from exc
     rounded = parsed.replace(microsecond=0)
     if rounded.tzinfo is None:
         rounded = rounded.replace(tzinfo=UTC)
@@ -50,9 +48,7 @@ async def submit_approval(
     payload: ApprovalRequest,
     db: AsyncSession = Depends(get_db),
     approval_service: ApprovalService = Depends(get_approval_service),
-    idempotency_key: str | None = Header(
-        default=None, alias="Idempotency-Key"
-    ),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> ApprovalResponse:
     """Single authoritative approval endpoint.
 

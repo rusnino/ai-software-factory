@@ -19,22 +19,28 @@ class MemoryPlaneAdapter(PlaneAdapter):
         self.updates: list[dict[str, object]] = []
 
     def sync_task_state(self, task_id: str, state: str) -> None:
-        self.updates.append({
-            "op": "sync_task_state",
-            "task_id": task_id,
-            "state": state,
-        })
+        self.updates.append(
+            {
+                "op": "sync_task_state",
+                "task_id": task_id,
+                "state": state,
+            }
+        )
 
     def sync_task_fields(self, task_id: str, fields: dict[str, object]) -> None:
-        self.updates.append({
-            "op": "sync_task_fields",
-            "task_id": task_id,
-            "fields": fields,
-        })
+        self.updates.append(
+            {
+                "op": "sync_task_fields",
+                "task_id": task_id,
+                "fields": fields,
+            }
+        )
 
     def add_comment(self, task_id: str, text: str) -> None:
-        self.updates.append({
-            "op": "add_comment",
-            "task_id": task_id,
-            "text": text,
-        })
+        self.updates.append(
+            {
+                "op": "add_comment",
+                "task_id": task_id,
+                "text": text,
+            }
+        )

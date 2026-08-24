@@ -36,9 +36,7 @@ class TelegramAdapter:
         configured_secret = secret_token or settings.telegram_webhook_secret_token
         self.secret_token = configured_secret if configured_secret else None
 
-    def authenticate_update(
-        self, *, secret_token_header: str | None = None
-    ) -> None:
+    def authenticate_update(self, *, secret_token_header: str | None = None) -> None:
         """Validate the Telegram secret-token header when configured.
 
         Telegram sends the configured ``secret_token`` in the
@@ -49,9 +47,7 @@ class TelegramAdapter:
         """
         if self.secret_token is None:
             return
-        if not hmac.compare_digest(
-            secret_token_header or "", self.secret_token
-        ):
+        if not hmac.compare_digest(secret_token_header or "", self.secret_token):
             raise TelegramWebhookAuthError("Invalid or missing Telegram secret token")
 
     @staticmethod

@@ -171,9 +171,7 @@ class TestPhase1Smoke:
 
         # Audit log assertions for key transitions.
         audit_result = await client_db_session.execute(
-            select(AuditLog)
-            .where(AuditLog.task_id == task_id)
-            .order_by(AuditLog.id)
+            select(AuditLog).where(AuditLog.task_id == task_id).order_by(AuditLog.id)
         )
         audit_entries = audit_result.scalars().all()
         assert len(audit_entries) > 0
@@ -189,8 +187,7 @@ class TestPhase1Smoke:
 
         state_changes = [e for e in audit_entries if e.event_type == "state_change"]
         assert any(
-            e.payload.get("new_state") == TaskState.RUNNING.value
-            for e in state_changes
+            e.payload.get("new_state") == TaskState.RUNNING.value for e in state_changes
         )
 
         exec_start_entries = [

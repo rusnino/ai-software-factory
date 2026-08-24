@@ -84,9 +84,7 @@ class TestApprovalConcurrency:
 
         # Session A reads the task but does not commit yet.
         session_a = local_session()
-        task_a = await session_a.scalar(
-            select(Task).where(Task.id == "task-stale")
-        )
+        task_a = await session_a.scalar(select(Task).where(Task.id == "task-stale"))
         assert task_a is not None
         assert task_a.state == TaskState.PLAN_APPROVED
         assert task_a.version == 0
@@ -94,9 +92,7 @@ class TestApprovalConcurrency:
         # Session B approves and commits first.
         async with local_session() as session_b:
             service_b = ApprovalService(db=session_b, executor=fake_executor)
-            task_b = await session_b.scalar(
-                select(Task).where(Task.id == "task-stale")
-            )
+            task_b = await session_b.scalar(select(Task).where(Task.id == "task-stale"))
             assert task_b is not None
             result = await service_b.approve(
                 task=task_b,
@@ -165,9 +161,7 @@ class TestApprovalConcurrency:
 
         async with local_session() as db:
             service = ApprovalService(db=db, executor=fake_executor)
-            task = await db.scalar(
-                select(Task).where(Task.id == "task-exec-fail")
-            )
+            task = await db.scalar(select(Task).where(Task.id == "task-exec-fail"))
             assert task is not None
             # Let the service raise and the session rollback naturally; do not
             # manually commit -- that is production code's responsibility.
@@ -183,9 +177,7 @@ class TestApprovalConcurrency:
                 )
 
         async with local_session() as check:
-            task = await check.scalar(
-                select(Task).where(Task.id == "task-exec-fail")
-            )
+            task = await check.scalar(select(Task).where(Task.id == "task-exec-fail"))
             assert task is not None
             assert task.state == TaskState.FAILED
             assert task.version == 3
@@ -274,9 +266,7 @@ class TestApprovalConcurrency:
             assert len(executions.scalars().all()) == 1
             assert len(approvals.scalars().all()) == 1
 
-            task = await check.scalar(
-                select(Task).where(Task.id == "task-concurrent")
-            )
+            task = await check.scalar(select(Task).where(Task.id == "task-concurrent"))
             assert task is not None
             assert task.state == TaskState.RUNNING
 
@@ -325,9 +315,7 @@ class TestApprovalConcurrency:
 
         # Query from a fresh session to ensure state is truly persisted.
         async with local_session() as check:
-            task = await check.scalar(
-                select(Task).where(Task.id == "task-get-db-fail")
-            )
+            task = await check.scalar(select(Task).where(Task.id == "task-get-db-fail"))
             assert task is not None
             assert task.state == TaskState.FAILED
             assert task.version == 3
@@ -376,9 +364,7 @@ class TestApprovalConcurrency:
         # Loser: start a session and read the task BEFORE the winner commits,
         # so session_a's identity map still holds PLAN_APPROVED.
         session_a = local_session()
-        task_a = await session_a.scalar(
-            select(Task).where(Task.id == "task-ready-cas")
-        )
+        task_a = await session_a.scalar(select(Task).where(Task.id == "task-ready-cas"))
         assert task_a is not None
         assert task_a.state == TaskState.PLAN_APPROVED
         assert task_a.version == 0
@@ -405,9 +391,7 @@ class TestApprovalConcurrency:
         service_a = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
         try:
-            with pytest.raises(
-                ValueError, match="Concurrent modification detected"
-            ):
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
                 async with asynccontextmanager(get_db)() as db:
                     service_a.db = db
                     await service_a.approve(
@@ -423,9 +407,7 @@ class TestApprovalConcurrency:
             await session_a.close()
 
         async with local_session() as check:
-            task = await check.scalar(
-                select(Task).where(Task.id == "task-ready-cas")
-            )
+            task = await check.scalar(select(Task).where(Task.id == "task-ready-cas"))
             assert task is not None
             assert task.state == TaskState.RUNNING
             assert task.version == 3
@@ -485,15 +467,11 @@ class TestApprovalConcurrency:
                 return False
             return await original(db, task, target_state)
 
-        monkeypatch.setattr(
-            StateMachine, "atomic_transition", staticmethod(_patched)
-        )
+        monkeypatch.setattr(StateMachine, "atomic_transition", staticmethod(_patched))
 
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
-        with pytest.raises(
-            ValueError, match="Concurrent modification detected"
-        ):
+        with pytest.raises(ValueError, match="Concurrent modification detected"):
             async with asynccontextmanager(get_db)() as db:
                 service.db = db
                 task = await db.scalar(
@@ -518,17 +496,13 @@ class TestApprovalConcurrency:
             assert task.state == TaskState.EXEC_APPROVED
 
             audits = await check.execute(
-                select(AuditLog).where(
-                    AuditLog.task_id == "task-ready-cas-internal"
-                )
+                select(AuditLog).where(AuditLog.task_id == "task-ready-cas-internal")
             )
             events = [a.event_type for a in audits.scalars().all()]
             assert "concurrent_modification" in events
 
             executions = await check.execute(
-                select(Execution).where(
-                    Execution.task_id == "task-ready-cas-internal"
-                )
+                select(Execution).where(Execution.task_id == "task-ready-cas-internal")
             )
             assert len(executions.scalars().all()) == 0
 
@@ -565,21 +539,15 @@ class TestApprovalConcurrency:
                 return False
             return await original(db, task, target_state)
 
-        monkeypatch.setattr(
-            StateMachine, "atomic_transition", staticmethod(_patched)
-        )
+        monkeypatch.setattr(StateMachine, "atomic_transition", staticmethod(_patched))
 
         service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
 
-        with pytest.raises(
-            ValueError, match="Concurrent modification detected"
-        ):
+        with pytest.raises(ValueError, match="Concurrent modification detected"):
             async with asynccontextmanager(get_db)() as db:
                 service.db = db
                 task = await db.scalar(
-                    select(Task).where(
-                        Task.id == "task-running-cas-internal"
-                    )
+                    select(Task).where(Task.id == "task-running-cas-internal")
                 )
                 assert task is not None
                 await service.approve(
@@ -600,9 +568,7 @@ class TestApprovalConcurrency:
             assert task.state == TaskState.READY
 
             audits = await check.execute(
-                select(AuditLog).where(
-                    AuditLog.task_id == "task-running-cas-internal"
-                )
+                select(AuditLog).where(AuditLog.task_id == "task-running-cas-internal")
             )
             events = [a.event_type for a in audits.scalars().all()]
             assert "concurrent_modification" in events

@@ -156,9 +156,7 @@ class TestTaskApi:
                 "(sqlite3.IntegrityError) "
                 "UNIQUE constraint failed: project_profiles.project_id",
                 params=None,
-                orig=Exception(
-                    "UNIQUE constraint failed: project_profiles.project_id"
-                ),
+                orig=Exception("UNIQUE constraint failed: project_profiles.project_id"),
             )
 
         monkeypatch.setattr(TaskService, "create", _failing_create)

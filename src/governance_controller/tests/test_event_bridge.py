@@ -308,9 +308,7 @@ class TestEventBridgeTransitions:
         )
         entries = rows.scalars().all()
         assert len(entries) == 2
-        assert all(
-            e.event_type == "macro_agent_landing:completed" for e in entries
-        )
+        assert all(e.event_type == "macro_agent_landing:completed" for e in entries)
 
     async def test_distinct_event_id_is_not_deduplicated(
         self,
@@ -409,19 +407,13 @@ class TestEventBridgeTransitions:
             select(AuditLog).where(AuditLog.task_id == task.id)
         )
         entries = rows.scalars().all()
-        assert any(
-            e.event_type == "verification_failed"
-            for e in entries
-        )
+        assert any(e.event_type == "verification_failed" for e in entries)
         verification_failed = next(
             e for e in entries if e.event_type == "verification_failed"
         )
         assert verification_failed.actor == "system"
         assert verification_failed.source == "verification_service"
-        checks = {
-            c["name"]: c
-            for c in verification_failed.payload["checks"]
-        }
+        checks = {c["name"]: c for c in verification_failed.payload["checks"]}
         assert checks["required:always_fail"]["status"] == "failed"
 
         # GAP-090: terminal failure must record an alert_human audit row.
@@ -479,9 +471,7 @@ class TestEventBridgeTransitions:
         verifier = VerificationService(executor=mock_executor)
 
         event = _make_event("landing:completed", task.id)
-        await EventBridge.handle(
-            db_session, event, verification_service=verifier
-        )
+        await EventBridge.handle(db_session, event, verification_service=verifier)
 
         assert task.state == TaskState.RUNNING
         assert task.execution_attempts == 1
@@ -504,9 +494,7 @@ class TestEventBridgeTransitions:
 
         # GAP-077 residual: a replay of the same landing:completed event must
         # not re-enter the retry path (no second executor.start call).
-        await EventBridge.handle(
-            db_session, event, verification_service=verifier
-        )
+        await EventBridge.handle(db_session, event, verification_service=verifier)
         assert task.state == TaskState.RUNNING
         assert task.execution_attempts == 1
         mock_executor.start.assert_awaited_once()
@@ -573,9 +561,7 @@ class TestEventBridgeTransitions:
 
         # First delivery: retry executor.start fails.
         with pytest.raises(RuntimeError, match="retry macro-agent start failed"):
-            await EventBridge.handle(
-                db_session, event, verification_service=verifier
-            )
+            await EventBridge.handle(db_session, event, verification_service=verifier)
 
         assert task.state == TaskState.FAILED
         assert task.execution_attempts == 1
@@ -583,9 +569,7 @@ class TestEventBridgeTransitions:
 
         # Second delivery of the same event: must be deduplicated, so no
         # second executor.start call and execution_attempts stays at 1.
-        await EventBridge.handle(
-            db_session, event, verification_service=verifier
-        )
+        await EventBridge.handle(db_session, event, verification_service=verifier)
         assert task.state == TaskState.FAILED
         assert task.execution_attempts == 1
         assert calls == 1
@@ -700,19 +684,13 @@ class TestEventBridgeTransitions:
             select(AuditLog).where(AuditLog.task_id == task.id)
         )
         entries = rows.scalars().all()
-        assert any(
-            e.event_type == "verification_passed"
-            for e in entries
-        )
+        assert any(e.event_type == "verification_passed" for e in entries)
         verification_passed = next(
             e for e in entries if e.event_type == "verification_passed"
         )
         assert verification_passed.actor == "system"
         assert verification_passed.source == "verification_service"
-        checks = {
-            c["name"]: c
-            for c in verification_passed.payload["checks"]
-        }
+        checks = {c["name"]: c for c in verification_passed.payload["checks"]}
         assert checks["required:always_pass"]["status"] == "passed"
 
     async def test_agent_review_transition_committed_before_verify(
@@ -943,9 +921,7 @@ class TestEventBridgeTransitions:
 
         event = _make_event("landing:completed", task.id)
         with pytest.raises(RuntimeError, match="verification exploded"):
-            await EventBridge.handle(
-                db_session, event, verification_service=verifier
-            )
+            await EventBridge.handle(db_session, event, verification_service=verifier)
 
         # Task never left AGENT_REVIEW and no dedup key was recorded.
         assert task.state == TaskState.AGENT_REVIEW
@@ -953,4 +929,3 @@ class TestEventBridgeTransitions:
             select(ProcessedEvent).where(ProcessedEvent.task_id == task.id)
         )
         assert processed.scalar_one_or_none() is None
-

@@ -23,11 +23,15 @@ def real_client() -> PlaneClient:
     workspace_slug = os.environ.get("GC_PLANE_WORKSPACE_SLUG", "")
     project_id = os.environ.get("GC_PLANE_PROJECT_ID", "")
 
-    missing = [k for k, v in {
-        "GC_PLANE_API_TOKEN": api_token,
-        "GC_PLANE_WORKSPACE_SLUG": workspace_slug,
-        "GC_PLANE_PROJECT_ID": project_id,
-    }.items() if not v]
+    missing = [
+        k
+        for k, v in {
+            "GC_PLANE_API_TOKEN": api_token,
+            "GC_PLANE_WORKSPACE_SLUG": workspace_slug,
+            "GC_PLANE_PROJECT_ID": project_id,
+        }.items()
+        if not v
+    ]
     if missing:
         pytest.skip(f"missing Plane config: {', '.join(missing)}")
 
@@ -44,9 +48,7 @@ async def test_list_projects(real_client: PlaneClient) -> None:
     """Can list projects in the configured workspace."""
     result = await real_client.list_projects()
     assert "results" in result
-    assert any(
-        p["id"] == real_client.project_id for p in result["results"]
-    )
+    assert any(p["id"] == real_client.project_id for p in result["results"])
 
 
 @pytest.mark.asyncio

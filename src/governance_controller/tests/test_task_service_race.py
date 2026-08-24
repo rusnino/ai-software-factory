@@ -61,4 +61,3 @@ class TestTaskServiceProfileRace:
             )
         )
         assert row is not None
-

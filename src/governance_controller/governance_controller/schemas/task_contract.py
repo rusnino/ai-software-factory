@@ -41,3 +41,4 @@ class TaskContract(BaseModel):
     forbidden_paths: list[str] = []
     approval_required: bool = True
     completion_contract: CompletionContract | None = None
+    opentasks_dag: dict[str, Any] | None = None
