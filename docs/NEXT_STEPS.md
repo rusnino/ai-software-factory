@@ -2,18 +2,17 @@
 
 ## Current State
 
-**Gap tracking lives in GitHub Issues now** (see `AGENTS.md` §"Review Findings and Gap Tracking"). Use the live GitHub issue list rather than this file for the current open/closed state:
+**Phase 1 is complete.** All GitHub issues labeled `severity:critical` or
+`severity:high` are closed, the full test suite passes on SQLite and PostgreSQL,
+and `ruff`/`mypy governance_controller` are clean.
+
+Gap tracking lives in GitHub Issues (see `AGENTS.md` §"Review Findings and Gap
+Tracking"). Use the live issue list for current state:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
-gh issue list --repo rusnino/ai-software-factory --state closed --label phase-1
-```
-
-Closed review round summaries are available via GitHub Issues rather than a
-static transcript:
-
-```bash
-gh issue list --repo rusnino/ai-software-factory --state closed --label phase-1
+gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
+gh issue list --repo rusnino/ai-software-factory --state open --label severity:high
 ```
 
 Architectural summary: command validation now uses an explicit `argv[0]`
@@ -24,7 +23,8 @@ destructive flags on allowlisted binaries, command-execution primitives such as
 flags, and removal of unauditable network/package-manager tools (`curl`,
 `wget`, `apt`, `apt-get`, `dpkg`).
 
-Test status: **passing** on SQLite and PostgreSQL, `ruff` clean, `mypy governance_controller` clean.
+Test status: **288 passed / 3 skipped** on SQLite, **291 passed** on PostgreSQL,
+`ruff` clean, `mypy governance_controller` clean.
 
 Implemented components:
 
