@@ -30,9 +30,15 @@ Started: 2026-08-24
   - No-op when Plane is not configured; unit-tested with fake client.
   - Verified: 311 passed (SQLite), 314 passed (PostgreSQL), ruff + mypy clean.
 
+- **Task 4** (commit `44d08fa`): macro-agent service scaffold
+  - New package `macro_agent_service` with FastAPI endpoints:
+    `POST /runs`, `GET /runs/{id}`, `POST /runs/{id}/cancel`, `GET /runs/{id}/collect`.
+  - In-memory `RunStore` with `RunRequest`/`Response`/`Status`/`Result` models.
+  - Verified: 5 passed, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 4: macro-agent service scaffold
+- Task 5: Real macro-agent executor client
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
