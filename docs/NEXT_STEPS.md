@@ -91,6 +91,13 @@ Priority: integrate with real external systems and harden execution orchestratio
 6. **Advanced isolation**
    - Docker-based agent sandbox.
    - Evaluate Firecracker / Kata for Phase 3.
+   - *Note: `SPEC-10 §10.3` already assigns Docker sandboxing to Phase 3, not Phase 2 — this
+     candidate is scoped but not scheduled early.* Sandboxing `VerificationService`'s command
+     execution specifically (as opposed to macro-agent's own task-execution sandbox) is scoped at
+     ~1.5-3 weeks solo-engineer effort, with the execution-backend architecture (Docker socket in
+     Controller vs. a dedicated sandbox-executor sidecar vs. delegating to macro-agent's own
+     sandbox) as the biggest open decision — see
+     `docs/research-verification-sandboxing-scope-2026-08-24.md`.
 
 7. **Security hardening**
    - Authentication/authorization middleware.
