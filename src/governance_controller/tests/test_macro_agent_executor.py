@@ -144,3 +144,35 @@ async def test_client_sends_auth_secret(
     request = httpx_mock.get_request()
     assert request is not None
     assert request.headers["X-Macro-Agent-Secret"] == "secret"
+
+
+@pytest.mark.asyncio
+async def test_executor_feedback_sends_payload_to_run_id(
+    task_contract: TaskContract,
+) -> None:
+    client = AsyncMock(spec=MacroAgentClient)
+    client.feedback.return_value = {"feedback_count": 1}
+    executor = MacroAgentExecutor(client=client)
+
+    feedback = {"verification_report": {"passed": False}, "reason": "failed check"}
+    result = await executor.feedback("run-abc", feedback)
+
+    assert result["feedback_count"] == 1
+    client.feedback.assert_awaited_once_with("run-abc", feedback)
+
+
+@pytest.mark.asyncio
+async def test_client_feedback_posts_to_feedback_endpoint(
+    httpx_mock: pytest_httpx.HTTPXMock,
+) -> None:
+    httpx_mock.add_response(json={"feedback_count": 1})
+    client = MacroAgentClient(base_url="https://example.com")
+
+    result = await client.feedback(
+        "run-abc", {"verification_report": {"passed": False}}
+    )
+
+    assert result["feedback_count"] == 1
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert request.url.path == "/runs/run-abc/feedback"

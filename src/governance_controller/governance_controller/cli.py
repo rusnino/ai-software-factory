@@ -73,6 +73,11 @@ def reconcile(
         "",
         help="Override GC_PLANE_BASE_URL for this run.",
     ),
+    fix: bool = typer.Option(
+        False,
+        "--fix/--apply",
+        help="Apply state fixes back to Plane.",
+    ),
 ) -> None:
     """List Plane vs Controller divergences for a project.
 
@@ -99,6 +104,7 @@ def reconcile(
             report = await service.reconcile(
                 controller_tasks=controller_tasks,
                 project_id=project_id,
+                fix=fix,
             )
         typer.echo(f"Checked {report.checked} tasks")
         for div in report.divergences:

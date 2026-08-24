@@ -84,13 +84,13 @@ Derived from SPEC-01 through SPEC-10 and ADR-001.
 | ID | Risk | Mitigation | Source |
 |---|---|---|---|
 | RISK-01 | Plane CE cannot enforce workflow transitions | Governance Controller is authority | SPEC-04 |
-| RISK-02 | macro-agent is pre-1.0 | Pin version, abstraction layer, thin fork | SPEC-05 |
+| RISK-02 | macro-agent is pre-1.0 | Pin version, abstraction layer, thin fork; see `decisions/ADR-002-macro-agent-stub-vs-package.md` for current stub-vs-package decision | SPEC-05, ADR-002 |
 | RISK-03 | Event Bridge single point of failure | Healthcheck + fallback polling | SPEC-05 |
 | RISK-04 | Two sources of approvals (Plane and direct) | Single POST /approvals endpoint | SPEC-03 |
 | RISK-05 | Double DAG (Plane vs opentasks) divergence | Controller materializes Plane -> opentasks, reconciliation alerts | SPEC-05 |
 | RISK-06 | Claude-specific assumptions in macro-agent | Provider registry + AGENT_SPAWN_GAP analysis | SPEC-06 |
 | RISK-07 | Secrets leaked through prompts/logs | Scoped secrets, no secrets in prompts | SPEC-08 |
-| RISK-08 | Unclear macro-agent version stability | Track upstream, have rollback plan | SPEC-05 |
+| RISK-08 | Unclear macro-agent version stability | Track upstream, have rollback plan; see `decisions/ADR-002-macro-agent-stub-vs-package.md` | SPEC-05, ADR-002 |
 | RISK-09 | REQUIREMENTS.md may become out of sync with SPEC updates | Mandatory "update REQUIREMENTS.md" step after governance/plane/macro-agent SPEC changes | SPEC-03, SPEC-04, SPEC-05 |
 | RISK-10 | Naive webhook translation treats bulk/state changes as approvals | Translation conditions in SPEC-04 §4.3a + revert mechanism | SPEC-04 |
 | RISK-11 | Pre-execution approval chain incompatible with workflow-per-task model if Temporal is used as Governance core | Temporal rejected for Governance on Phase 1; revisit only as Execution layer component in Phase 3+ | ADR-001 |
