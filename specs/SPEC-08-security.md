@@ -39,6 +39,13 @@ Project Profile controls:
 - LLM gateway routing
 - CI callback URLs
 
+> **Phase 1 gap (#143):** `network_access` on the task contract is a
+> self-declared field. The policy engine compares the declared value against
+> the project profile's `security.network` setting, but it does **not** parse
+> individual command strings to enforce egress domains or block cloud-metadata
+> endpoints such as `169.254.169.254`. Real egress enforcement is deferred to
+> later phases with sandbox-level network controls.
+
 ## 8.6 Secret Management
 
 - Use dedicated secret store (e.g., Dagger secrets, HashiCorp Vault, Docker secrets).

@@ -21,14 +21,27 @@ validates every ``Check.command`` before approval. The checks below are applied 
 5. Reject commands that reference Docker socket paths
    (``docker.sock``, ``/var/run/docker.sock``) unless the project profile
    permits it.
-6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell``
-   in the ExecutionConfig unless the corresponding project profile security
-   field explicitly allows it.
+    6. Reject any command that sets ``uses_docker_socket`` or ``destructive_shell``
+       in the ExecutionConfig unless the corresponding project profile security
+       field explicitly allows it.
+
+    7. Reject network fetch tools whose payloads cannot be audited at the argv
+       level (``curl`` and ``wget`` removed in Phase 1; see #142).
 
 This is an explicit allowlist approach: if a command matches any forbidden
 pattern, approval is denied with a human-readable violation. Commands that are
 meant to be high-privilege must be declared by the task proposer and allowed by
 the project profile before they can pass policy.
+
+.. rubric:: Known Phase 1 limitations
+
+- ``network_access`` is a self-declared field. The engine compares the declared
+  value against ``profile.security.network`` but does not parse command text to
+  enforce egress domains or block cloud-metadata endpoints such as
+  ``169.254.169.254`` (#143).
+- Build tools (``make``, ``npm``, ``pip``, ``cargo``, etc.) execute code declared
+  in the worktree files they read. This is an inherent, argv-level-unmitigable
+  risk that can only be contained by the execution sandbox (#147).
 """
 
 from __future__ import annotations
