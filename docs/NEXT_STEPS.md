@@ -3,15 +3,21 @@
 ## Current State
 
 **Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
-**Phase 2 is NOT gate-clean.** The fix round that landed after the first review closed 12 of 13
-issues genuinely, but independent re-verification found `#152`'s fix (the "parity" OPA Rego policy)
-does not actually work — the shipped `governance.rego` fails to parse in a real OPA server (`opa
-check` reports a syntax error), is missing the `#141` `sed` RCE check, and is architecturally a
-denylist rather than a mirror of the embedded engine's allowlist. `#152` has been reopened with the
-full evidence. A separate small `#164` bundles three minor residuals (no `--fix` flag on the
-`reconcile` CLI, zero test coverage on the new macro-agent feedback path, a missing RISK
-cross-reference) that don't reopen their original issues but are worth closing. The live issue list
-is the authoritative source of truth; run the queries below before declaring anything done.
+**Phase 2 is NOT gate-clean — 23 open `phase-2` issues as of 2026-08-24, including 3
+`severity:critical` and 5 `severity:high`.** A first review round (13 issues) mostly got fixed for
+real, except `#152` (OPA Rego policy doesn't parse — reopened). A follow-up **task-by-task review of
+all 10 Phase 2 SDD tasks** then found substantially more, including three new CRITICAL findings, all
+live-reproduced against the real running Plane CE and real macro-agent service stub:
+- `#165`: the webhook's shared-secret fix (`#154`) authenticates the *request*, not the *content* —
+  `actor` is still a self-declared string, so self-approval is trivially bypassed by respelling it.
+- `#166`: reconciliation compares a raw Plane state UUID against a human-readable name — every
+  correctly-synced task is flagged as a false-positive divergence.
+- `#167`: the Controller's own `MacroAgentClient` never sends the auth secret `#162` added — turning
+  that secret on breaks every real execution start.
+
+Do not treat any Phase 2 component as safe to rely on until the live issue list is clean. This file
+will not attempt to itemize the remaining 20 by number here (see `#136`/`#145`/`#161` for why that
+approach keeps going stale) — query live:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
@@ -35,10 +41,13 @@ Plane dependencies with guarded cycle detection; a reconciliation service/CLI th
 DB state and can fix Plane state divergences; authenticated intake adapters (Telegram/Email/generic)
 creating HTML-escaped Plane drafts; verification failure feedback to macro-agent and terminal
 alerting; optional OPA policy backend whose network-level fail-closed handling is fixed (`#158`)
-but whose shipped "parity" Rego policy does not actually work (`#152`, reopened — the file fails to
-parse in real OPA, is missing the `#141` sed check, and isn't an allowlist). Most Phase 2 review
-findings were closed with code or documented decisions; `#152` and the small `#164` follow-ups
-were not.
+but whose shipped "parity" Rego policy does not actually work (`#152`, reopened). A task-by-task
+review (2026-08-24) then found the webhook's self-approval guard is separately forgeable (`#165`,
+independent of `#152`/`#154`), reconciliation's state comparison is broken against real Plane
+(`#166`), and the Controller can't actually talk to macro-agent once `#162`'s auth is turned on
+(`#167`) — plus 20 more HIGH/MEDIUM/LOW findings (`#168`-`#185`). Every component exists and its own
+unit tests pass; that is not evidence any of it is correct against real Plane/macro-agent behavior,
+which the unit tests' mocks don't reproduce. Query the live issue list, not this paragraph.
 
 Test status: **351 passed / 5 skipped** on SQLite, **354 passed / 2 skipped** on PostgreSQL,
 `ruff` clean, `mypy governance_controller` clean (66 source files); `macro_agent_service` tests
@@ -87,17 +96,21 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`: real Plane sync,
 macro-agent client/service scaffold, opentasks materializer, reconciliation, intake adapter,
-verification feedback + alerting, and optional OPA backend. The 2026-08-24 review round opened 13
-issues; 12 were genuinely closed on independent re-verification. `#152` was reopened — its "parity"
-OPA Rego policy doesn't parse in a real OPA server, is missing the `#141` sed check, and isn't an
-allowlist. **Phase 2 is NOT gate-clean.** Do not enable `GC_OPA_BASE_URL` against the shipped policy
-outside a test until `#152` closes for real.
+verification feedback + alerting, and optional OPA backend. Two review rounds followed: the first
+(13 issues) got 12 genuinely fixed, `#152` reopened. A second, task-by-task review of all 10 SDD
+tasks against the live Plane CE / macro-agent stub found 21 more issues (3 CRITICAL, 4 HIGH, 10
+MEDIUM, 4 LOW) — every one of them live-reproduced, not inferred from reading code. **Phase 2 is NOT
+gate-clean and should not be treated as such until the live issue list — 23 open `phase-2` issues as
+of this writing — is empty.** In particular: do not enable `GC_OPA_BASE_URL` (`#152`), do not rely on
+the Plane webhook's self-approval guard (`#165`), do not trust `reconcile`'s output (`#166`), and do
+not set `MACRO_AGENT_SERVICE_API_SECRET` without also fixing the Controller's client (`#167`).
 
-## Immediate Next Step: Close #152 and #164, Then Phase 3
+## Immediate Next Step: Close the 23 Open phase-2 Issues, Then Phase 3
 
-Close the reopened `#152` (OPA parity policy) and the small `#164` follow-ups before treating Phase
-2 as done. Once the live issue list genuinely has no open `phase-2` issues, Phase 3 scope (from
-SPEC-10 §10.3) is:
+Prioritize the 3 CRITICAL (`#165` webhook self-approval bypass, `#166` reconciliation false
+positives, `#167` macro-agent client auth breakage) and 5 HIGH (`#152`, `#168`-`#171`) issues first.
+Once the live issue list genuinely has no open `phase-2` issues, Phase 3 scope (from SPEC-10 §10.3)
+is:
 
 - Docker sandboxing for verification/execution. See
   `docs/research-verification-sandboxing-scope-2026-08-24.md`.

@@ -56,22 +56,27 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-24): implemented, NOT gate-clean.** All originally-scoped items and the extended
-SDD task list (Plane client/webhook/projection, macro-agent service/client, opentasks materializer,
-reconciliation, intake adapter, verification feedback + alerting, OPA backend) have landed in `main`
-with passing unit tests. The first adversarial review round opened 13 issues, including one
-`severity:critical` (`#154`) and four `severity:high` (`#152`, `#155`, `#156`, `#157`). Twelve were
-genuinely closed on independent re-verification — but `#152`'s fix does not actually work
-(`policies/opa/governance.rego` fails to parse in a real OPA server, is missing the `#141` sed
-check, and is a denylist rather than a mirror of the embedded engine's allowlist) and has been
-reopened. `#164` tracks three smaller residuals from otherwise-genuine fixes. Re-verify with the
-live issue list before starting Phase 3 or before ever setting `GC_OPA_BASE_URL` outside a test.
+**Status (2026-08-24): implemented, NOT gate-clean — 23 open `phase-2` issues.** All originally-
+scoped items and the extended SDD task list have landed in `main` with passing unit tests, but two
+review rounds found their unit tests don't reproduce real Plane CE / macro-agent-service behavior
+closely enough to catch what's actually wrong. Round 1 (13 issues) got 12 genuinely fixed; `#152`
+(OPA Rego policy doesn't parse) was reopened. Round 2 — a task-by-task review of all 10 SDD tasks
+against the live Plane CE stack and the real macro-agent stub — found 3 more CRITICAL issues, live-
+reproduced: `#165` (webhook self-approval bypass via an unauthenticated, spoofable `actor` field,
+independent of `#154`'s own fix), `#166` (reconciliation compares a raw Plane state UUID against a
+human-readable name — every synced task is a false-positive divergence), `#167` (the Controller's
+own `MacroAgentClient` never sends the auth secret `#162` added, so turning that secret on breaks
+every execution start) — plus 4 more HIGH, 10 MEDIUM, and 4 LOW findings (`#168`-`#185`). Re-verify
+with the live issue list before starting Phase 3, before setting `GC_OPA_BASE_URL`, and before
+relying on the webhook, reconciliation, or macro-agent-secret paths for anything real.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
-- [x] Build Plane adapter for bidirectional sync.
+- [ ] Build Plane adapter for bidirectional sync. *(read side works; write side — projection — is
+  never wired into the live transition path, `#168`; webhook accepts forgeable self-approval,
+  `#165`; state comparison for reconciliation is broken against real Plane, `#166`)*
 - [ ] Meta Orch integration: OpenCode + BMAD + OpenSpec. *(not started — intake→triage path exists,
   the decomposition/planning engine does not)*
-- [x] Intake adapter (Telegram/Email/API).
+- [x] Intake adapter (Telegram/Email/API). *(`/intake/telegram` still has no size cap, `#171`)*
 - [x] Idea Ingestion Service.
 - [ ] Human Triage queue in Plane. *(drafts land in Plane; no dedicated triage-queue view/workflow
   built beyond that)*
