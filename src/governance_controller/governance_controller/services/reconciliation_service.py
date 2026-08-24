@@ -116,9 +116,9 @@ class ReconciliationService:
         )
 
         try:
-            issues_response = await client.list_issues(
+            issues_response = await client.list_all_issues(
                 project_id=effective_project_id,
-                params={"page_size": 1000},
+                page_size=1000,
             )
             states_response = await client.list_states(
                 project_id=effective_project_id

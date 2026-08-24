@@ -44,6 +44,13 @@ class _FakePlaneClient:
         deps = self.dependencies.get(issue_id, [])
         return {"results": [{"related_issue": {"id": dep}} for dep in deps]}
 
+    async def list_all_issues(
+        self,
+        project_id: str | None = None,
+        page_size: int = 1000,
+    ) -> dict[str, Any]:
+        return {"results": self.issues}
+
     async def list_states(
         self,
         project_id: str | None = None,

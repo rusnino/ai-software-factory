@@ -200,6 +200,45 @@ class PlaneClient:
             self._raise_for_status(response)
             return cast(dict[str, Any], response.json())
 
+    async def list_all_issues(
+        self,
+        project_id: str | None = None,
+        page_size: int = 1000,
+    ) -> dict[str, Any]:
+        """List all issues in a project, following Plane pagination cursors.
+
+        Plane CE paginates list endpoints with ``next_cursor``. This method
+        keeps fetching pages until no next cursor remains and returns a single
+        merged response dict containing all ``results``.
+        """
+        project_id = project_id or self.project_id
+        all_results: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"page_size": page_size}
+        next_cursor: str | None = None
+        last_page: dict[str, Any] = {}
+
+        async with self._client() as client:
+            while True:
+                if next_cursor is not None:
+                    params["cursor"] = next_cursor
+                response = await client.get(
+                    self._url(f"/projects/{project_id}/issues/"),
+                    params=params,
+                )
+                self._raise_for_status(response)
+                page = cast(dict[str, Any], response.json())
+                last_page = page
+                items = page.get("results")
+                if isinstance(items, list):
+                    all_results.extend(items)
+                next_cursor = page.get("next_cursor")
+                if not next_cursor:
+                    break
+
+        merged = dict(last_page)
+        merged["results"] = all_results
+        return merged
+
     async def list_states(
         self,
         project_id: str | None = None,
