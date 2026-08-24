@@ -56,9 +56,16 @@ Started: 2026-08-24
   - Added `reconcile` CLI command and updated existing CLI tests.
   - Verified: 323 passed SQLite, 326 passed PostgreSQL, ruff + mypy clean.
 
+- **Task 8** (commit `ca831d2`): Intake adapter (Telegram + Email)
+  - `RawIdea`/`ClassifiedIdea` schemas and `EmailAdapter` for email parsing.
+  - `IdeaIngestionService` with rule-based classification and Plane draft creation.
+  - `POST /intake/telegram`, `/intake/email`, `/intake/idea` endpoints.
+  - Tests cover draft creation, spam filtering, auth, email, and generic idea intake.
+  - Verified: 328 passed SQLite, 331 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 8: Intake adapter (Telegram + Email)
+- Task 9: Verification failure feedback + terminal alerting
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
