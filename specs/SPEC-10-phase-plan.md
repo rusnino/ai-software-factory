@@ -56,12 +56,12 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-24): implemented, not gate-clean.** All originally-scoped items and the extended
+**Status (2026-08-24): implemented and gate-clean.** All originally-scoped items and the extended
 SDD task list (Plane client/webhook/projection, macro-agent service/client, opentasks materializer,
 reconciliation, intake adapter, verification feedback + alerting, OPA backend) have landed in `main`
 with passing unit tests. The first adversarial review round opened 13 issues, including one
-`severity:critical` (`#154`) and four `severity:high` (`#152`, `#155`, `#156`, `#157`). Do not treat
-Phase 2 as complete until that gate clears. The live GitHub issue list is authoritative.
+`severity:critical` (`#154`) and four `severity:high` (`#152`, `#155`, `#156`, `#157`); all were
+closed and the gate is clean. Re-verify with the live issue list before starting Phase 3.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync.
@@ -73,10 +73,6 @@ Phase 2 as complete until that gate clears. The live GitHub issue list is author
   built beyond that)*
 - [x] Optional: replace embedded Policy Engine with Open Policy Agent (OPA) as backend; Controller
   retains state machine, approval store, and audit log.
-
-Open issues from the 2026-08-24 review round that must close before Phase 2 is declared done:
-`#154` CRITICAL (Plane webhook auth), `#152`/`#155`/`#156`/`#157` HIGH, and the MEDIUM/LOW issues in
-`gh issue list --repo rusnino/ai-software-factory --state open --label phase-2`.
 
 ## 10.3 Phase 3 — Hardening and Runtime Diversity
 

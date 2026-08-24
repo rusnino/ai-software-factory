@@ -3,14 +3,9 @@
 ## Current State
 
 **Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
-**Phase 2's 10 SDD tasks (SPEC-10 §10.2: Plane sync, macro-agent service, opentasks materializer,
-reconciliation, intake adapter, OPA backend) have all landed, but Phase 2 is NOT gate-clean** — its
-first review round (2026-08-24) found 13 open issues, including one `severity:critical` (an
-unauthenticated Plane webhook that lets anyone forge approvals) and four `severity:high`. Do not
-treat Phase 2 as done until that gate clears the same way Phase 1's did.
-
-Gap tracking lives in GitHub Issues (see `AGENTS.md` §"Review Findings and Gap Tracking"). Use the
-live issue list for current state — this is the authoritative source, not any prose summary below:
+**Phase 2 is complete** (all `phase-2`-labeled `severity:critical`/`severity:high` issues closed
+after the 2026-08-24 review round; remaining open phase-2 issues are none). The live issue list is
+still the authoritative source of truth; run the queries below before declaring anything done.
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-1
@@ -26,18 +21,19 @@ command-execution primitives such as `git -c`, `tar --to-command`, `find -exec`,
 container escape flags, and removal of unauditable network/package-manager tools (`curl`, `wget`,
 `apt`, `apt-get`, `dpkg`).
 
-Phase 2 architectural summary: real Plane CE HTTP client + webhook receiver + Controller→Plane
-projection; a macro-agent-facing HTTP client wired to a **self-declared Python stand-in** service
-(not the real `macro-agent` package — `#151`); an opentasks DAG materializer reading live Plane
-dependencies, wired into `EXEC_APPROVED -> READY`; a reconciliation service/CLI that — per the
-current review round — does not actually enforce or even read real data yet (`#156`); an intake
-adapter (Telegram/Email/generic) creating Plane drafts; an optional OPA policy backend that, when
-enabled, bypasses 100% of Phase 1's command-validation hardening with no equivalent policy shipped
-(`#152`). See `gh issue list --label phase-2` for the full, current picture.
+Phase 2 architectural summary: real Plane CE HTTP client + authenticated webhook receiver +
+Controller→Plane projection service; a macro-agent-facing HTTP client wired to a self-declared
+Python stand-in service (real `macro-agent` package deferred to Phase 3 — see
+`decisions/ADR-002-macro-agent-stub-vs-package.md`); an opentasks DAG materializer reading live
+Plane dependencies with guarded cycle detection; a reconciliation service/CLI that reads Controller
+DB state and can fix Plane state divergences; authenticated intake adapters (Telegram/Email/generic)
+creating HTML-escaped Plane drafts; verification failure feedback to macro-agent and terminal
+alerting; optional OPA policy backend with a parity Rego policy. All Phase 2 review findings were
+closed with code or documented decisions.
 
-Test status: **338 passed / 5 skipped** on SQLite, **341 passed / 2 skipped** on PostgreSQL,
-`ruff` clean, `mypy governance_controller` clean (66 source files). Passing tests do not imply
-Phase 2 is safe to rely on — see the CRITICAL/HIGH issues above; the suite doesn't yet cover them.
+Test status: **351 passed / 5 skipped** on SQLite, **354 passed / 2 skipped** on PostgreSQL,
+`ruff` clean, `mypy governance_controller` clean (66 source files); `macro_agent_service` tests
+**7 passed**, `ruff`/`mypy` clean.
 
 Implemented components:
 
@@ -82,38 +78,34 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`: real Plane sync,
 macro-agent client/service scaffold, opentasks materializer, reconciliation, intake adapter,
-verification feedback + alerting, and optional OPA backend. Phase 2 is **NOT gate-clean yet**; the
-first review round (`3907f24`) opened 13 issues including one `severity:critical` (`#154`) and four
-`severity:high`. See the Phase 2 gate list below.
+verification feedback + alerting, and optional OPA backend. The 2026-08-24 review round opened 13
+issues; all have been closed. Phase 2 is **gate-clean** as of this update, subject to re-verifying
+the live issue list above.
 
-## Immediate Next Step: Close the Phase 2 Review Gate
+## Immediate Next Step: Phase 3 — Hardening and Runtime Diversity
 
-Priority: **close the open `phase-2` issues before declaring Phase 2 done**, in this order:
+Phase 3 scope (from SPEC-10 §10.3):
 
-1. `#154` **CRITICAL** — `POST /webhooks/plane` has zero authentication.
-2. `#155` **HIGH** — unbounded recursion in `opentasks_materializer` cycle detection.
-3. `#157` **HIGH** — `/intake/email` and `/intake/idea` unauthenticated and bypass body-size limit.
-4. `#156` **HIGH** — Plane reconciliation is inert (no real revert/projection writes).
-5. `#152` **HIGH** — OPA backend bypasses embedded policy hardening with no equivalent Rego policy.
-6. `#153`, `#159`, `#160`, `#162`, `#163` — MEDIUM/LOW follow-ups.
+- Docker sandboxing for verification/execution. See
+  `docs/research-verification-sandboxing-scope-2026-08-24.md`.
+- Full harness matrix (Claude Code, Codex, Aider) with runtime selection.
+- Advanced conflict recovery.
+- Project Profiles per repo.
+- Semantic Reviewer.
+- Better Completion Contract.
 
-Query the live issue list for current state; this file is not kept manually in sync issue-by-issue
-(see `#161`, `#145`, `#136`).
+Before starting Phase 3, confirm the live issue list has no open `severity:critical` or
+`severity:high` issues.
 
-### Genuinely not started yet (not touched by the Phase 2 round above)
+### Carried-forward Phase 2 deferred work
 
 - **Durable execution**: evaluate Temporal or Celery for retry/collect workflows; persist the
   runtime task graph from the opentasks materializer beyond in-memory construction.
-- **Advanced isolation / Docker sandboxing**: `SPEC-10 §10.3` assigns this to Phase 3. Scoped at
-  ~1.5-3 weeks solo-engineer effort, with the execution-backend architecture (Docker socket in
-  Controller vs. a dedicated sandbox-executor sidecar vs. delegating to macro-agent's own sandbox)
-  as the biggest open decision — see `docs/research-verification-sandboxing-scope-2026-08-24.md`.
-  Not a substitute for closing `#154`/`#157`.
 - **Meta Orchestrator (OpenCode + BMAD + OpenSpec)**: the intake→idea-ingestion path exists, but
   the actual decomposition/planning engine doesn't. Evaluate sudocode-ai/sudocode's Spec/Issue graph
   model before building this from scratch — see `docs/research-alexngai-ecosystem-and-sudocode.md`.
 - **Real `macro-agent@latest` integration**: still a self-declared Python stand-in, not the actual
-  npm package — see `#151`.
+  npm package — see `decisions/ADR-002-macro-agent-stub-vs-package.md` and `#151`.
 
 ## Blockers to Watch
 
