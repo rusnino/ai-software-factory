@@ -551,7 +551,26 @@ class VerificationService:
             )
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted.
-            await StateMachine.atomic_transition(db, task, TaskState.FAILED)
+            if not await StateMachine.atomic_transition(db, task, TaskState.FAILED):
+                await AuditService.log(
+                    db=db,
+                    event_type="concurrent_modification",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    payload={
+                        "expected_state": TaskState.FAILED.value,
+                        "target_state": TaskState.FAILED.value,
+                        "context": "retry_execution_start_failed",
+                        "error": str(exc),
+                        "verification_report": report,
+                    },
+                )
+                await db.commit()
+                raise ValueError(
+                    "Concurrent modification detected: "
+                    "task state changed during retry execution failure handling"
+                ) from None
             await db.commit()
             raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
