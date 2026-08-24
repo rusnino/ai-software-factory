@@ -508,6 +508,46 @@ def _has_git_clean_destructive(argv: list[str]) -> bool:
     return False
 
 
+def _has_sed_dangerous_flag(argv: list[str]) -> bool:
+    """Return True if sed uses the GNU `e` command or `s///e` flag.
+
+    GNU sed's `e` address-command (`<addr>e <shell-command>`) and the
+    `s///e` substitution flag both execute arbitrary shell commands. They
+    are rejected regardless of quoting because they are unconditional RCE.
+    """
+    if _base_command(argv[0]) != "sed":
+        return False
+    script_tokens: list[str] = []
+    i = 1
+    while i < len(argv):
+        token = argv[i]
+        if token in ("-e", "--expression", "-f", "--file"):
+            i += 1
+            if i < len(argv):
+                script_tokens.append(argv[i])
+        elif token.startswith("-e"):
+            script_tokens.append(token[2:])
+        elif not token.startswith("-"):
+            script_tokens.append(token)
+        i += 1
+    for script in script_tokens:
+        # Detect s///e, s/.../.../e, and s@...@...@e etc.
+        # The flag 'e' must appear after the final delimiter; for safety we
+        # reject any substitution followed by 'e' as a trailing flag.
+        if script.startswith("s"):
+            delim = script[1:2]
+            if delim and script.rstrip(delim).endswith("e"):
+                return True
+        # Detect the bare 'e' command, e.g. '1e id', '$e touch /tmp/x'.
+        # Look for an address prefix (line number, '$', or '%') immediately
+        # followed by 'e ' as the sed command.
+        import re
+
+        if re.search(r"(^|[;\n\s])([0-9]+|\$|%)?e\s", script):
+            return True
+    return False
+
+
 def _is_dd_to_device(argv: list[str]) -> bool:
     """Return True for ``dd if=... of=/dev/...`` or block-device-like targets."""
     if _base_command(argv[0]) != "dd":
@@ -562,6 +602,7 @@ def _has_command_execution_primitive(argv: list[str]) -> bool:
         _has_git_dangerous_config(argv)
         or _has_tar_dangerous_flag(argv)
         or _has_find_dangerous_action(argv)
+        or _has_sed_dangerous_flag(argv)
     )
 
 

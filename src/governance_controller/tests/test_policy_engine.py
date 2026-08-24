@@ -684,6 +684,33 @@ class TestPolicyEngineCommandExecutionPrimitives:
         assert result.allowed is False
         assert any("destructive shell operation" in v for v in result.violations)
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sed '1e touch /tmp/pwned' /etc/hostname",
+            'sed -e "s/line/id/e" file.txt',
+            "sed s/foo/bar/e file.txt",
+        ],
+    )
+    def test_sed_e_command_and_flag_rejected(self, command: str) -> None:
+        # #141: GNU sed's `e` address-command and `s///e` flag execute arbitrary
+        # shell commands and must be rejected as command-execution primitives.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="exec", command=command)],
+                scope_check=ScopeCheck(description="sed e bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "command-execution primitive" in v for v in result.violations
+        )
+
 
 class TestPolicyEngineForbiddenPathsInCommands:
     def test_command_argument_touching_forbidden_path_is_rejected(self) -> None:
