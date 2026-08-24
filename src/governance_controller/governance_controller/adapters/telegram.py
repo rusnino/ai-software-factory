@@ -44,9 +44,15 @@ class TelegramAdapter:
         non-empty secret configured, only updates presenting the exact same
         value are accepted. Raises ``TelegramWebhookAuthError`` when
         authentication fails.
+
+        If no secret is configured the endpoint is closed by default; this
+        prevents accidentally exposing an unauthenticated webhook in
+        production.
         """
         if self.secret_token is None:
-            return
+            raise TelegramWebhookAuthError(
+                "Telegram webhook secret is not configured"
+            )
         if not hmac.compare_digest(secret_token_header or "", self.secret_token):
             raise TelegramWebhookAuthError("Invalid or missing Telegram secret token")
 

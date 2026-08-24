@@ -22,7 +22,8 @@ def adapter_with_secret() -> TelegramAdapter:
 
 class TestTelegramAdapter:
     async def test_process_update_approve_command_sends_request(
-        self, adapter: TelegramAdapter
+        self,
+        adapter_with_secret: TelegramAdapter,
     ) -> None:
         update = {
             "message": {
@@ -45,7 +46,9 @@ class TestTelegramAdapter:
         ) as mock_cls:
             mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
             mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-            result = await adapter.process_update(update)
+            result = await adapter_with_secret.process_update(
+                update, secret_token_header="s3cr3t"
+            )
 
         mock_client.post.assert_awaited_once_with(
             "http://localhost:8000/approvals",
@@ -61,11 +64,14 @@ class TestTelegramAdapter:
         assert result == {"status": "ok"}
 
     async def test_process_update_unrelated_message_returns_ignored(
-        self, adapter: TelegramAdapter
+        self,
+        adapter_with_secret: TelegramAdapter,
     ) -> None:
         update = {"message": {"text": "hello world"}}
 
-        result = await adapter.process_update(update)
+        result = await adapter_with_secret.process_update(
+            update, secret_token_header="s3cr3t"
+        )
 
         assert result == {"status": "ignored"}
 

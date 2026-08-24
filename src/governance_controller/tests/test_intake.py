@@ -72,6 +72,10 @@ async def test_telegram_text_creates_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "secret",
+    )
     response = await async_client.post(
         "/intake/telegram",
         json={
@@ -81,6 +85,7 @@ async def test_telegram_text_creates_draft(
                 "text": "We need a new billing module",
             }
         },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
     )
 
     assert response.status_code == 200
@@ -96,6 +101,10 @@ async def test_telegram_spam_is_ignored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "secret",
+    )
     fake_ingestion.category = "spam"
     response = await async_client.post(
         "/intake/telegram",
@@ -106,6 +115,7 @@ async def test_telegram_spam_is_ignored(
                 "text": "Buy now!!!",
             }
         },
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
     )
 
     assert response.status_code == 200
@@ -176,6 +186,24 @@ async def test_telegram_invalid_secret_returns_403(
     assert response.status_code == 403
 
 
+async def test_telegram_unconfigured_secret_rejects_by_default(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "",
+    )
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
+    response = await async_client.post(
+        "/intake/telegram",
+        json={"message": {"text": "hello"}},
+    )
+
+    assert response.status_code == 403
+
+
 async def test_intake_email_rejects_missing_secret(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,
@@ -217,5 +245,23 @@ async def test_intake_email_rejects_oversized_body(
     response = await async_client.post(
         "/intake/email",
         json={"message_id": "msg-1", "subject": "X", "body_text": "x" * 200_000},
+    )
+    assert response.status_code == 413
+
+
+async def test_intake_telegram_rejects_oversized_body(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "secret",
+    )
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
+    response = await async_client.post(
+        "/intake/telegram",
+        json={"message": {"text": "x" * 200_000}},
+        headers={"X-Telegram-Bot-Api-Secret-Token": "secret"},
     )
     assert response.status_code == 413

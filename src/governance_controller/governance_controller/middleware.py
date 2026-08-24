@@ -6,7 +6,14 @@ from typing import Any
 from fastapi import status
 
 MAX_BODY_SIZE_BYTES = 64 * 1024
-WRITE_PATHS = {"/events", "/tasks", "/approvals", "/intake/email", "/intake/idea"}
+WRITE_PATHS = {
+    "/events",
+    "/tasks",
+    "/approvals",
+    "/intake/email",
+    "/intake/idea",
+    "/intake/telegram",
+}
 
 
 class WriteBodySizeLimitMiddleware:
