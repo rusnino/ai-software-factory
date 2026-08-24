@@ -63,9 +63,16 @@ Started: 2026-08-24
   - Tests cover draft creation, spam filtering, auth, email, and generic idea intake.
   - Verified: 328 passed SQLite, 331 passed PostgreSQL, ruff + mypy clean.
 
+- **Task 9** (commit `70c34da`): Verification failure feedback + terminal alerting
+  - `AlertService` posts Plane comments for verification failures and terminal FAILED states.
+  - Wired into `VerificationService.verify_and_advance`.
+  - No-op when Plane is not configured; Plane API failures swallowed.
+  - Unit tests cover comment posting, no-Plane config, and swallowed errors.
+  - Verified: 332 passed SQLite, 335 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 9: Verification failure feedback + terminal alerting
+- Task 10: Optional OPA backend client
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
