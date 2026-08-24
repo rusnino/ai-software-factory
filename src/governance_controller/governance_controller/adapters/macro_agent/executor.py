@@ -60,3 +60,7 @@ class MacroAgentExecutor:
     async def collect(self, run_id: str) -> dict[str, Any]:
         """Collect macro-agent run results."""
         return await self.client.collect(run_id)
+
+    async def feedback(self, run_id: str, payload: dict[str, object]) -> dict[str, Any]:
+        """Push failure feedback to a macro-agent run."""
+        return await self.client.feedback(run_id, payload)

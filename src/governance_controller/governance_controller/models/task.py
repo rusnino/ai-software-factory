@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Integer
+from sqlalchemy import Column, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import JSON
 from sqlmodel import Field, SQLModel
 
@@ -44,4 +44,8 @@ class Task(SQLModel, table=True):
         sa_column=Column(
             "execution_attempts", Integer, default=0, nullable=False, server_default="0"
         ),
+    )
+    latest_macro_agent_run_id: str | None = Field(
+        default=None,
+        sa_column=Column("latest_macro_agent_run_id", String, nullable=True),
     )

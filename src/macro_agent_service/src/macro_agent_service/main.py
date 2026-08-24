@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, status
 
 from macro_agent_service.config import config
 from macro_agent_service.models import (
+    FeedbackRequest,
     RunRequest,
     RunResponse,
     RunResult,
@@ -55,6 +56,18 @@ async def cancel_run(run_id: str) -> RunStatus:
 async def collect_run(run_id: str) -> RunResult:
     """Collect the result of a run."""
     result = await store.collect(run_id)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Run {run_id} not found",
+        )
+    return result
+
+
+@app.post("/runs/{run_id}/feedback")
+async def feedback_run(run_id: str, request: FeedbackRequest) -> RunStatus:
+    """Receive failure feedback from the Governance Controller."""
+    result = await store.add_feedback(run_id, request)
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

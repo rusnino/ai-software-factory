@@ -34,6 +34,8 @@ from governance_controller.services.policy_engine import (
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.utils.paths import normalize_path
 
+_logger = structlog.get_logger("governance_controller.verification")
+
 
 class VerificationService:
     """Execute completion-contract checks and drive the AGENT_REVIEW gate."""
@@ -463,8 +465,13 @@ class VerificationService:
                     profile=profile,
                     report=report,
                 )
-                # Failure feedback to macro-agent remains a Phase 1 TODO
-                # (SPEC-09 §9.6 #2); the task is already back in RUNNING.
+                # SPEC-09 §9.6 step 2: send failure feedback to macro-agent so
+                # the retry run receives the previous verification report.
+                await service._send_macro_agent_feedback(
+                    task=task,
+                    contract=contract,
+                    report=report,
+                )
             else:
                 await AuditService.log(
                     db=db,
@@ -549,6 +556,9 @@ class VerificationService:
             raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
         execution.macro_agent_run_id = result["run_id"]
+        # Persist the new run ID on the task so feedback has a target even when
+        # the relationship is not loaded.
+        task.latest_macro_agent_run_id = execution.macro_agent_run_id
         await db.flush()
 
         await AuditService.log(
@@ -563,6 +573,43 @@ class VerificationService:
                 "macro_agent_run_id": execution.macro_agent_run_id,
             },
         )
+
+    async def _send_macro_agent_feedback(
+        self,
+        task: Task,
+        contract: TaskContract,
+        report: dict[str, object],
+    ) -> None:
+        """Push the verification failure report to the macro-agent run.
+
+        Uses the executor's feedback endpoint when the latest execution has a
+        macro-agent run ID.  Failures are logged and audited but do not stop
+        the retry: the task is already back in RUNNING.
+        """
+        run_id = getattr(task, "latest_macro_agent_run_id", None)
+        if run_id is None:
+            return
+
+        feedback = {
+            "controller_task_id": task.id,
+            "controller_state": task.state.value,
+            "verification_report": report,
+            "execution_attempts": task.execution_attempts,
+            "max_retries": getattr(contract.execution, "max_retries", 2),
+            "objective": contract.objective,
+            "acceptance": contract.acceptance,
+        }
+
+        try:
+            await self.executor.feedback(run_id, feedback)
+        except Exception as exc:
+            _logger.warning(
+                "macro_agent_feedback_failed",
+                task_id=task.id,
+                run_id=run_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     async def _alert_human_terminal_failure(
         self,

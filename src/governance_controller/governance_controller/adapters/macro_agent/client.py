@@ -41,6 +41,15 @@ class MacroAgentClient:
             response.raise_for_status()
             return cast(dict[str, Any], response.json())
 
+    async def feedback(self, run_id: str, payload: dict[str, object]) -> dict[str, Any]:
+        """Push failure feedback to a macro-agent run."""
+        async with self._client() as client:
+            response = await client.post(
+                f"{self.base_url}/runs/{run_id}/feedback", json=payload
+            )
+            response.raise_for_status()
+            return cast(dict[str, Any], response.json())
+
     def _client(self) -> httpx.AsyncClient:
         """Return a configured httpx client with explicit timeouts."""
         return httpx.AsyncClient(timeout=settings.macro_agent_timeout_seconds)

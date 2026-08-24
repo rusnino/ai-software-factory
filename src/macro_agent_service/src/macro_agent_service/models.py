@@ -49,3 +49,15 @@ class RunResult(BaseModel):
     status: str
     deliverables: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class FeedbackRequest(BaseModel):
+    """Failure feedback from the Controller to a running macro-agent run."""
+
+    controller_task_id: str
+    controller_state: str
+    verification_report: dict[str, Any]
+    execution_attempts: int
+    max_retries: int
+    objective: str
+    acceptance: list[str] = Field(default_factory=list)

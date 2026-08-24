@@ -6,7 +6,13 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from macro_agent_service.models import RunRequest, RunResponse, RunResult, RunStatus
+from macro_agent_service.models import (
+    FeedbackRequest,
+    RunRequest,
+    RunResponse,
+    RunResult,
+    RunStatus,
+)
 
 
 class RunStore:
@@ -65,6 +71,20 @@ class RunStore:
             status=run["status"],
             deliverables=[],
             metadata=run.get("result") or {},
+        )
+
+    async def add_feedback(
+        self, run_id: str, feedback: FeedbackRequest
+    ) -> RunStatus | None:
+        """Append Controller feedback to a run."""
+        run = self._runs.get(run_id)
+        if run is None:
+            return None
+        run.setdefault("feedback", []).append(feedback.model_dump(mode="json"))
+        return RunStatus(
+            run_id=run_id,
+            status=run["status"],
+            metadata={"feedback_count": len(run["feedback"])},
         )
 
     def snapshot(self) -> Mapping[str, Mapping[str, Any]]:
