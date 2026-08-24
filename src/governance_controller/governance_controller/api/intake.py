@@ -9,12 +9,28 @@ from governance_controller.adapters.telegram import (
     TelegramAdapter,
     TelegramWebhookAuthError,
 )
+from governance_controller.config import settings
 from governance_controller.schemas.intake import RawIdea
 from governance_controller.services.idea_ingestion_service import (
     IdeaIngestionService,
 )
 
 router = APIRouter(prefix="/intake", tags=["intake"])
+
+
+class IntakeAuthError(Exception):
+    """Raised when an intake request fails authentication."""
+
+
+def _require_intake_secret(
+    x_intake_secret: str | None = Header(default=None, alias="X-Intake-Secret"),
+) -> None:
+    """Validate the generic intake shared secret when configured."""
+    configured = settings.intake_secret
+    if not configured:
+        return
+    if x_intake_secret != configured:
+        raise IntakeAuthError("Invalid or missing intake secret")
 
 
 class _ServiceContainer:
@@ -84,6 +100,7 @@ async def telegram_intake(
 async def email_intake(
     payload: dict[str, Any],
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
+    _authenticated: None = Depends(_require_intake_secret),
 ) -> dict[str, Any]:
     """Receive a parsed email payload and create a Plane draft if relevant."""
     idea = EmailAdapter.parse(payload)
@@ -103,6 +120,7 @@ async def email_intake(
 async def generic_idea_intake(
     idea: RawIdea,
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
+    _authenticated: None = Depends(_require_intake_secret),
 ) -> dict[str, Any]:
     """Receive a generic normalized idea and create a Plane draft."""
     classified = ingestion.classify(idea)

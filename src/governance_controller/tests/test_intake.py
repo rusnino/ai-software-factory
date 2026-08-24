@@ -69,7 +69,9 @@ def fake_ingestion(monkeypatch: pytest.MonkeyPatch) -> _FakeIngestionService:
 async def test_telegram_text_creates_draft(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
     response = await async_client.post(
         "/intake/telegram",
         json={
@@ -91,7 +93,9 @@ async def test_telegram_text_creates_draft(
 async def test_telegram_spam_is_ignored(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
     fake_ingestion.category = "spam"
     response = await async_client.post(
         "/intake/telegram",
@@ -112,7 +116,9 @@ async def test_telegram_spam_is_ignored(
 async def test_email_intake_creates_draft(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
     response = await async_client.post(
         "/intake/email",
         json={
@@ -132,7 +138,9 @@ async def test_email_intake_creates_draft(
 async def test_generic_idea_intake(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
     response = await async_client.post(
         "/intake/idea",
         json={
@@ -158,6 +166,7 @@ async def test_telegram_invalid_secret_returns_403(
     from governance_controller import config
 
     monkeypatch.setattr(config.settings, "telegram_webhook_secret_token", "secret")
+    monkeypatch.setattr(config.settings, "intake_secret", "")
     response = await async_client.post(
         "/intake/telegram",
         json={"message": {"text": "hello"}},
@@ -165,3 +174,48 @@ async def test_telegram_invalid_secret_returns_403(
     )
 
     assert response.status_code == 403
+
+
+async def test_intake_email_rejects_missing_secret(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    response = await async_client.post(
+        "/intake/email",
+        json={"message_id": "msg-1", "subject": "X", "body_text": "Y"},
+    )
+    assert response.status_code == 401
+
+
+async def test_intake_email_accepts_valid_secret(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    response = await async_client.post(
+        "/intake/email",
+        json={
+            "message_id": "msg-1",
+            "from": {"address": "a@b.com"},
+            "subject": "Feature",
+            "body_text": "Add dark mode",
+        },
+        headers={"X-Intake-Secret": "secret"},
+    )
+    assert response.status_code == 200
+
+
+async def test_intake_email_rejects_oversized_body(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "")
+    response = await async_client.post(
+        "/intake/email",
+        json={"message_id": "msg-1", "subject": "X", "body_text": "x" * 200_000},
+    )
+    assert response.status_code == 413

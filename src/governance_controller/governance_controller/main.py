@@ -14,6 +14,7 @@ from governance_controller.api import health as health_api
 from governance_controller.api import intake as intake_api
 from governance_controller.api import tasks as tasks_api
 from governance_controller.api import webhooks as webhooks_api
+from governance_controller.api.intake import IntakeAuthError
 from governance_controller.api.webhooks import WebhookAuthError
 from governance_controller.config import settings
 from governance_controller.db import init_db
@@ -51,6 +52,17 @@ app.add_middleware(WriteBodySizeLimitMiddleware)
 async def _webhook_auth_exception_handler(
     _request: Request,
     exc: WebhookAuthError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        content={"detail": str(exc)},
+    )
+
+
+@app.exception_handler(IntakeAuthError)
+async def _intake_auth_exception_handler(
+    _request: Request,
+    exc: IntakeAuthError,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_401_UNAUTHORIZED,

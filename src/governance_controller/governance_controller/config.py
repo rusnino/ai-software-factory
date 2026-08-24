@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # Leave empty ONLY for local/dev where the endpoint is not exposed.
     plane_webhook_secret: str = ""
 
+    # Generic intake webhook authentication. Email and generic idea intake
+    # endpoints require this shared secret in the ``X-Intake-Secret`` header.
+    # Leave empty ONLY for local/dev where the endpoints are not exposed.
+    intake_secret: str = ""
+
     # Optional Open Policy Agent (OPA) backend. When configured, the embedded
     # PolicyEngine delegates policy evaluation to OPA. Controller keeps the
     # state machine, approvals, and audit log authoritative.
