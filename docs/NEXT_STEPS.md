@@ -78,21 +78,27 @@ same anti-staleness reasoning: itemized component lists in this file have gone s
 
 None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was encountered.
 
+## Phase 2 Status
+
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`: real Plane sync,
+macro-agent client/service scaffold, opentasks materializer, reconciliation, intake adapter,
+verification feedback + alerting, and optional OPA backend. Phase 2 is **NOT gate-clean yet**; the
+first review round (`3907f24`) opened 13 issues including one `severity:critical` (`#154`) and four
+`severity:high`. See the Phase 2 gate list below.
+
 ## Immediate Next Step: Close the Phase 2 Review Gate
 
-Priority: **close the 13 open `phase-2` issues from the 2026-08-24 review round before treating any
-Phase 2 task as done** — especially the CRITICAL webhook-auth bypass (`#154`) and the four HIGH
-issues (`#152` OPA bypass, `#155` materializer recursion crash, `#156` inert reconciliation, `#157`
-intake DoS). Query `gh issue list --repo rusnino/ai-software-factory --state open --label phase-2`
-for the current list rather than trusting a static summary here — this file will not be kept
-manually in sync issue-by-issue (see `#161`, `#145`, `#136` for why that approach kept failing).
+Priority: **close the open `phase-2` issues before declaring Phase 2 done**, in this order:
 
-All 10 of Phase 2's originally-scoped SDD tasks (Plane sync, macro-agent client, reconciliation,
-durable-execution DAG materialization, OPA backend, security-relevant intake/webhook surface, Meta
-Orchestrator groundwork via the intake→triage path, verification feedback, outbound alerting) have
-landed in some form — "landed" here means code exists and its own unit tests pass, **not** that the
-review round found it correct or safe. Treat the issue tracker, not this list, as the source of
-truth for what still needs work on any of them.
+1. `#154` **CRITICAL** — `POST /webhooks/plane` has zero authentication.
+2. `#155` **HIGH** — unbounded recursion in `opentasks_materializer` cycle detection.
+3. `#157` **HIGH** — `/intake/email` and `/intake/idea` unauthenticated and bypass body-size limit.
+4. `#156` **HIGH** — Plane reconciliation is inert (no real revert/projection writes).
+5. `#152` **HIGH** — OPA backend bypasses embedded policy hardening with no equivalent Rego policy.
+6. `#153`, `#159`, `#160`, `#162`, `#163` — MEDIUM/LOW follow-ups.
+
+Query the live issue list for current state; this file is not kept manually in sync issue-by-issue
+(see `#161`, `#145`, `#136`).
 
 ### Genuinely not started yet (not touched by the Phase 2 round above)
 
@@ -102,13 +108,12 @@ truth for what still needs work on any of them.
   ~1.5-3 weeks solo-engineer effort, with the execution-backend architecture (Docker socket in
   Controller vs. a dedicated sandbox-executor sidecar vs. delegating to macro-agent's own sandbox)
   as the biggest open decision — see `docs/research-verification-sandboxing-scope-2026-08-24.md`.
-  Not a substitute for closing `#154`/`#157` — sandboxing bounds damage from a wrongly-approved
-  command; it doesn't fix approvals or intake endpoints having no auth in the first place.
+  Not a substitute for closing `#154`/`#157`.
 - **Meta Orchestrator (OpenCode + BMAD + OpenSpec)**: the intake→idea-ingestion path exists, but
   the actual decomposition/planning engine doesn't. Evaluate sudocode-ai/sudocode's Spec/Issue graph
   model before building this from scratch — see `docs/research-alexngai-ecosystem-and-sudocode.md`.
 - **Real `macro-agent@latest` integration**: still a self-declared Python stand-in, not the actual
-  npm package — see `#151` for the full analysis of why, and the decision this needs.
+  npm package — see `#151`.
 
 ## Blockers to Watch
 

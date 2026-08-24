@@ -164,19 +164,27 @@ Send failure feedback to macro-agent and real outbound alerts for terminal FAILE
 Optional policy engine backend via OPA.
 
 **Files:**
-- Create: `src/governance_controller/governance_controller/services/opa_client.py`
-- Modify: `src/governance_controller/governance_controller/services/policy_engine.py`
+- Create: `src/governance_controller/governance_controller/adapters/opa_client.py`
+- Create: `src/governance_controller/governance_controller/services/policy_engine_backend.py`
+- Modify: `src/governance_controller/governance_controller/services/approval_service.py`
 - Modify: `src/governance_controller/governance_controller/config.py`
 - Test: `src/governance_controller/tests/test_opa_client.py`
 
-- [ ] Step 1: Implement `OPAClient.evaluate`.
-- [ ] Step 2: Add backend switch in `PolicyEngine`.
-- [ ] Step 3: Tests.
-- [ ] Step 4: Run tests and commit.
+- [x] Step 1: Implement `OPAClient.evaluate`.
+- [x] Step 2: Add backend switch (`PolicyEngineBackend`).
+- [x] Step 3: Wire into `ApprovalService`.
+- [x] Step 4: Tests.
+- [x] Step 5: Run tests and commit.
 
 ## Final Verification
 
-- [ ] Full suite SQLite: `uv run pytest tests/ -q`
-- [ ] Full suite PostgreSQL: `GC_TEST_DATABASE_URL=... uv run pytest tests/ -q`
-- [ ] `uv run ruff check . && uv run mypy governance_controller`
-- [ ] Update `docs/NEXT_STEPS.md` and `specs/SPEC-10-phase-plan.md` Phase 2 status.
+- [x] Full suite SQLite: `uv run pytest tests/ -q` → 338 passed, 5 skipped
+- [x] Full suite PostgreSQL: `GC_TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/gc_test uv run pytest tests/ -q` → 341 passed, 2 skipped
+- [x] `uv run ruff check governance_controller tests && uv run mypy governance_controller` → clean
+- [x] Update `docs/NEXT_STEPS.md` and `specs/SPEC-10-phase-plan.md` Phase 2 status.
+
+## Post-Implementation Review
+
+First review round (`3907f24`) found 13 issues, including 1 CRITICAL (`#154`) and 4 HIGH
+(`#152`, `#155`, `#156`, `#157`). Phase 2 is implemented but **not gate-clean**. The issue tracker
+is the authoritative source of remaining work.
