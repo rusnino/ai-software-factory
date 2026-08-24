@@ -63,6 +63,13 @@ Default deny:
 - production access
 - spawn subagents without explicit role capability
 
+> **Phase 1 limitation (#147):** build-tool invocation (`make`, `npm install`,
+> `pip install`, `cargo`, `mvn`, `gradle`, etc.) executes code declared in the
+> worktree files those tools read. This is an inherent, argv-level-unmitigable
+> risk: the danger lives in file content, not in the command line, so the
+> allowlist can never meaningfully gate it. Containment must come from the
+> execution sandbox (Docker/Firecracker), not from the policy engine.
+
 ## 8.8 Audit and Observability
 
 - Every shell command logged.
