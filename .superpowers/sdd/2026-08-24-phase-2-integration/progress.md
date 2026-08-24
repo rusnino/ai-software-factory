@@ -36,9 +36,16 @@ Started: 2026-08-24
   - In-memory `RunStore` with `RunRequest`/`Response`/`Status`/`Result` models.
   - Verified: 5 passed, ruff + mypy clean.
 
+- **Task 5** (commit `6d35ba4`): Real macro-agent executor client
+  - `LocalMacroAgentService` context manager starts the scaffold as a subprocess via `uv run`.
+  - `macro_agent_backend()` spawner yields a client for local service or configured base URL.
+  - Added `GC_MACRO_AGENT_START_LOCAL`, `_LOCAL_HOST`, `_LOCAL_PORT` settings.
+  - Integration tests prove local service starts and handles runs; all suites green.
+  - Verified: 313 passed SQLite, 316 passed PostgreSQL, ruff + mypy clean.
+
 ## Open Tasks
 
-- Task 5: Real macro-agent executor client
+- Task 6: opentasks runtime DAG materializer
 - Task 3: Controller → Plane projection service
 - Task 4: macro-agent service scaffold
 - Task 5: Real macro-agent executor client
