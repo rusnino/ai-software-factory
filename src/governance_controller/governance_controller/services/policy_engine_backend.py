@@ -50,6 +50,10 @@ class PolicyEngineBackend:
             "contract": contract.model_dump(mode="json"),
             "profile": profile.model_dump(mode="json"),
             "approval_type": approval_type.value,
+            "approval": {
+                "actor": getattr(contract, "proposed_by", "unknown"),
+                "type": approval_type.value,
+            },
         }
 
         try:

@@ -48,19 +48,22 @@ class OPAClient:
             raise OPAClientError("OPA base URL is not configured")
 
         url = f"{self.base_url}/v1/data/{self.policy_path}"
-        async with self._client() as client:
-            response = await client.post(url, json={"input": input_data})
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise OPAClientError(
-                    f"OPA returned {response.status_code}: {response.text}"
-                ) from exc
+        try:
+            async with self._client() as client:
+                response = await client.post(url, json={"input": input_data})
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise OPAClientError(
+                        f"OPA returned {response.status_code}: {response.text}"
+                    ) from exc
 
-            body = cast(dict[str, Any], response.json())
-            result = body.get("result")
-            if not isinstance(result, dict):
-                raise OPAClientError(
-                    f"OPA result missing or malformed: {body}"
-                )
-            return result
+                body = cast(dict[str, Any], response.json())
+                result = body.get("result")
+                if not isinstance(result, dict):
+                    raise OPAClientError(
+                        f"OPA result missing or malformed: {body}"
+                    )
+                return result
+        except httpx.HTTPError as exc:
+            raise OPAClientError(f"OPA request failed: {exc}") from exc
