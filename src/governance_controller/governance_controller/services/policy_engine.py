@@ -25,10 +25,12 @@ validates every ``Check.command`` before approval. The checks below are applied 
    overrides for dangerous config keys (``core.sshCommand``,
    ``core.fsmonitor``, ``core.editor``, ``credential.helper``, etc.) and
    ``sed`` ``s///e``/``<addr>e`` both run arbitrary shell commands.
-7. Reject container isolation escape flags (``--privileged``, ``--network=host``,
-   ``-v``, ``--mount``, etc.) as defense-in-depth in case a future allowed
-   helper wraps a container binary. ``docker``/``podman``/``kubectl`` themselves
-   are already absent from the verification allowlist.
+7. Reject container isolation escape flags (``--privileged``,
+   ``--network=host``, ``--volume``, ``--mount``, etc.) as defense-in-depth in
+   case a future allowed helper wraps a container binary. ``docker``/``podman``/
+   ``kubectl`` themselves are already absent from the verification allowlist.
+   The bare ``-v`` flag is intentionally excluded because it is overloaded by
+   common allowlisted utilities such as ``grep -v``.
 8. Reject commands that reference Docker socket paths
    (``docker.sock``, ``/var/run/docker.sock``) unless the project profile
    explicitly allows docker-socket access. Because the container tools are
@@ -280,7 +282,6 @@ _FORBIDDEN_CONTAINER_ESCAPE_FLAGS: frozenset[str] = frozenset(
         "--cap-add",
         "--security-opt",
         "--volume",
-        "-v",
         "--mount",
     }
 )

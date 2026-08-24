@@ -471,6 +471,32 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         assert result.allowed is True
         assert result.violations == []
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "grep -v pattern file.txt",
+            "rm -v file.txt",
+            "cp -v a b",
+            "unzip -v archive.zip",
+        ],
+    )
+    def test_bare_v_flag_is_allowed_for_common_tools(self, command: str) -> None:
+        # #149: bare -v is overloaded by common utilities (grep invert-match,
+        # rm/cp/unzip verbose) and must not be treated as a container escape.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="exec", command=command)],
+                scope_check=ScopeCheck(description="bare -v flag"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is True
+        assert result.violations == []
+
     def test_command_with_newline_rejected(self) -> None:
         # Embedded newlines (and carriage returns) let sh -c treat each line as
         # a separate statement, bypassing token-based checks on the payload.
