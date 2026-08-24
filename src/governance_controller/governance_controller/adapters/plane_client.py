@@ -40,8 +40,17 @@ class PlaneClient:
         self.base_url = (base_url or settings.plane_base_url).rstrip("/")
         self.api_key = api_key or settings.plane_api_token
         self.workspace_slug = workspace_slug or settings.plane_workspace_slug
-        self.project_id = project_id or settings.plane_project_id
+        self.project_id = project_id or settings.plane_project_id or ""
         self.timeout = timeout
+
+    def _project_id(self, project_id: str | None = None) -> str:
+        """Return the effective project ID or raise if it is not configured."""
+        effective = project_id or self.project_id
+        if not effective:
+            raise PlaneClientError(
+                "Plane project_id is required but not configured"
+            )
+        return effective
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
@@ -53,6 +62,7 @@ class PlaneClient:
         self,
         method: str,
         path: str,
+        project_id: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Execute an HTTP request and return JSON, wrapping all failures.
@@ -61,6 +71,8 @@ class PlaneClient:
         HTTP-status errors, and malformed JSON and re-raises them as
         ``PlaneClientError`` so callers do not leak raw httpx exceptions.
         """
+        if path.startswith("/projects/"):
+            self._project_id(project_id)
         url = self._url(path)
         try:
             async with self._client() as client:
