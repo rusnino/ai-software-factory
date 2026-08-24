@@ -211,6 +211,15 @@ class PlaneClient:
             self._raise_for_status(response)
             return cast(dict[str, Any], response.json())
 
+    async def list_workspace_members(self) -> dict[str, Any]:
+        """List members of the workspace."""
+        async with self._client() as client:
+            response = await client.get(
+                self._url("/members/"),
+            )
+            self._raise_for_status(response)
+            return cast(dict[str, Any], response.json())
+
     def _raise_for_status(self, response: httpx.Response) -> None:
         try:
             response.raise_for_status()

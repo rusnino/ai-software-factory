@@ -236,3 +236,40 @@ async def test_webhook_accepts_valid_secret(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 204
+
+
+async def test_webhook_rejects_actor_not_in_allowed_list(
+    async_client: AsyncClient,
+    seeded_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("governance_controller.config.settings.plane_base_url", "")
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_secret", ""
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_allowed_actors",
+        "allowed@example.com",
+    )
+    response = await async_client.post("/webhooks/plane", json=_event())
+    assert response.status_code == 403
+
+
+async def test_webhook_rejects_unresolvable_actor(
+    async_client: AsyncClient,
+    seeded_db: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_base_url",
+        "http://plane.example.com",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_secret", ""
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_allowed_actors",
+        "allowed@example.com",
+    )
+    response = await async_client.post("/webhooks/plane", json=_event())
+    assert response.status_code == 403

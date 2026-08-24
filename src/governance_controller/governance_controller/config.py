@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # so we require a shared secret in the ``X-Plane-Webhook-Secret`` header.
     # Leave empty ONLY for local/dev where the endpoint is not exposed.
     plane_webhook_secret: str = ""
+    # Comma-separated list of Plane member emails that are allowed to originate
+    # state-change webhooks. If empty, any successfully authenticated webhook is
+    # accepted (NOT recommended for production). Use Plane member email addresses
+    # because they are stable, human-verified identifiers in Plane CE.
+    plane_webhook_allowed_actors: str = ""
 
     # Generic intake webhook authentication. Email and generic idea intake
     # endpoints require this shared secret in the ``X-Intake-Secret`` header.

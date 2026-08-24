@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from governance_controller.adapters.plane_client import PlaneClient
+from governance_controller.adapters.plane_client import PlaneClient, PlaneClientError
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.db import get_db
@@ -105,6 +105,14 @@ class WebhookAuthError(Exception):
     """Raised when a webhook fails authentication."""
 
 
+def _allowed_actor_emails() -> set[str]:
+    """Return configured allowed Plane actor emails as a set."""
+    raw = settings.plane_webhook_allowed_actors
+    if not raw:
+        return set()
+    return {email.strip().lower() for email in raw.split(",") if email.strip()}
+
+
 def _require_plane_secret(
     x_plane_webhook_secret: str | None = Header(
         default=None, alias="X-Plane-Webhook-Secret"
@@ -116,6 +124,37 @@ def _require_plane_secret(
         return
     if x_plane_webhook_secret != configured:
         raise WebhookAuthError("Invalid or missing Plane webhook secret")
+
+
+async def _resolve_actor_email(
+    client: PlaneClient,
+    actor_display_name: str,
+) -> str | None:
+    """Resolve a Plane webhook actor display name to a member email.
+
+    Plane CE webhooks deliver a display name, not a verifiable member UUID.
+    We resolve it against the workspace member list so the Controller only acts
+    on behalf of real, allowed members.
+    """
+    try:
+        members_response = await client.list_workspace_members()
+    except (PlaneClientError, Exception):
+        # Treat any Plane lookup failure as unresolvable: fail secure.
+        return None
+    results = members_response.get("results", members_response)
+    if not isinstance(results, list):
+        return None
+    display_lower = actor_display_name.lower()
+    for member in results:
+        if not isinstance(member, dict):
+            continue
+        email = member.get("email")
+        email_str = email.lower() if isinstance(email, str) else ""
+        display = member.get("display_name", "")
+        display_str = display.lower() if isinstance(display, str) else ""
+        if display_str == display_lower or email_str == display_lower:
+            return email_str
+    return None
 
 
 @router.post("/plane", status_code=status.HTTP_204_NO_CONTENT)
@@ -138,6 +177,39 @@ async def receive_plane_webhook(
         return
 
     approval_type, previous_plane, _current_plane = translation
+
+    # Bind the self-reported actor to a real Plane member email. If we cannot
+    # resolve it, reject the webhook so the Controller never acts on a
+    # synthetic or spoofed identity.
+    allowed_emails = _allowed_actor_emails()
+    actor_email: str = event.payload.actor
+    if allowed_emails:
+        resolved: str | None = None
+        if settings.plane_base_url:
+            resolved = await _resolve_actor_email(PlaneClient(), event.payload.actor)
+        if resolved is None:
+            # Without Plane connectivity we cannot verify the actor is a real
+            # workspace member, so any configured allow-list blocks the request.
+            await _revert_plane_state(
+                event.task_id,
+                event.payload.previous.get("state"),
+                f"Actor '{event.payload.actor}' could not be verified",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unresolvable actor",
+            )
+        actor_email = resolved
+        if actor_email not in allowed_emails:
+            await _revert_plane_state(
+                event.task_id,
+                event.payload.previous.get("state"),
+                f"Actor '{actor_email}' is not authorised to approve via webhook",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Actor not authorised",
+            )
 
     task_service = TaskService(db)
     task = await task_service.get_by_id(event.task_id)
@@ -192,7 +264,7 @@ async def receive_plane_webhook(
             profile=profile,
             approval_type=approval_type,
             source="plane",
-            actor=event.payload.actor,
+            actor=actor_email or event.payload.actor,
             idempotency_key=(
                 f"plane-{event.task_id}-{approval_type.value}-"
                 f"{event.payload.current.get('state', '')}"
