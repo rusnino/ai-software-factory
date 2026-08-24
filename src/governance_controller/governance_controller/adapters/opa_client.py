@@ -33,7 +33,10 @@ class OPAClient:
         self.timeout = timeout or settings.opa_timeout_seconds
 
     def _client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=self.timeout)
+        headers: dict[str, str] = {}
+        if settings.opa_api_token:
+            headers["Authorization"] = f"Bearer {settings.opa_api_token}"
+        return httpx.AsyncClient(timeout=self.timeout, headers=headers)
 
     async def evaluate(
         self,

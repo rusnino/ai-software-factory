@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     opa_base_url: str = ""
     opa_timeout_seconds: float = 5.0
     opa_policy_path: str = "governance/approve"
+    # Optional bearer token for authenticating to OPA. Leave empty when OPA is
+    # reached via a trusted sidecar/network path.
+    opa_api_token: str = ""
 
     # Runtime DAG materialization limits. These bound the work an agent can be
     # handed in a single execution and prevent unbounded Plane API fan-out.

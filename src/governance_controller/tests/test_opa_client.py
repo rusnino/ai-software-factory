@@ -42,12 +42,73 @@ async def test_opa_client_parses_allow_and_violations(httpx_mock) -> None:
     assert result["violations"] == ["Harness not allowed"]
 
 
+async def test_opa_client_sends_minimal_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OPA receives a data-minimized input, not the full contract dump."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "opa_base_url", "http://opa.example.com")
+
+    captured: dict[str, object] | None = None
+
+    class _CapturingOPAClient(OPAClient):
+        async def evaluate(self, input_data: dict[str, object]) -> dict[str, Any]:
+            nonlocal captured
+            captured = input_data
+            return {"allow": True, "violations": []}
+
+    backend = PolicyEngineBackend(opa_client=_CapturingOPAClient())
+
+    contract = TaskContract(
+        task_id="T-1",
+        project_id="P-1",
+        proposed_by="agent",
+        objective="This sensitive objective should not be sent to OPA",
+        acceptance=["Pass"],
+        execution=ExecutionConfig(harness="opencode"),
+    )
+    profile = ProjectProfile(
+        project_id="P-1",
+        project_name="SecretProject",
+        repository=RepositoryConfig(path="/repo"),
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    result = await backend.evaluate(contract, profile, ApprovalType.PLAN)
+
+    assert result.allowed is True
+    assert captured is not None
+    assert captured.get("task_id") == "T-1"
+    assert "objective" not in captured
+    assert "commands" in captured
+    assert captured.get("allowed_harnesses") == ["opencode"]
+
+
 async def test_opa_client_raises_on_http_error(httpx_mock) -> None:
     client = OPAClient(base_url="http://opa.example.com")
     httpx_mock.add_response(status_code=500, text="boom")
 
     with pytest.raises(OPAClientError, match="OPA returned 500"):
         await client.evaluate({})
+
+
+async def test_opa_client_sends_auth_token_when_configured(
+    httpx_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OPA client sends Authorization bearer token when configured."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "opa_base_url", "http://opa.example.com")
+    monkeypatch.setattr(config.settings, "opa_api_token", "secret-token")
+
+    httpx_mock.add_response(json={"result": {"allow": True, "violations": []}})
+    client = OPAClient()
+    await client.evaluate({})
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert request.headers["Authorization"] == "Bearer secret-token"
 
 
 async def test_opa_client_raises_when_unconfigured() -> None:

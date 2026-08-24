@@ -66,15 +66,9 @@ class PolicyEngineBackend:
         if client is None:
             client = OPAClient()
 
-        input_data: dict[str, object] = {
-            "contract": contract.model_dump(mode="json"),
-            "profile": profile.model_dump(mode="json"),
-            "approval_type": approval_type.value,
-            "approval": {
-                "actor": getattr(contract, "proposed_by", "unknown"),
-                "type": approval_type.value,
-            },
-        }
+        input_data = self._minimal_opa_input(
+            contract, profile, approval_type
+        )
 
         try:
             result = await client.evaluate(input_data)
@@ -90,5 +84,53 @@ class PolicyEngineBackend:
         if not isinstance(violations, list):
             violations = []
         violations = [str(v) for v in violations]
-
         return PolicyResult(allowed=allowed, violations=violations)
+
+    @staticmethod
+    def _minimal_opa_input(
+        contract: TaskContract,
+        profile: ProjectProfile,
+        approval_type: ApprovalType,
+    ) -> dict[str, object]:
+        """Return a data-minimized input document for OPA.
+
+        Only the fields required for policy decisions are sent to the OPA
+        server. Task descriptions, full project metadata, and other non-policy
+        fields are deliberately omitted to limit exposure if the OPA endpoint
+        is compromised or misconfigured.
+        """
+        commands: list[str] = []
+        verification = contract.verification or {}
+        raw_commands = verification.get("commands", [])
+        if isinstance(raw_commands, list):
+            commands.extend(
+                str(cmd) for cmd in raw_commands if isinstance(cmd, str)
+            )
+        completion = contract.completion_contract
+        if completion is not None:
+            for check in completion.required:
+                commands.append(check.command)
+            for check in completion.optional:
+                commands.append(check.command)
+
+        allowed_harnesses: list[str] = []
+        if profile.execution and profile.execution.allowed_harnesses:
+            allowed_harnesses = list(profile.execution.allowed_harnesses)
+
+        return {
+            "task_id": contract.task_id,
+            "project_id": contract.project_id,
+            "proposed_by": contract.proposed_by,
+            "approval_type": approval_type.value,
+            "approval": {
+                "actor": contract.proposed_by,
+                "type": approval_type.value,
+            },
+            "execution": {
+                "harness": contract.execution.harness,
+            },
+            "commands": commands,
+            "forbidden_paths": list(contract.forbidden_paths),
+            "allowed_harnesses": allowed_harnesses,
+        }
+
