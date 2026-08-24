@@ -617,18 +617,7 @@ class TestPolicyEngineVerificationCommandsAllowlist:
 
         assert result.allowed is True
 
-    def test_python_argv0_is_rejected_as_wrapper(self) -> None:
-        # #133: ``python``/``python3`` are in the forbidden-wrapper list and must
-        # be rejected *before* the allowlist, even when the payload looks safe.
-        contract = _make_contract(
-            verification={"commands": ["python -m pytest -q"]},
-        )
-        profile = _make_profile()
 
-        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
-
-        assert result.allowed is False
-        assert any("wrapper/interpreter" in v for v in result.violations)
 
 
 class TestPolicyEngineCommandExecutionPrimitives:
@@ -876,10 +865,27 @@ class TestPolicyEngineContainerAllowlistRemoval:
             "not in the verification allowlist" in v for v in result.violations
         )
 
+    def test_python_argv0_is_rejected_as_wrapper(self) -> None:
         # #133: ``python``/``python3`` are in the forbidden-wrapper list and must
         # be rejected *before* the allowlist, even when the payload looks safe.
         contract = _make_contract(
-            verification={"commands": ["python -m pytest -q"]},
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="test", command="python -m pytest -q")],
+                scope_check=ScopeCheck(description="python wrapper"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("wrapper/interpreter" in v for v in result.violations)
+
+    def test_python3_argv0_is_rejected_as_wrapper(self) -> None:
+        # #133: variant spelling of the python interpreter wrapper.
+        contract = _make_contract(
+            verification={"commands": ["python3 -m pytest -q"]},
         )
         profile = _make_profile()
 
