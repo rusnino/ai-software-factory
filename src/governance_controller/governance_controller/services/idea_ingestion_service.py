@@ -1,5 +1,7 @@
 """Idea ingestion service: classify raw intake and create Plane drafts."""
 
+import html
+
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
 from governance_controller.schemas.intake import ClassifiedIdea, RawIdea
@@ -78,8 +80,8 @@ class IdeaIngestionService:
         if effective_project is None:
             raise RuntimeError("No Plane project id configured for draft creation")
 
-        title = classified.idea.subject or "Intake draft"
-        description = classified.idea.body
+        title = html.escape(classified.idea.subject or "Intake draft")
+        description = html.escape(classified.idea.body)
         return await client.create_issue(
             name=title,
             description=description,
