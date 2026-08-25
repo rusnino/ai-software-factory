@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # reached via a trusted sidecar/network path.
     opa_api_token: str = ""
 
+    # Shared secret for authenticating macro-agent Event Bridge callbacks to the
+    # Controller's POST /events endpoint. The caller must send the secret in the
+    # X-Event-Bridge-Secret header. Leave empty ONLY in local dev where the
+    # endpoint is not exposed.
+    event_bridge_secret: str = ""
+
     # Runtime DAG materialization limits. These bound the work an agent can be
     # handed in a single execution and prevent unbounded Plane API fan-out.
     opentasks_max_dag_size: int = 1000

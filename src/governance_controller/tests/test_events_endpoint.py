@@ -1,5 +1,6 @@
 """Tests for the POST /events endpoint."""
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -44,10 +45,30 @@ async def async_client(client_db_session) -> AsyncClient:
         app.dependency_overrides.pop(get_db, None)
 
 
+async def test_post_event_rejects_unauthenticated_request(
+    async_client: AsyncClient,
+    client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
+    response = await async_client.post(
+        "/events", json=_make_event("landing:completed", "event-task-1")
+    )
+    assert response.status_code == 401
+
+
 async def test_post_event_transitions_task(
     async_client: AsyncClient,
     client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     task = Task(
         id="event-task-1",
         project_id="proj-1",
@@ -58,7 +79,9 @@ async def test_post_event_transitions_task(
     await client_db_session.flush()
 
     response = await async_client.post(
-        "/events", json=_make_event("landing:completed", task.id)
+        "/events",
+        json=_make_event("landing:completed", task.id),
+        headers={"X-Event-Bridge-Secret": "secret"},
     )
 
     assert response.status_code == 204
@@ -68,7 +91,12 @@ async def test_post_event_transitions_task(
 async def test_post_event_409_on_lost_cas(
     isolated_db: tuple,
     patched_db,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     """A race through the HTTP endpoint returns 409 and does not dead-letter.
 
     Two separate sessions are used: session A reads the task, session B
@@ -119,6 +147,7 @@ async def test_post_event_409_on_lost_cas(
             response = await client.post(
                 "/events",
                 json=_make_event("landing:completed", task_a.id, event_id="evt-race"),
+                headers={"X-Event-Bridge-Secret": "secret"},
             )
     finally:
         app.dependency_overrides.pop(get_db, None)
@@ -140,10 +169,16 @@ async def test_post_event_409_on_lost_cas(
 
 async def test_post_event_rejects_missing_type(
     async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     response = await async_client.post(
         "/events",
         json={"metadata": {"controller_task_id": "x"}},
+        headers={"X-Event-Bridge-Secret": "secret"},
     )
 
     assert response.status_code == 422
@@ -151,18 +186,32 @@ async def test_post_event_rejects_missing_type(
 
 async def test_post_event_rejects_oversized_body(
     async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     oversized = {"type": "x", "payload": {"x": "y" * (70 * 1024)}}
 
-    response = await async_client.post("/events", json=oversized)
+    response = await async_client.post(
+        "/events",
+        json=oversized,
+        headers={"X-Event-Bridge-Secret": "secret"},
+    )
 
     assert response.status_code == 413
 
 
 async def test_post_event_rejects_oversized_body_without_content_length(
     async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Middleware must cap actual bytes received, not just the Content-Length header."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     import json as _json
 
     body = _json.dumps({"type": "x", "payload": {"x": "y" * (70 * 1024)}}).encode()
@@ -170,7 +219,10 @@ async def test_post_event_rejects_oversized_body_without_content_length(
     response = await async_client.post(
         "/events",
         content=body,
-        headers={"transfer-encoding": "chunked"},
+        headers={
+            "transfer-encoding": "chunked",
+            "X-Event-Bridge-Secret": "secret",
+        },
     )
 
     assert response.status_code == 413
@@ -179,7 +231,12 @@ async def test_post_event_rejects_oversized_body_without_content_length(
 async def test_post_event_invalid_transition_returns_204_and_logs_error(
     async_client: AsyncClient,
     client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
     task = Task(
         id="event-task-3",
         project_id="proj-1",
@@ -190,7 +247,9 @@ async def test_post_event_invalid_transition_returns_204_and_logs_error(
     await client_db_session.flush()
 
     response = await async_client.post(
-        "/events", json=_make_event("landing:completed", task.id)
+        "/events",
+        json=_make_event("landing:completed", task.id),
+        headers={"X-Event-Bridge-Secret": "secret"},
     )
 
     assert response.status_code == 204
