@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
+from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 from governance_controller.schemas.task_contract import TaskContract
 
@@ -66,8 +70,13 @@ class AlertService:
         contract: TaskContract,
         report: dict[str, Any],
         reason: str,
+        db: AsyncSession | None = None,
     ) -> None:
-        """Alert humans when a task reaches a terminal failed/blocked state."""
+        """Alert humans when a task reaches a terminal failed/blocked state.
+
+        Alerts are idempotent: the same (task, reason) pair only sends one
+        Plane comment even if invoked across retries or duplicate deliveries.
+        """
         public_report = _sanitize_report_for_plane(report)
         summary = (
             f"Terminal failure for task {task.id} ({contract.objective}).\n"
@@ -82,8 +91,56 @@ class AlertService:
             reason=reason,
             summary=summary,
         )
+        if db is not None and await self._already_alerted(
+            db, task.id, "terminal_failure", reason
+        ):
+            logger.info(
+                "terminal_failure_alert_skipped",
+                task_id=task.id,
+                reason=reason,
+                detail="duplicate alert suppressed",
+            )
+            return
         await self._plane_comment(task.plane_issue_id or task.id, summary)
+        if db is not None:
+            await self._record_alert(
+                db, task.id, "terminal_failure", reason
+            )
         # Future: send Telegram/Email/SMS here.
+
+    async def _already_alerted(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        alert_type: str,
+        reason: str,
+    ) -> bool:
+        event_id = f"{alert_type}:{reason}"
+        row = await db.scalar(
+            select(ProcessedEvent).where(
+                ProcessedEvent.task_id == task_id,  # type: ignore[arg-type]
+                ProcessedEvent.event_type == "alert",  # type: ignore[arg-type]
+                ProcessedEvent.event_id == event_id,  # type: ignore[arg-type]
+            )
+        )
+        return row is not None
+
+    async def _record_alert(
+        self,
+        db: AsyncSession,
+        task_id: str,
+        alert_type: str,
+        reason: str,
+    ) -> None:
+        db.add(
+            ProcessedEvent(
+                task_id=task_id,
+                event_type="alert",
+                event_id=f"{alert_type}:{reason}",
+                event_timestamp=datetime.now(UTC),
+            )
+        )
+        await db.commit()
 
     async def _plane_comment(
         self,

@@ -432,6 +432,7 @@ class VerificationService:
                     contract=contract,
                     report=report,
                     reason="max_retries_exhausted",
+                    db=db,
                 )
                 return report
             await AlertService().notify_verification_failure(
