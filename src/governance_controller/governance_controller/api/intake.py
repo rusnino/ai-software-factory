@@ -5,6 +5,7 @@ import hmac
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.email import EmailAdapter
 from governance_controller.adapters.telegram import (
@@ -12,7 +13,9 @@ from governance_controller.adapters.telegram import (
     TelegramWebhookAuthError,
 )
 from governance_controller.config import settings
+from governance_controller.db import get_db
 from governance_controller.schemas.intake import RawIdea
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.idea_ingestion_service import (
     IdeaIngestionService,
 )
@@ -69,11 +72,33 @@ def get_idea_ingestion_service() -> IdeaIngestionService:
     return IdeaIngestionService()
 
 
+async def _log_spam(
+    db: AsyncSession,
+    idea: RawIdea,
+    classified_reason: str,
+) -> None:
+    """Record an audit entry when intake filters out a message as spam."""
+    await AuditService.log(
+        db=db,
+        event_type="intake_spam_filtered",
+        task_id="",
+        actor=idea.sender,
+        source=f"intake:{idea.source}",
+        payload={
+            "source_id": idea.source_id,
+            "reason": classified_reason,
+            "subject": idea.subject,
+        },
+    )
+
+
 @router.post("/telegram", status_code=status.HTTP_200_OK)
 async def telegram_intake(
     update: dict[str, Any],
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
+    db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(_require_intake_secret),
 ) -> dict[str, Any]:
     """Receive a Telegram update.
 
@@ -109,6 +134,7 @@ async def telegram_intake(
     )
     classified = ingestion.classify(idea)
     if classified.category == "spam":
+        await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
     draft = await ingestion.create_draft(classified)
@@ -123,12 +149,14 @@ async def telegram_intake(
 async def email_intake(
     payload: dict[str, Any],
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
+    db: AsyncSession = Depends(get_db),
     _authenticated: None = Depends(_require_intake_secret),
 ) -> dict[str, Any]:
     """Receive a parsed email payload and create a Plane draft if relevant."""
     idea = EmailAdapter.parse(payload)
     classified = ingestion.classify(idea)
     if classified.category == "spam":
+        await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
     draft = await ingestion.create_draft(classified)
@@ -143,11 +171,13 @@ async def email_intake(
 async def generic_idea_intake(
     idea: RawIdea,
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
+    db: AsyncSession = Depends(get_db),
     _authenticated: None = Depends(_require_intake_secret),
 ) -> dict[str, Any]:
     """Receive a generic normalized idea and create a Plane draft."""
     classified = ingestion.classify(idea)
     if classified.category == "spam":
+        await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
     draft = await ingestion.create_draft(classified)
