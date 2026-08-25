@@ -86,6 +86,7 @@ def reconcile(
     fixes back to Plane.
     """
     from governance_controller import config
+    from governance_controller.db import engine
 
     if plane_base_url:
         config.settings.plane_base_url = plane_base_url
@@ -116,4 +117,9 @@ def reconcile(
         if any(d.severity == "alert" for d in report.divergences):
             raise typer.Exit(code=1)
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    finally:
+        # Dispose of the engine pool so a later asyncio.run() in the same
+        # process does not reuse connections bound to the now-closed loop.
+        asyncio.run(engine.dispose())
