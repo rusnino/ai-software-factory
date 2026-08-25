@@ -175,7 +175,12 @@ def _format_verification_failure_report(
     ]
     for check in report.get("checks", []):
         if check.get("status") == "failed":
-            lines.append(f"FAILED: {check.get('name')}")
+            name = check.get("name", "")
+            if name.startswith("optional:"):
+                kind = "optional (informational)"
+            else:
+                kind = "required (blocking)"
+            lines.append(f"FAILED ({kind}): {name}")
             lines.append(f"  command: {check.get('command', 'n/a')}")
             lines.append(f"  expected exit: {check.get('expected_exit', 'n/a')}")
             lines.append(f"  actual exit: {check.get('actual_exit', 'n/a')}")
