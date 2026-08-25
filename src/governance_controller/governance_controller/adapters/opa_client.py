@@ -1,5 +1,6 @@
 """Open Policy Agent (OPA) client for delegated policy evaluation."""
 
+import json
 from typing import Any, cast
 
 import httpx
@@ -61,7 +62,12 @@ class OPAClient:
                         f"OPA returned {response.status_code}: {response.text}"
                     ) from exc
 
-                body = cast(dict[str, Any], response.json())
+                try:
+                    body = cast(dict[str, Any], response.json())
+                except json.JSONDecodeError as exc:
+                    raise OPAClientError(
+                        f"OPA returned non-JSON response: {response.text[:200]}"
+                    ) from exc
                 result = body.get("result")
                 if not isinstance(result, dict):
                     raise OPAClientError(
