@@ -44,9 +44,12 @@ class AlertService:
 
         The notification is idempotent at the Plane-comment level by relying
         on the caller to invoke it once per verification failure event.
+        Raw command stderr is kept in the audit log but is not posted to Plane,
+        because Plane is a wider trust boundary than the Controller's own log.
         """
+        public_report = _sanitize_report_for_plane(report)
         summary = _format_verification_failure_report(
-            task, contract, report, attempt, max_retries
+            task, contract, public_report, attempt, max_retries
         )
         logger.warning(
             "verification_failure_feedback",
@@ -55,7 +58,7 @@ class AlertService:
             max_retries=max_retries,
             summary=summary,
         )
-        await self._plane_comment(task.id, summary)
+        await self._plane_comment(task.plane_issue_id or task.id, summary)
 
     async def notify_terminal_failure(
         self,
@@ -65,11 +68,12 @@ class AlertService:
         reason: str,
     ) -> None:
         """Alert humans when a task reaches a terminal failed/blocked state."""
+        public_report = _sanitize_report_for_plane(report)
         summary = (
             f"Terminal failure for task {task.id} ({contract.objective}).\n"
             f"Reason: {reason}\n"
             f"State: {task.state.value}\n"
-            f"Verification report:\n{_format_report(report)}"
+            f"Verification report:\n{_format_report(public_report)}"
         )
         logger.error(
             "terminal_failure_alert",
@@ -78,7 +82,7 @@ class AlertService:
             reason=reason,
             summary=summary,
         )
-        await self._plane_comment(task.id, summary)
+        await self._plane_comment(task.plane_issue_id or task.id, summary)
         # Future: send Telegram/Email/SMS here.
 
     async def _plane_comment(
@@ -134,3 +138,24 @@ def _format_report(report: dict[str, Any]) -> str:
                 f"- {check.get('name')}: {check.get('detail', check)}"
             )
     return "\n".join(pieces) if pieces else "No detailed checks available."
+
+
+def _sanitize_report_for_plane(report: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of the verification report safe to post to Plane.
+
+    Raw stdout/stderr from verification commands can contain secrets, file
+    paths, or other data that should not leave the Controller's audit log.
+    This strips those fields from each check while preserving the names,
+    statuses, exit codes, and non-secret detail.
+    """
+    sanitized = dict(report)
+    checks: list[dict[str, Any]] = []
+    for check in report.get("checks", []):
+        safe = {
+            key: value
+            for key, value in check.items()
+            if key not in {"stdout", "stderr"}
+        }
+        checks.append(safe)
+    sanitized["checks"] = checks
+    return sanitized
