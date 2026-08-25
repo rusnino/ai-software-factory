@@ -2,9 +2,14 @@
 
 import html
 import re
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
+from governance_controller.models.intake_submission import IntakeSubmission
 from governance_controller.schemas.intake import ClassifiedIdea, RawIdea
 
 # Plane project ids are UUIDs. The intake parser only accepts tokens that
@@ -67,14 +72,24 @@ class IdeaIngestionService:
         self,
         classified: ClassifiedIdea,
         project_id: str | None = None,
+        db: AsyncSession | None = None,
     ) -> dict[str, object] | None:
         """Create a Plane draft issue for a non-spam classified idea.
 
         Returns the Plane issue JSON or None if Plane is not configured or the
-        idea is spam.
+        idea is spam. When ``db`` is provided, duplicate submissions and sender
+        rate limits are enforced before calling Plane.
         """
         if classified.category == "spam":
             return None
+
+        if db is not None:
+            await self._guard_duplicate_and_rate_limit(
+                db,
+                classified.idea.source,
+                classified.idea.source_id,
+                classified.idea.sender,
+            )
 
         client = self._client
         if client is None:
@@ -90,7 +105,7 @@ class IdeaIngestionService:
 
         title = html.escape(classified.idea.subject or "Intake draft")
         description = html.escape(classified.idea.body)
-        return await client.create_issue(
+        result = await client.create_issue(
             name=title,
             description=description,
             extra={
@@ -99,3 +114,51 @@ class IdeaIngestionService:
             },
             project_id=effective_project,
         )
+
+        if db is not None:
+            db.add(
+                IntakeSubmission(
+                    source=classified.idea.source,
+                    source_id=classified.idea.source_id,
+                    sender=classified.idea.sender,
+                )
+            )
+            await db.flush()
+
+        return result
+
+    async def _guard_duplicate_and_rate_limit(
+        self,
+        db: AsyncSession,
+        source: str,
+        source_id: str,
+        sender: str,
+    ) -> None:
+        """Raise RuntimeError if the intake request is a duplicate or over limit."""
+        existing = await db.scalar(
+            select(IntakeSubmission).where(
+                IntakeSubmission.source == source,  # type: ignore[arg-type]
+                IntakeSubmission.source_id == source_id,  # type: ignore[arg-type]
+            )
+        )
+        if existing is not None:
+            raise RuntimeError(
+                f"Duplicate intake submission: {source}/{source_id}"
+            )
+
+        limit = settings.intake_rate_limit_per_minute
+        if limit <= 0:
+            return
+
+        since = datetime.now(UTC) - timedelta(minutes=1)
+        count_result = await db.execute(
+            select(func.count(IntakeSubmission.id)).where(  # type: ignore[arg-type]
+                IntakeSubmission.sender == sender,  # type: ignore[arg-type]
+                IntakeSubmission.created_at >= since,  # type: ignore[arg-type]
+            )
+        )
+        recent = count_result.scalar() or 0
+        if recent >= limit:
+            raise RuntimeError(
+                f"Rate limit exceeded for sender {sender}: {recent} in the last minute"
+            )

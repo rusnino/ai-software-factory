@@ -35,6 +35,7 @@ class _FakeIngestionService:
         self,
         classified: Any,
         project_id: str | None = None,
+        db: Any = None,
     ) -> dict[str, object] | None:
         self.calls.append(("create_draft", classified.idea))
         return self.draft or {"id": "draft-1"}

@@ -137,7 +137,7 @@ async def telegram_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified)
+    draft = await ingestion.create_draft(classified, db=db)
     return {
         "status": "draft_created",
         "category": classified.category,
@@ -159,7 +159,7 @@ async def email_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified)
+    draft = await ingestion.create_draft(classified, db=db)
     return {
         "status": "draft_created",
         "category": classified.category,
@@ -180,7 +180,7 @@ async def generic_idea_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified)
+    draft = await ingestion.create_draft(classified, db=db)
     return {
         "status": "draft_created",
         "category": classified.category,

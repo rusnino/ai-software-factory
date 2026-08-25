@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # endpoint is not exposed.
     event_bridge_secret: str = ""
 
+    # Intake rate limiting: maximum draft-creating submissions per sender per
+    # minute. Set to 0 to disable rate limiting.
+    intake_rate_limit_per_minute: int = 10
+
     # Runtime DAG materialization limits. These bound the work an agent can be
     # handed in a single execution and prevent unbounded Plane API fan-out.
     opentasks_max_dag_size: int = 1000
