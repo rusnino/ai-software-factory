@@ -174,14 +174,27 @@ class ReconciliationService:
                     )
                 )
                 if fix and projection is not None and not dry_run:
-                    await self._apply_state_fix(
-                        projection=projection,
-                        plane_issue_id=plane_issue.get("id", ""),
-                        controller_task_id=task_id,
-                        state=state,
-                        expected_plane=expected_plane,
-                        report=report,
-                    )
+                    try:
+                        await self._apply_state_fix(
+                            projection=projection,
+                            plane_issue_id=plane_issue.get("id", ""),
+                            controller_task_id=task_id,
+                            state=state,
+                            expected_plane=expected_plane,
+                            report=report,
+                        )
+                    except ReconciliationError as exc:
+                        report.divergences.append(
+                            Divergence(
+                                plane_task_id=plane_issue.get("id", ""),
+                                controller_task_id=task_id,
+                                field="state",
+                                plane_value=plane_state,
+                                controller_value=state.value,
+                                severity="alert",
+                                message=str(exc),
+                            )
+                        )
 
             report.checked += 1
 
