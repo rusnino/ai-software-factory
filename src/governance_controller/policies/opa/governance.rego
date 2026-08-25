@@ -65,7 +65,7 @@ _wrapper_violation contains msg if {
 # Shell metacharacters and forbidden network tools
 # ---------------------------------------------------------------------------
 
-_forbidden_metachars := {";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "*", "?", "[", "]", "~", "#", "\n", "\r", "\x00"}
+_forbidden_metachars := {";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", "*", "?", "[", "]", "~", "#", "\n", "\r"}
 
 _metachar_violation contains msg if {
     some cmd in _all_commands
@@ -92,7 +92,7 @@ _destructive_violation contains msg if {
     some cmd in _all_commands
     lower_cmd := lower(cmd)
     contains(lower_cmd, "rm")
-    re_match(".*rm\\s+.*(-rf|-fr|--no-preserve-root).*", lower_cmd)
+    regex.match(`.*rm\\s+.*(-rf|-fr|--no-preserve-root).*`, lower_cmd)
     msg := sprintf("Destructive rm flags in command: %s", [cmd])
 }
 
