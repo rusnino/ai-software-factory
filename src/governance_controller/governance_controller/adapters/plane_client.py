@@ -6,6 +6,7 @@ Plane CE and to read task/dependency data for runtime DAG materialization.
 
 import json
 from typing import Any, cast
+from urllib.parse import quote
 
 import httpx
 
@@ -94,8 +95,16 @@ class PlaneClient:
                 f"Unexpected Plane request error: {exc}"
             ) from exc
 
+    @staticmethod
+    def _path_segment(segment: str) -> str:
+        """URL-encode a user-supplied path segment."""
+        return quote(segment, safe="")
+
     def _url(self, path: str) -> str:
-        return f"{self.base_url}/api/v1/workspaces/{self.workspace_slug}{path}"
+        # Path segments are already encoded by callers; encode the workspace
+        # slug as well to be defensive.
+        workspace = quote(self.workspace_slug, safe="")
+        return f"{self.base_url}/api/v1/workspaces/{workspace}{path}"
 
     async def list_projects(self) -> dict[str, Any]:
         """List projects in the workspace."""
@@ -105,7 +114,9 @@ class PlaneClient:
         """Get a project by ID."""
         project_id = project_id or self.project_id
         return await self._request(
-            "GET", f"/projects/{project_id}/", project_id=project_id
+            "GET",
+            f"/projects/{self._path_segment(project_id)}/",
+            project_id=project_id,
         )
 
     async def list_issues(
@@ -117,7 +128,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "GET",
-            f"/projects/{project_id}/issues/",
+            f"/projects/{self._path_segment(project_id)}/issues/",
             project_id=project_id,
             params=params or {},
         )
@@ -131,7 +142,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "GET",
-            f"/projects/{project_id}/issues/{issue_id}/",
+            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/",
             project_id=project_id,
         )
 
@@ -163,7 +174,7 @@ class PlaneClient:
 
         return await self._request(
             "POST",
-            f"/projects/{project_id}/issues/",
+            f"/projects/{self._path_segment(project_id)}/issues/",
             project_id=project_id,
             json=payload,
         )
@@ -178,7 +189,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "PATCH",
-            f"/projects/{project_id}/issues/{issue_id}/",
+            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/",
             project_id=project_id,
             json=fields,
         )
@@ -203,7 +214,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "GET",
-            f"/projects/{project_id}/issues/{issue_id}/comments/",
+            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/comments/",
             project_id=project_id,
         )
 
@@ -217,7 +228,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "POST",
-            f"/projects/{project_id}/issues/{issue_id}/comments/",
+            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/comments/",
             project_id=project_id,
             json={"comment_html": text},
         )
@@ -231,7 +242,7 @@ class PlaneClient:
         project_id = project_id or self.project_id
         return await self._request(
             "GET",
-            f"/projects/{project_id}/issues/{issue_id}/dependencies/",
+            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/issue-relations/?relation_type=blocking",
             project_id=project_id,
         )
 
@@ -257,7 +268,7 @@ class PlaneClient:
                 params["cursor"] = next_cursor
             page = await self._request(
                 "GET",
-                f"/projects/{project_id}/issues/",
+                f"/projects/{self._path_segment(project_id)}/issues/",
                 project_id=project_id,
                 params=params,
             )
@@ -280,7 +291,9 @@ class PlaneClient:
         """List states available in a project."""
         project_id = project_id or self.project_id
         return await self._request(
-            "GET", f"/projects/{project_id}/states/", project_id=project_id
+            "GET",
+            f"/projects/{self._path_segment(project_id)}/states/",
+            project_id=project_id,
         )
 
     async def list_workspace_members(self) -> dict[str, Any]:

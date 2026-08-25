@@ -1,10 +1,18 @@
 """Idea ingestion service: classify raw intake and create Plane drafts."""
 
 import html
+import re
 
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
 from governance_controller.schemas.intake import ClassifiedIdea, RawIdea
+
+# Plane project ids are UUIDs. The intake parser only accepts tokens that
+# match this strict pattern so free-text senders cannot redirect Plane writes.
+_PROJECT_ID_RE = re.compile(
+    r"^proj-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 class IdeaIngestionService:
@@ -39,11 +47,11 @@ class IdeaIngestionService:
             )
 
         for token in lower.split():
-            if token.startswith("proj-"):
+            if _PROJECT_ID_RE.match(token):
                 return ClassifiedIdea(
                     idea=idea,
                     category="existing_project",
-                    project_id=token,
+                    project_id=token.lower(),
                     confidence=0.7,
                     reason=f"Referenced project {token}",
                 )

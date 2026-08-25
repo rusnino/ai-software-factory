@@ -1,5 +1,6 @@
 """Direct tests for IdeaIngestionService classify/create_draft logic."""
 
+import uuid
 from typing import Any
 
 from governance_controller.schemas.intake import RawIdea
@@ -60,10 +61,22 @@ def test_classify_detects_empty_body_as_spam() -> None:
 
 def test_classify_detects_existing_project() -> None:
     service = IdeaIngestionService()
-    classified = service.classify(_idea(body="Need this in proj-alpha please"))
+    project_uuid = str(uuid.uuid4())
+    classified = service.classify(
+        _idea(body=f"Need this in proj-{project_uuid} please")
+    )
 
     assert classified.category == "existing_project"
-    assert classified.project_id == "proj-alpha"
+    assert classified.project_id == f"proj-{project_uuid}"
+
+
+def test_classify_ignores_malformed_project_token() -> None:
+    service = IdeaIngestionService()
+    classified = service.classify(
+        _idea(body="Need this in proj-123/../../../evil please")
+    )
+
+    assert classified.category == "new_project"
 
 
 def test_classify_defaults_to_new_project() -> None:

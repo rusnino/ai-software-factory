@@ -130,7 +130,7 @@ async def test_add_comment_request(httpx_mock, settings_override: Settings) -> N
 async def test_list_issue_dependencies_request(
     httpx_mock, settings_override: Settings
 ) -> None:
-    """list_issue_dependencies calls the dependencies endpoint."""
+    """list_issue_dependencies calls the issue-relations endpoint."""
     httpx_mock.add_response(status_code=200, json={"results": []})
     client = PlaneClient()
     result = await client.list_issue_dependencies("issue-1")
@@ -139,7 +139,7 @@ async def test_list_issue_dependencies_request(
     request = httpx_mock.get_request()
     assert (
         str(request.url)
-        == "http://plane.test/api/v1/workspaces/ws/projects/proj-1/issues/issue-1/dependencies/"
+        == "http://plane.test/api/v1/workspaces/ws/projects/proj-1/issues/issue-1/issue-relations/?relation_type=blocking"
     )
 
 
