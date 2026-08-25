@@ -24,8 +24,10 @@ class _FakePlaneClient:
             "Blocked": "state-blocked",
         }
 
-    async def list_states(self) -> dict[str, Any]:
-        self.calls.append(("list_states", (), {}))
+    async def list_states(
+        self, project_id: str | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(("list_states", (), {"project_id": project_id}))
         return {
             "results": [
                 {"id": state_id, "name": name}

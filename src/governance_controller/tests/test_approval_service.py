@@ -31,12 +31,14 @@ class _FakePlaneProjection:
         controller_task_id: str,
         plane_issue_id: str,
         state: Any,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "controller_task_id": controller_task_id,
                 "plane_issue_id": plane_issue_id,
                 "state": state,
+                "project_id": project_id,
             }
         )
         return {"id": plane_issue_id}

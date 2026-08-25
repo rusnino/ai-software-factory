@@ -49,6 +49,7 @@ class PlaneProjectionService:
         title: str,
         description: str | None = None,
         state: TaskState = TaskState.PROPOSED,
+        project_id: str | None = None,
     ) -> dict[str, object] | None:
         """Create or update a Plane issue for the given Controller task.
 
@@ -59,7 +60,7 @@ class PlaneProjectionService:
         if client is None:
             return None
 
-        state_id = await self._resolve_state_id(state)
+        state_id = await self._resolve_state_id(state, project_id=project_id)
         payload: dict[str, object] = {
             "name": title,
             "description_html": description or "",
@@ -71,6 +72,7 @@ class PlaneProjectionService:
             name=title,
             description=description,
             state=state_id,
+            project_id=project_id,
         )
 
     async def update_state(
@@ -78,6 +80,7 @@ class PlaneProjectionService:
         controller_task_id: str,
         plane_issue_id: str,
         state: TaskState,
+        project_id: str | None = None,
     ) -> dict[str, object] | None:
         """Update the Plane issue state to mirror the Controller state.
 
@@ -87,16 +90,19 @@ class PlaneProjectionService:
         if client is None:
             return None
 
-        state_id = await self._resolve_state_id(state)
+        state_id = await self._resolve_state_id(state, project_id=project_id)
         if state_id is None:
             return None
 
-        return await client.update_issue_state(plane_issue_id, state_id)
+        return await client.update_issue_state(
+            plane_issue_id, state_id, project_id=project_id
+        )
 
     async def add_comment(
         self,
         plane_issue_id: str,
         text: str,
+        project_id: str | None = None,
     ) -> dict[str, object] | None:
         """Add a comment to a Plane issue.
 
@@ -106,9 +112,11 @@ class PlaneProjectionService:
         if client is None:
             return None
 
-        return await client.add_comment(plane_issue_id, text)
+        return await client.add_comment(plane_issue_id, text, project_id=project_id)
 
-    async def _resolve_state_id(self, state: TaskState) -> str | None:
+    async def _resolve_state_id(
+        self, state: TaskState, project_id: str | None = None
+    ) -> str | None:
         client = self._client_or_none()
         if client is None:
             return None
@@ -117,7 +125,7 @@ class PlaneProjectionService:
         if plane_name is None:
             return None
 
-        states_response = await client.list_states()
+        states_response = await client.list_states(project_id=project_id)
         results = states_response.get("results", states_response)
         if not isinstance(results, list):
             return None

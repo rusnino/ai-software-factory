@@ -49,3 +49,7 @@ class Task(SQLModel, table=True):
         default=None,
         sa_column=Column("latest_macro_agent_run_id", String, nullable=True),
     )
+    plane_issue_id: str | None = Field(
+        default=None,
+        sa_column=Column("plane_issue_id", String, nullable=True, index=True),
+    )

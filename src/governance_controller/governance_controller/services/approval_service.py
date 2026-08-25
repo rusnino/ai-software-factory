@@ -282,7 +282,7 @@ class ApprovalService:
         )
 
         await self._project_state_to_plane(
-            task_id=task.id,
+            task=task,
             state=target_state,
             approval_type=approval_type,
         )
@@ -296,7 +296,7 @@ class ApprovalService:
 
     async def _project_state_to_plane(
         self,
-        task_id: str,
+        task: Task,
         state: TaskState,
         approval_type: ApprovalType,
     ) -> None:
@@ -313,20 +313,22 @@ class ApprovalService:
 
         try:
             await projection.update_state(
-                controller_task_id=task_id,
-                plane_issue_id=task_id,
+                controller_task_id=task.id,
+                plane_issue_id=task.plane_issue_id or task.id,
                 state=state,
+                project_id=task.project_id,
             )
         except Exception as exc:
             await AuditService.log(
                 db=self.db,
                 event_type="plane_projection_failed",
-                task_id=task_id,
+                task_id=task.id,
                 actor="system",
                 source="approval_service",
                 payload={
                     "state": state.value,
                     "approval_type": approval_type.value,
+                    "plane_issue_id": task.plane_issue_id,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
                 },

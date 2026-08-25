@@ -7,11 +7,13 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.config import settings
 from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.plane_projection import PlaneProjectionService
 
 
 class TaskService:
@@ -51,6 +53,26 @@ class TaskService:
         self.db.add(task)
         await self.db.flush()
 
+        if settings.plane_base_url:
+            try:
+                issue = await PlaneProjectionService().ensure_plane_issue(
+                    controller_task_id=task.id,
+                    title=task_contract.objective or task.id,
+                    description=task_contract.acceptance[0]
+                    if task_contract.acceptance
+                    else None,
+                    state=task.state,
+                    project_id=task.project_id,
+                )
+                if isinstance(issue, dict):
+                    plane_issue_id = issue.get("id")
+                    if isinstance(plane_issue_id, str):
+                        task.plane_issue_id = plane_issue_id
+                        await self.db.flush()
+            except Exception:
+                # Plane projection failures must not block task creation.
+                pass
+
         await AuditService.log(
             db=self.db,
             event_type="task_created",
@@ -66,6 +88,14 @@ class TaskService:
         """Return the Task with the given primary key, or None."""
         return await self.db.scalar(
             select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
+        )
+
+    async def get_by_plane_issue_id(self, plane_issue_id: str) -> Task | None:
+        """Return the Task linked to the given Plane issue UUID, or None."""
+        return await self.db.scalar(
+            select(Task).where(
+                Task.plane_issue_id == plane_issue_id  # type: ignore[arg-type]
+            )
         )
 
     async def _upsert_project_profile(

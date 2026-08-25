@@ -384,7 +384,10 @@ async def receive_plane_webhook(
             )
 
     task_service = TaskService(db)
-    task = await task_service.get_by_id(issue_id)
+    task = await task_service.get_by_plane_issue_id(issue_id)
+    if task is None:
+        # Fall back to matching by Controller task id for legacy/internal tasks.
+        task = await task_service.get_by_id(issue_id)
     if task is None:
         await _revert_plane_state(
             issue_id,
