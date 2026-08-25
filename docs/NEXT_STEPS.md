@@ -4,8 +4,9 @@
 
 **Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
 **Phase 2 is gate-clean** (all `phase-2` issues closed as of 2026-08-25, including the reopened
-HIGH `#152`). Two review rounds fixed all live-reproduced gaps: Round 1 (`#154`-`#163`) and Round 2
-(`#164`-`#185`). Before starting Phase 3, re-verify the live issue list:
+HIGH `#152` and the third review round `#186`-`#213`). Three review rounds fixed all live-reproduced
+gaps: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), and Round 3 (`#186`-`#213`). Before starting
+Phase 3, re-verify the live issue list:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -32,8 +33,8 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status: **363 passed / 5 skipped** on SQLite, **366 passed / 2 skipped** on PostgreSQL,
-`ruff` clean, `mypy governance_controller` clean (64 source files); `macro_agent_service` tests
+Test status: **369 passed / 5 skipped** on SQLite, **369 passed / 5 skipped** on PostgreSQL,
+`ruff` clean, `mypy governance_controller` clean (65 source files); `macro_agent_service` tests
 **7 passed**, `ruff`/`mypy` clean.
 
 Implemented components:
@@ -77,10 +78,10 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Two review rounds
-followed and all issues are now closed: Round 1 (`#154`-`#163`) and Round 2 (`#164`-`#185`).
-**Phase 2 is gate-clean** as of 2026-08-25; re-verify with the live issue list before starting
-Phase 3.
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Three review rounds
+followed and all issues are now closed: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), and Round 3
+(`#186`-`#213`). **Phase 2 is gate-clean** as of 2026-08-25; re-verify with the live issue list before
+starting Phase 3.
 
 ## Immediate Next Step: Phase 3
 

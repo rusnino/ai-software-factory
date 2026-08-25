@@ -56,12 +56,12 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-25): implemented and gate-clean — all `phase-2` issues closed.** Two review
-rounds fixed the live-reproduced gaps: Round 1 closed 12 of 13 issues (`#154`-`#163`), and Round 2
-closed the remaining 21 issues (`#164`-`#185`), including the 3 CRITICAL findings (`#165`-`#167`)
-and the reopened HIGH `#152` (OPA now runs embedded PolicyEngine first, making OPA additive only).
-Before declaring Phase 2 complete, verify the live issue list has no open `severity:critical` or
-`severity:high` issues.
+**Status (2026-08-25): implemented and gate-clean — all `phase-2` issues closed.** Three review
+rounds fixed the live-reproduced gaps: Round 1 closed 12 of 13 issues (`#154`-`#163`), Round 2
+closed 21 issues (`#164`-`#185`), and Round 3 closed 28 issues (`#186`-`#213`), including the
+reopened HIGH `#152` (OPA now runs embedded PolicyEngine first, making OPA additive only) and all
+6 CRITICAL findings from the third round. Before declaring Phase 2 complete, verify the live issue
+list has no open `severity:critical` or `severity:high` issues.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired
