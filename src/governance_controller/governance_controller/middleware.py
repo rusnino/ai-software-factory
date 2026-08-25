@@ -13,6 +13,7 @@ WRITE_PATHS = {
     "/intake/email",
     "/intake/idea",
     "/intake/telegram",
+    "/webhooks/plane",
 }
 
 

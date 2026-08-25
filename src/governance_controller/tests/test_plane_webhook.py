@@ -15,27 +15,46 @@ from governance_controller.models.task import Task
 from governance_controller.schemas import ProjectProfile, RepositoryConfig
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 
+_STATE_UUIDS = {
+    "Proposed": "state-uuid-proposed",
+    "Plan Approved": "state-uuid-plan-approved",
+    "Approved": "state-uuid-approved",
+    "Ready": "state-uuid-ready",
+    "In Progress": "state-uuid-in-progress",
+    "Agent Review": "state-uuid-agent-review",
+    "In Review": "state-uuid-in-review",
+    "Done": "state-uuid-done",
+    "Blocked": "state-uuid-blocked",
+    "Failed": "state-uuid-failed",
+}
+
 
 def _event(
-    task_id: str = "TASK-1",
-    event_type: str = "state.changed",
+    issue_id: str = "TASK-1",
     previous_state: str = "Proposed",
     current_state: str = "Plan Approved",
-    actor: str = "human@example.com",
-    actor_type: str = "human",
-    operation: str = "single_update",
+    actor: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    """Build a real Plane CE webhook payload."""
+    if actor is None:
+        actor = {"id": "user-uuid-1", "email": "human@example.com"}
     return {
-        "source": "plane",
-        "event_type": event_type,
-        "task_id": task_id,
-        "project_id": "proj-1",
-        "payload": {
-            "previous": {"state": previous_state},
-            "current": {"state": current_state},
+        "event": "issue",
+        "action": "update",
+        "webhook_id": "wh-123",
+        "workspace_id": "ws-uuid-1",
+        "workspace_slug": "ai-factory",
+        "data": {
+            "id": issue_id,
+            "project_id": "proj-1",
+            "name": "Some issue",
+            "state": _STATE_UUIDS[current_state],
+        },
+        "activity": {
+            "field": "state",
+            "old_value": _STATE_UUIDS[previous_state],
+            "new_value": _STATE_UUIDS[current_state],
             "actor": actor,
-            "actor_type": actor_type,
-            "operation": operation,
         },
     }
 
@@ -71,14 +90,51 @@ def _auth_ok(monkeypatch: pytest.MonkeyPatch) -> None:
         _resolve,
     )
 
+    async def _members(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.list_workspace_members",
+        _members,
+    )
+
+    # Map state UUIDs back to display names like Plane would.
+    async def _list_states(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "results": [
+                {"id": uuid, "name": name}
+                for name, uuid in _STATE_UUIDS.items()
+            ]
+        }
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.list_states",
+        _list_states,
+    )
+
 
 @pytest_asyncio.fixture
-async def seeded_db(isolated_db: tuple) -> AsyncGenerator[AsyncSession]:
+async def seeded_db(
+    isolated_db: tuple, monkeypatch: pytest.MonkeyPatch
+) -> AsyncGenerator[AsyncSession]:
     """Yield a session backed by a file-based isolated DB with seeded data."""
     from governance_controller.db import get_db
     from governance_controller.main import app
 
     engine, session_local = isolated_db
+
+    # Patch production db globals so any code that bypasses dependency
+    # overrides (e.g. PlaneClient constructing its own session) still hits the
+    # isolated test database.
+    import governance_controller.db as db_module
+
+    original_engine = db_module.engine
+    original_session_local = db_module.AsyncSessionLocal
+    original_database_url = db_module.settings.database_url
+    test_db_url = engine.url.render_as_string(hide_password=False)
+    db_module.engine = engine
+    db_module.AsyncSessionLocal = session_local
+    db_module.settings.database_url = test_db_url
 
     async with session_local() as session:
         profile = ProjectProfile(
@@ -122,6 +178,9 @@ async def seeded_db(isolated_db: tuple) -> AsyncGenerator[AsyncSession]:
             yield session
         finally:
             app.dependency_overrides.pop(get_db, None)
+            db_module.engine = original_engine
+            db_module.AsyncSessionLocal = original_session_local
+            db_module.settings.database_url = original_database_url
 
 
 @pytest_asyncio.fixture
@@ -148,6 +207,7 @@ async def test_webhook_rejects_unconfigured_secret(
 
 async def test_webhook_rejects_empty_allowed_actors(
     async_client: AsyncClient,
+    _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A configured secret with no allowed actors list is still closed."""
@@ -169,7 +229,8 @@ async def test_webhook_ignores_non_state_event(
     async_client: AsyncClient,
     _auth_ok: None,
 ) -> None:
-    event = _event(event_type="task.updated")
+    event = _event()
+    event["activity"]["field"] = "name"
     response = await async_client.post(
         "/webhooks/plane",
         json=event,
@@ -178,24 +239,12 @@ async def test_webhook_ignores_non_state_event(
     assert response.status_code == 204
 
 
-async def test_webhook_rejects_bulk_operation(
+async def test_webhook_rejects_non_issue_event(
     async_client: AsyncClient,
     _auth_ok: None,
 ) -> None:
-    event = _event(operation="bulk_update")
-    response = await async_client.post(
-        "/webhooks/plane",
-        json=event,
-        headers={"X-Plane-Webhook-Secret": "secret"},
-    )
-    assert response.status_code == 204
-
-
-async def test_webhook_rejects_non_human_actor(
-    async_client: AsyncClient,
-    _auth_ok: None,
-) -> None:
-    event = _event(actor_type="system")
+    event = _event()
+    event["event"] = "module"
     response = await async_client.post(
         "/webhooks/plane",
         json=event,
@@ -225,7 +274,7 @@ async def test_webhook_missing_task_returns_404(
 ) -> None:
     response = await async_client.post(
         "/webhooks/plane",
-        json=_event(task_id="MISSING"),
+        json=_event(issue_id="MISSING"),
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 404
@@ -270,8 +319,8 @@ async def test_webhook_self_approval_returns_403(
     seeded_db: AsyncSession,
     _auth_ok: None,
 ) -> None:
-    # task.proposed_by is "agent-1"; actor is "agent-1" -> self-approval.
-    event = _event(actor="agent-1")
+    # task.proposed_by is "agent-1"; actor email is "agent-1" -> self-approval.
+    event = _event(actor={"id": "user-uuid-2", "email": "agent-1"})
     response = await async_client.post(
         "/webhooks/plane",
         json=event,
@@ -309,6 +358,7 @@ async def test_webhook_accepts_valid_secret(
 async def test_webhook_rejects_actor_not_in_allowed_list(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
+    _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An authenticated webhook from an actor not on the allow-list is rejected."""
@@ -319,6 +369,15 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
+    )
+    # With Plane disabled, resolver must return None so the unresolvable-actor
+    # guard rejects instead of silently approving.
+    async def _resolve_none(*args: Any, **kwargs: Any) -> str | None:
+        return None
+
+    monkeypatch.setattr(
+        "governance_controller.api.webhooks._resolve_actor_email",
+        _resolve_none,
     )
     response = await async_client.post(
         "/webhooks/plane",
@@ -331,6 +390,7 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
 async def test_webhook_rejects_unresolvable_actor(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
+    _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -343,6 +403,14 @@ async def test_webhook_rejects_unresolvable_actor(
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
+    )
+    # Force member lookup to return no match so the allowed-list check rejects.
+    async def _no_members(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.list_workspace_members",
+        _no_members,
     )
     response = await async_client.post(
         "/webhooks/plane",

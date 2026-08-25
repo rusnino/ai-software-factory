@@ -124,7 +124,7 @@ async def _plane_state_name_map(project_id: str | None) -> dict[str, str]:
 
     Returns an empty map if Plane is not configured or the lookup fails.
     """
-    if not project_id or not settings.plane_base_url:
+    if not project_id:
         return {}
     try:
         response = await PlaneClient().list_states(project_id=project_id)
