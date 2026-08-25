@@ -115,8 +115,8 @@ async def telegram_intake(
             detail=str(exc),
         ) from exc
 
-    message = update.get("message") or {}
-    text = message.get("text") or ""
+    message = TelegramAdapter._extract_message(update)
+    text = TelegramAdapter._extract_text(message)
 
     if text.startswith("/approve"):
         result = await adapter.process_update(

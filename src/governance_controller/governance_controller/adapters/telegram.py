@@ -74,6 +74,23 @@ class TelegramAdapter:
             return f"telegram:{user_id}"
         return "telegram-user"
 
+    @staticmethod
+    def _extract_message(update: dict[str, Any]) -> dict[str, Any]:
+        """Return the message-like object from a Telegram update.
+
+        Handles standard messages, channel posts, edited messages, and captions.
+        """
+        for key in ("message", "channel_post", "edited_message", "edited_channel_post"):
+            value = update.get(key)
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    @staticmethod
+    def _extract_text(message: dict[str, Any]) -> str:
+        """Return the text or caption from a Telegram message object."""
+        return cast(str, message.get("text") or message.get("caption") or "")
+
     async def process_update(
         self,
         update: dict[str, Any],
@@ -83,8 +100,8 @@ class TelegramAdapter:
         """Process a Telegram update and return a status dict."""
         self.authenticate_update(secret_token_header=secret_token_header)
 
-        message = cast(dict[str, Any], update.get("message", {}) or {})
-        text = cast(str, message.get("text", "") or "")
+        message = TelegramAdapter._extract_message(update)
+        text = TelegramAdapter._extract_text(message)
 
         if not text.startswith("/approve"):
             return {"status": "ignored"}
