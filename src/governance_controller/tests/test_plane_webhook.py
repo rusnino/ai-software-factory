@@ -40,6 +40,38 @@ def _event(
     }
 
 
+@pytest.fixture
+def _auth_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Webhook endpoint is closed by default; tests that need an authenticated
+    # request must use this fixture (or equivalent monkeypatching).
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_base_url",
+        "http://plane.example.com",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_secret",
+        "secret",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_allowed_actors",
+        "human@example.com",
+    )
+    # Without real Plane connectivity, resolve allowed actors by direct match.
+    async def _resolve(
+        client: Any, actor_display_name: str
+    ) -> str | None:
+        allowed = {"human@example.com"}
+        candidate = actor_display_name.lower()
+        if candidate in allowed:
+            return candidate
+        return None
+
+    monkeypatch.setattr(
+        "governance_controller.api.webhooks._resolve_actor_email",
+        _resolve,
+    )
+
+
 @pytest_asyncio.fixture
 async def seeded_db(isolated_db: tuple) -> AsyncGenerator[AsyncSession]:
     """Yield a session backed by a file-based isolated DB with seeded data."""
@@ -102,65 +134,99 @@ async def async_client(seeded_db: AsyncSession) -> AsyncGenerator[AsyncClient]:
         yield client
 
 
-async def test_webhook_ignores_non_state_event(
+async def test_webhook_rejects_unconfigured_secret(
     async_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The webhook endpoint fails closed when no secret is configured."""
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_secret", ""
     )
+    response = await async_client.post("/webhooks/plane", json=_event())
+    assert response.status_code == 401
+
+
+async def test_webhook_rejects_empty_allowed_actors(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured secret with no allowed actors list is still closed."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_secret", "secret"
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_allowed_actors", ""
+    )
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=_event(),
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
+    assert response.status_code == 403
+
+
+async def test_webhook_ignores_non_state_event(
+    async_client: AsyncClient,
+    _auth_ok: None,
+) -> None:
     event = _event(event_type="task.updated")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 204
 
 
 async def test_webhook_rejects_bulk_operation(
     async_client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     event = _event(operation="bulk_update")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 204
 
 
 async def test_webhook_rejects_non_human_actor(
     async_client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     event = _event(actor_type="system")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 204
 
 
 async def test_webhook_rejects_unknown_state_transition(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     event = _event(previous_state="Proposed", current_state="In Progress")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     # Proposed -> In Progress is not an approval-eligible transition, so ignored.
     assert response.status_code == 204
 
 
 async def test_webhook_missing_task_returns_404(
     async_client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     response = await async_client.post(
-        "/webhooks/plane", json=_event(task_id="MISSING")
+        "/webhooks/plane",
+        json=_event(task_id="MISSING"),
+        headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 404
 
@@ -168,26 +234,28 @@ async def test_webhook_missing_task_returns_404(
 async def test_webhook_stale_state_returns_409(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     # Task is PROPOSED but webhook claims previous Plane state was Plan Approved.
     event = _event(previous_state="Plan Approved", current_state="Approved")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 409
 
 
 async def test_webhook_plan_approval_advances_state(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=_event(),
+        headers={"X-Plane-Webhook-Secret": "secret"},
     )
-    response = await async_client.post("/webhooks/plane", json=_event())
     assert response.status_code == 204
 
     refreshed = await seeded_db.scalar(
@@ -200,21 +268,24 @@ async def test_webhook_plan_approval_advances_state(
 async def test_webhook_self_approval_returns_403(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
-    )
     # task.proposed_by is "agent-1"; actor is "agent-1" -> self-approval.
     event = _event(actor="agent-1")
-    response = await async_client.post("/webhooks/plane", json=event)
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 403
 
 
 async def test_webhook_rejects_missing_secret(
     async_client: AsyncClient,
+    _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # secret is configured by _auth_ok, but request does not present it.
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_secret", "secret"
     )
@@ -225,11 +296,8 @@ async def test_webhook_rejects_missing_secret(
 async def test_webhook_accepts_valid_secret(
     async_client: AsyncClient,
     seeded_db: AsyncSession,
-    monkeypatch: pytest.MonkeyPatch,
+    _auth_ok: None,
 ) -> None:
-    monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", "secret"
-    )
     response = await async_client.post(
         "/webhooks/plane",
         json=_event(),
@@ -243,15 +311,20 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
     seeded_db: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An authenticated webhook from an actor not on the allow-list is rejected."""
     monkeypatch.setattr("governance_controller.config.settings.plane_base_url", "")
     monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
+        "governance_controller.config.settings.plane_webhook_secret", "secret"
     )
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
     )
-    response = await async_client.post("/webhooks/plane", json=_event())
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=_event(),
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 403
 
 
@@ -265,11 +338,15 @@ async def test_webhook_rejects_unresolvable_actor(
         "http://plane.example.com",
     )
     monkeypatch.setattr(
-        "governance_controller.config.settings.plane_webhook_secret", ""
+        "governance_controller.config.settings.plane_webhook_secret", "secret"
     )
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
     )
-    response = await async_client.post("/webhooks/plane", json=_event())
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=_event(),
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
     assert response.status_code == 403

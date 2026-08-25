@@ -119,11 +119,16 @@ def _require_plane_secret(
         default=None, alias="X-Plane-Webhook-Secret"
     ),
 ) -> None:
-    """Validate the Plane webhook shared secret when configured."""
+    """Validate the Plane webhook shared secret.
+
+    The webhook endpoint is closed by default. If ``plane_webhook_secret`` is
+    not configured, or if it is configured but the request presents the wrong
+    secret, the request is rejected.
+    """
     configured = settings.plane_webhook_secret
-    if not configured:
-        return
-    if not hmac.compare_digest(x_plane_webhook_secret or "", configured):
+    if not configured or not hmac.compare_digest(
+        x_plane_webhook_secret or "", configured
+    ):
         raise WebhookAuthError("Invalid or missing Plane webhook secret")
 
 
@@ -184,6 +189,19 @@ async def receive_plane_webhook(
     # synthetic or spoofed identity.
     allowed_emails = _allowed_actor_emails()
     actor_email: str = event.payload.actor
+    if not allowed_emails:
+        # No allow-list means no actor is trusted. Reject the webhook so an
+        # operator cannot accidentally enable the webhook with unverified actors.
+        await _revert_plane_state(
+            event.task_id,
+            event.payload.previous.get("state"),
+            "No allowed actors configured for webhook approvals",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No allowed actors configured",
+        )
+
     if allowed_emails:
         resolved: str | None = None
         if settings.plane_base_url:
