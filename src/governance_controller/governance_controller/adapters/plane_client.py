@@ -104,7 +104,9 @@ class PlaneClient:
     async def get_project(self, project_id: str | None = None) -> dict[str, Any]:
         """Get a project by ID."""
         project_id = project_id or self.project_id
-        return await self._request("GET", f"/projects/{project_id}/")
+        return await self._request(
+            "GET", f"/projects/{project_id}/", project_id=project_id
+        )
 
     async def list_issues(
         self,
@@ -116,6 +118,7 @@ class PlaneClient:
         return await self._request(
             "GET",
             f"/projects/{project_id}/issues/",
+            project_id=project_id,
             params=params or {},
         )
 
@@ -127,7 +130,9 @@ class PlaneClient:
         """Get a single issue."""
         project_id = project_id or self.project_id
         return await self._request(
-            "GET", f"/projects/{project_id}/issues/{issue_id}/"
+            "GET",
+            f"/projects/{project_id}/issues/{issue_id}/",
+            project_id=project_id,
         )
 
     async def create_issue(
@@ -159,6 +164,7 @@ class PlaneClient:
         return await self._request(
             "POST",
             f"/projects/{project_id}/issues/",
+            project_id=project_id,
             json=payload,
         )
 
@@ -173,6 +179,7 @@ class PlaneClient:
         return await self._request(
             "PATCH",
             f"/projects/{project_id}/issues/{issue_id}/",
+            project_id=project_id,
             json=fields,
         )
 
@@ -195,7 +202,9 @@ class PlaneClient:
         """List comments on an issue."""
         project_id = project_id or self.project_id
         return await self._request(
-            "GET", f"/projects/{project_id}/issues/{issue_id}/comments/"
+            "GET",
+            f"/projects/{project_id}/issues/{issue_id}/comments/",
+            project_id=project_id,
         )
 
     async def add_comment(
@@ -209,6 +218,7 @@ class PlaneClient:
         return await self._request(
             "POST",
             f"/projects/{project_id}/issues/{issue_id}/comments/",
+            project_id=project_id,
             json={"comment_html": text},
         )
 
@@ -220,7 +230,9 @@ class PlaneClient:
         """List dependencies for an issue."""
         project_id = project_id or self.project_id
         return await self._request(
-            "GET", f"/projects/{project_id}/issues/{issue_id}/dependencies/"
+            "GET",
+            f"/projects/{project_id}/issues/{issue_id}/dependencies/",
+            project_id=project_id,
         )
 
     async def list_all_issues(
@@ -228,11 +240,11 @@ class PlaneClient:
         project_id: str | None = None,
         page_size: int = 1000,
     ) -> dict[str, Any]:
-        """List all issues in a project, following Plane pagination cursors.
+        """List all issues in a project, following Plane pagination.
 
-        Plane CE paginates list endpoints with ``next_cursor``. This method
-        keeps fetching pages until no next cursor remains and returns a single
-        merged response dict containing all ``results``.
+        Plane CE paginates list endpoints with ``next_page_results``. This
+        method keeps fetching pages until no next page remains and returns a
+        single merged response dict containing all ``results``.
         """
         project_id = project_id or self.project_id
         all_results: list[dict[str, Any]] = []
@@ -246,13 +258,14 @@ class PlaneClient:
             page = await self._request(
                 "GET",
                 f"/projects/{project_id}/issues/",
+                project_id=project_id,
                 params=params,
             )
             last_page = page
             items = page.get("results")
             if isinstance(items, list):
                 all_results.extend(items)
-            next_cursor = page.get("next_cursor")
+            next_cursor = page.get("next_page_results")
             if not next_cursor:
                 break
 
@@ -266,11 +279,16 @@ class PlaneClient:
     ) -> dict[str, Any]:
         """List states available in a project."""
         project_id = project_id or self.project_id
-        return await self._request("GET", f"/projects/{project_id}/states/")
+        return await self._request(
+            "GET", f"/projects/{project_id}/states/", project_id=project_id
+        )
 
     async def list_workspace_members(self) -> dict[str, Any]:
         """List members of the workspace."""
-        return await self._request("GET", "/members/")
+        result = await self._request("GET", "/members/")
+        if isinstance(result, list):
+            return {"results": result}
+        return result
 
     def _raise_for_status(self, response: httpx.Response) -> None:
         try:
