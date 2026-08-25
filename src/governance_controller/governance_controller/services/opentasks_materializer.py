@@ -46,25 +46,51 @@ class OpentasksMaterializer:
         """Build an opentasks DAG starting from ``root_plane_task_id``.
 
         Only approved Plane tasks are included. The graph is validated for
-        cycles and missing dependencies.
+        cycles.
         """
         client = self._client_or_raise()
         max_size = settings.opentasks_max_dag_size
         concurrency = settings.opentasks_materializer_concurrency
         semaphore = asyncio.Semaphore(concurrency)
 
-        # Fetch the root issue to confirm it exists and read its details.
-        root_issue = await client.get_issue(root_plane_task_id, project_id=project_id)
-        root_name = _issue_name(root_issue)
+        # Fetch the root issue and seed the graph from it.
+        try:
+            root_issue = await client.get_issue(
+                root_plane_task_id, project_id=project_id
+            )
+        except Exception as exc:
+            raise MaterializerError(
+                f"Failed to fetch root Plane issue {root_plane_task_id}"
+            ) from exc
 
-        # BFS over Plane dependencies. ``tasks`` is keyed by opentasks ID;
-        # ``plane_edges`` stores dependencies as Plane IDs and is translated
-        # after all issues have been fetched.
-        queue: deque[str] = deque([root_plane_task_id])
-        seen: set[str] = set()
-        tasks: dict[str, OpentasksTask] = {}
-        plane_edges: dict[str, set[str]] = {}
-        plane_to_opentasks: dict[str, str] = {}
+        root_name = _issue_name(root_issue)
+        root_dependencies = await self._fetch_dependency_ids(
+            root_plane_task_id, project_id=project_id
+        )
+        root_opentasks_id = _opentasks_id(root_issue)
+
+        tasks: dict[str, OpentasksTask] = {
+            root_opentasks_id: OpentasksTask(
+                id=root_opentasks_id,
+                plane_task_id=root_plane_task_id,
+                objective=root_name,
+                acceptance=[_issue_description(root_issue)],
+                metadata={
+                    "plane_state": _issue_state(root_issue),
+                    "plane_project_id": project_id,
+                },
+            )
+        }
+        plane_edges: dict[str, set[str]] = {
+            root_plane_task_id: root_dependencies
+        }
+        plane_to_opentasks: dict[str, str] = {
+            root_plane_task_id: root_opentasks_id
+        }
+
+        # BFS over Plane dependencies, starting from the root's dependencies.
+        queue: deque[str] = deque(root_dependencies)
+        seen: set[str] = {root_plane_task_id}
 
         async def _fetch_node(plane_id: str) -> tuple[str, dict[str, Any], set[str]]:
             async with semaphore:
@@ -118,17 +144,6 @@ class OpentasksMaterializer:
                 for dep_id in dependencies:
                     if dep_id not in seen:
                         queue.append(dep_id)
-
-        missing = {
-            dep
-            for deps in plane_edges.values()
-            for dep in deps
-            if dep not in plane_to_opentasks
-        }
-        if missing:
-            raise MaterializerError(
-                f"DAG contains missing dependencies: {sorted(missing)}"
-            )
 
         # Build opentasks-ID edges for cycle detection.
         edges = {
