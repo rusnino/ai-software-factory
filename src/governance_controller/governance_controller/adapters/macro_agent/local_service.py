@@ -74,16 +74,61 @@ class LocalMacroAgentService:
         return False
 
     async def _health_check(self, timeout: float) -> bool:
+        """Wait until the process we started responds on the expected port.
+
+        Also verifies the responding PID matches our subprocess so a stale
+        service squatting the port is not mistaken for the new one.
+        """
         deadline = asyncio.get_event_loop().time() + timeout
         async with httpx.AsyncClient(timeout=1.0) as client:
             while asyncio.get_event_loop().time() < deadline:
                 try:
                     response = await client.get(f"{self.base_url}/docs")
                     if response.status_code == 200:
-                        return True
+                        if self._port_owned_by_process():
+                            return True
+                        logger.warning(
+                            "port_squatted_by_stale_process",
+                            host=self.host,
+                            port=self.port,
+                            expected_pid=self._proc.pid if self._proc else None,
+                        )
+                        return False
                 except httpx.RequestError:
                     pass
                 await asyncio.sleep(0.2)
+        return False
+
+    def _port_owned_by_process(self) -> bool:
+        """Return True if the bound port belongs to our subprocess."""
+        proc = self._proc
+        if proc is None or proc.pid is None:
+            return False
+        try:
+            import psutil
+        except ImportError:  # pragma: no cover
+            # Without psutil we cannot verify ownership; fall back to trusting
+            # the health check, which is the pre-fix behaviour.
+            return True
+
+        try:
+            process = psutil.Process(proc.pid)
+        except psutil.NoSuchProcess:
+            return False
+
+        # Walk the process tree in case the binding process is a child (uv
+        # wrapper -> python child).
+        candidates = [process] + list(process.children(recursive=True))
+        for candidate in candidates:
+            try:
+                for conn in candidate.connections(kind="inet"):
+                    if (
+                        conn.status == psutil.CONN_LISTEN
+                        and conn.laddr.port == self.port
+                    ):
+                        return True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
         return False
 
     async def __aenter__(self) -> Self:
@@ -121,6 +166,8 @@ class LocalMacroAgentService:
             start_new_session=True,
         )
 
+        # Wait for the port to become reachable, then ensure it is owned by
+        # the process we just started rather than a stale one.
         if not self._wait_for_port(self.host, self.port, self.startup_timeout):
             await self._terminate()
             raise RuntimeError(
