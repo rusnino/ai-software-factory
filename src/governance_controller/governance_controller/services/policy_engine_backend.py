@@ -79,7 +79,8 @@ class PolicyEngineBackend:
                 violations=[f"OPA policy evaluation failed: {exc}"],
             )
 
-        allowed = bool(result.get("allow"))
+        allow_value = result.get("allow")
+        allowed = allow_value is True
         violations = result.get("violations")
         if not isinstance(violations, list):
             violations = []
