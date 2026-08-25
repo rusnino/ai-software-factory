@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.api.auth import require_controller_secret
 from governance_controller.db import get_db
 from governance_controller.models.task import Task
 from governance_controller.schemas.task import TaskCreateRequest, TaskResponse
@@ -46,8 +47,13 @@ def _task_response(task: Task) -> TaskResponse:
 async def create_task(
     payload: TaskCreateRequest,
     db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(require_controller_secret),
 ) -> TaskResponse:
-    """Create a governed task from a task contract and project profile."""
+    """Create a governed task from a task contract and project profile.
+
+    Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
+    configured.
+    """
     service = TaskService(db)
     try:
         task = await service.create(

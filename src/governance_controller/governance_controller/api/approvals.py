@@ -8,6 +8,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.api.auth import (
+    require_controller_secret,
+)
 from governance_controller.constants import ApprovalType
 from governance_controller.db import get_db
 from governance_controller.schemas.approval import ApprovalRequest, ApprovalResponse
@@ -49,12 +52,16 @@ async def submit_approval(
     db: AsyncSession = Depends(get_db),
     approval_service: ApprovalService = Depends(get_approval_service),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    _authenticated: None = Depends(require_controller_secret),
 ) -> ApprovalResponse:
     """Single authoritative approval endpoint.
 
     Validates policy, advances state, and records the approval. Supports an
     optional ``Idempotency-Key`` header; when absent, a deterministic fallback
     key is derived from ``(task_id, approval_type, actor, timestamp)``.
+
+    Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
+    configured.
     """
     task_service = TaskService(db)
 

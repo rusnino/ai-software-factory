@@ -32,6 +32,21 @@ def sample_profile() -> ProjectProfile:
     )
 
 
+_CONTROLLER_SECRET = "controller-secret"
+
+
+@pytest.fixture(autouse=True)
+def _configure_controller_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.controller_api_secret",
+        _CONTROLLER_SECRET,
+    )
+
+
+@pytest.fixture
+def auth_headers() -> dict[str, str]:
+    return {"X-Controller-Secret": _CONTROLLER_SECRET}
+
 @pytest_asyncio.fixture
 async def async_client(client_db_session) -> AsyncClient:
     async def _override_get_db():
@@ -59,7 +74,11 @@ class TestTaskApi:
             "project_profile": sample_profile.model_dump(),
         }
 
-        response = await async_client.post("/tasks", json=payload)
+        response = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 201
         body = response.json()
@@ -78,7 +97,11 @@ class TestTaskApi:
             "task_contract": sample_contract.model_dump(),
             "project_profile": sample_profile.model_dump(),
         }
-        await async_client.post("/tasks", json=create_payload)
+        await async_client.post(
+            "/tasks",
+            json=create_payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         response = await async_client.get("/tasks/api-task-1")
 
@@ -99,7 +122,11 @@ class TestTaskApi:
             "task_contract": sample_contract.model_dump(),
             "project_profile": sample_profile.model_dump(),
         }
-        await async_client.post("/tasks", json=create_payload)
+        await async_client.post(
+            "/tasks",
+            json=create_payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         task = await client_db_session.get(Task, sample_contract.task_id)
         task.execution_attempts += 1
@@ -132,10 +159,18 @@ class TestTaskApi:
             "project_profile": sample_profile.model_dump(),
         }
 
-        first = await async_client.post("/tasks", json=payload)
+        first = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
         assert first.status_code == 201
 
-        second = await async_client.post("/tasks", json=payload)
+        second = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert second.status_code == 409
         body = second.json()
@@ -165,7 +200,11 @@ class TestTaskApi:
             "task_contract": sample_contract.model_dump(),
             "project_profile": sample_profile.model_dump(),
         }
-        response = await async_client.post("/tasks", json=payload)
+        response = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code != 409
         assert "already exists" not in response.text

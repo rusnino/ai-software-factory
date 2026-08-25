@@ -36,6 +36,17 @@ def smoke_contract() -> TaskContract:
     )
 
 
+_CONTROLLER_SECRET = "controller-secret"
+
+
+@pytest.fixture(autouse=True)
+def _configure_controller_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.controller_api_secret",
+        _CONTROLLER_SECRET,
+    )
+
+
 @pytest.fixture
 def smoke_profile() -> ProjectProfile:
     return ProjectProfile(
@@ -99,6 +110,7 @@ class TestPhase1Smoke:
                 "task_contract": smoke_contract.model_dump(),
                 "project_profile": smoke_profile.model_dump(),
             },
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         assert create_response.status_code == 201
         body = create_response.json()
@@ -107,14 +119,18 @@ class TestPhase1Smoke:
 
         # 2. PLAN approval.
         plan_response = await async_client.post(
-            "/approvals", json=_approval_payload(task_id, ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload(task_id, ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         assert plan_response.status_code == 200
         assert plan_response.json()["state"] == TaskState.PLAN_APPROVED.value
 
         # 3. EXECUTION approval triggers macro-agent start.
         exec_response = await async_client.post(
-            "/approvals", json=_approval_payload(task_id, ApprovalType.EXECUTION)
+            "/approvals",
+            json=_approval_payload(task_id, ApprovalType.EXECUTION),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         assert exec_response.status_code == 200
         assert exec_response.json()["state"] == TaskState.RUNNING.value
@@ -160,7 +176,9 @@ class TestPhase1Smoke:
 
         # 6. MERGE approval.
         merge_response = await async_client.post(
-            "/approvals", json=_approval_payload(task_id, ApprovalType.MERGE)
+            "/approvals",
+            json=_approval_payload(task_id, ApprovalType.MERGE),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         assert merge_response.status_code == 200
         assert merge_response.json()["state"] == TaskState.DONE.value

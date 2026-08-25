@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # minute. Set to 0 to disable rate limiting.
     intake_rate_limit_per_minute: int = 10
 
+    # Shared secret for authenticating sensitive Controller API mutations
+    # (POST /tasks, POST /approvals, etc.). Callers must send the secret in the
+    # X-Controller-Secret header. Leave empty ONLY in local dev where the API is
+    # not exposed.
+    controller_api_secret: str = ""
+
     # Runtime DAG materialization limits. These bound the work an agent can be
     # handed in a single execution and prevent unbounded Plane API fan-out.
     opentasks_max_dag_size: int = 1000

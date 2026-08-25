@@ -65,6 +65,17 @@ async def async_client(client_db_session, mock_executor) -> AsyncClient:
         app.dependency_overrides.pop(get_approval_service, None)
 
 
+@pytest.fixture(autouse=True)
+def _configure_controller_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.controller_api_secret",
+        _CONTROLLER_SECRET,
+    )
+
+
+_CONTROLLER_SECRET = "controller-secret"
+
+
 async def _create_task(
     client: AsyncClient,
     contract: TaskContract,
@@ -74,7 +85,11 @@ async def _create_task(
         "task_contract": contract.model_dump(),
         "project_profile": profile.model_dump(),
     }
-    response = await client.post("/tasks", json=payload)
+    response = await client.post(
+        "/tasks",
+        json=payload,
+        headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+    )
     assert response.status_code == 201
 
 
@@ -100,7 +115,11 @@ class TestApprovalEndpoint:
         await _create_task(async_client, sample_contract, sample_profile)
         payload = _approval_payload("approval-task-1", ApprovalType.EXECUTION)
 
-        response = await async_client.post("/approvals", json=payload)
+        response = await async_client.post(
+            "/approvals",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 409
         assert "PROPOSED -> EXEC_APPROVED" in response.text
@@ -114,7 +133,11 @@ class TestApprovalEndpoint:
         await _create_task(async_client, sample_contract, sample_profile)
         payload = _approval_payload("approval-task-1", ApprovalType.PLAN)
 
-        response = await async_client.post("/approvals", json=payload)
+        response = await async_client.post(
+            "/approvals",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -133,12 +156,15 @@ class TestApprovalEndpoint:
 
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         response = await async_client.post(
             "/approvals",
             json=_approval_payload("approval-task-1", ApprovalType.EXECUTION),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 200
@@ -159,7 +185,9 @@ class TestApprovalEndpoint:
     ) -> None:
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         # Drive the task to HUMAN_REVIEW via direct state changes so merge can fire.
         from governance_controller.models.task import Task
@@ -178,6 +206,7 @@ class TestApprovalEndpoint:
         response = await async_client.post(
             "/approvals",
             json=_approval_payload("approval-task-1", ApprovalType.MERGE),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 200
@@ -195,7 +224,9 @@ class TestApprovalEndpoint:
         await _create_task(async_client, sample_contract, sample_profile)
 
         response = await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 403
@@ -214,8 +245,8 @@ class TestApprovalEndpoint:
         response = await async_client.post(
             "/approvals",
             json=_approval_payload(
-                "approval-task-1", ApprovalType.PLAN, actor="agent-1"
-            ),
+                "approval-task-1", ApprovalType.PLAN, actor="agent-1"),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 403
@@ -236,8 +267,8 @@ class TestApprovalEndpoint:
         response = await async_client.post(
             "/approvals",
             json=_approval_payload(
-                "approval-task-1", ApprovalType.PLAN, actor="system"
-            ),
+                "approval-task-1", ApprovalType.PLAN, actor="system"),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 403
@@ -257,7 +288,9 @@ class TestApprovalEndpoint:
         await _create_task(async_client, sample_contract, sample_profile)
 
         response = await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 403
@@ -275,7 +308,11 @@ class TestApprovalEndpoint:
         payload = _approval_payload("approval-task-1", ApprovalType.PLAN)
         payload["timestamp"] = "not-a-timestamp"
 
-        response = await async_client.post("/approvals", json=payload)
+        response = await async_client.post(
+            "/approvals",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 400
 
@@ -292,12 +329,15 @@ class TestApprovalEndpoint:
 
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         response = await async_client.post(
             "/approvals",
             json=_approval_payload("approval-task-1", ApprovalType.EXECUTION),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 503
@@ -314,7 +354,9 @@ class TestApprovalEndpoint:
 
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         key1 = _make_idempotency_key(
@@ -360,11 +402,14 @@ class TestApprovalEndpoint:
 
         await _create_task(async_client, sample_contract, sample_profile)
         await async_client.post(
-            "/approvals", json=_approval_payload("approval-task-1", ApprovalType.PLAN)
+            "/approvals",
+            json=_approval_payload("approval-task-1", ApprovalType.PLAN),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
         response = await async_client.post(
             "/approvals",
             json=_approval_payload("approval-task-1", ApprovalType.EXECUTION),
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
         assert response.status_code == 200
