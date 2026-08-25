@@ -221,11 +221,11 @@ def _dependency_id(item: dict[str, Any]) -> str | None:
 def _find_cycle(edges: dict[str, set[str]]) -> list[str] | None:
     """Return a cycle if the directed graph contains one, else None.
 
-    Implemented iteratively so deep but acyclic dependency chains do not
-    trigger false-positive cycle reports based on recursion depth.
+    Uses an iterative three-colour DFS so each node and edge is processed at
+    most once, even in multi-layer diamond DAGs.
     """
-    WHITE, GRAY = 0, 1
-    color: dict[str, int] = dict.fromkeys(edges, WHITE)
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {}
     parent: dict[str, str] = {}
 
     for start in sorted(edges):
@@ -240,7 +240,7 @@ def _find_cycle(edges: dict[str, set[str]]) -> list[str] | None:
             try:
                 child = next(children)
             except StopIteration:
-                color[node] = WHITE
+                color[node] = BLACK
                 stack.pop()
                 continue
 
