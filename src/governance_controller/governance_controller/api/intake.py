@@ -33,15 +33,15 @@ def _require_intake_secret(
 ) -> None:
     """Validate intake webhooks using a shared secret or HMAC signature.
 
-    Email/webhook providers typically sign the request body with a shared
-    secret rather than sending the secret in a header. When
-    ``X-Intake-Signature`` is present we verify the HMAC-SHA256 hex digest of
-    the body against ``settings.intake_secret``. Otherwise we fall back to the
-    legacy ``X-Intake-Secret`` header comparison.
+    The intake endpoints are closed by default. Email/webhook providers
+    typically sign the request body with a shared secret rather than sending
+    the secret in a header. When ``X-Intake-Signature`` is present we verify
+    the HMAC-SHA256 hex digest of the body against ``settings.intake_secret``.
+    Otherwise we fall back to the legacy ``X-Intake-Secret`` header comparison.
     """
     configured = settings.intake_secret
     if not configured:
-        return
+        raise IntakeAuthError("Intake secret is not configured")
 
     if x_intake_signature is not None:
         body = getattr(request.state, "raw_body", b"")
