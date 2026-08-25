@@ -420,28 +420,56 @@ class VerificationService:
         if target_state == TaskState.FAILED:
             max_retries = getattr(contract.execution, "max_retries", 2)
             if task.execution_attempts >= max_retries:
-                await service._alert_human_terminal_failure(
-                    db=db,
-                    task=task,
-                    contract=contract,
-                    report=report,
-                    reason="max_retries_exhausted",
-                )
-                await AlertService().notify_terminal_failure(
-                    task=task,
-                    contract=contract,
-                    report=report,
-                    reason="max_retries_exhausted",
-                    db=db,
-                )
+                try:
+                    await service._alert_human_terminal_failure(
+                        db=db,
+                        task=task,
+                        contract=contract,
+                        report=report,
+                        reason="max_retries_exhausted",
+                    )
+                    await AlertService().notify_terminal_failure(
+                        task=task,
+                        contract=contract,
+                        report=report,
+                        reason="max_retries_exhausted",
+                        db=db,
+                    )
+                except Exception as exc:
+                    await AuditService.log(
+                        db=db,
+                        event_type="verification_alert_failed",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "reason": "max_retries_exhausted",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                 return report
-            await AlertService().notify_verification_failure(
-                task=task,
-                contract=contract,
-                report=report,
-                attempt=task.execution_attempts,
-                max_retries=max_retries,
-            )
+            try:
+                await AlertService().notify_verification_failure(
+                    task=task,
+                    contract=contract,
+                    report=report,
+                    attempt=task.execution_attempts,
+                    max_retries=max_retries,
+                )
+            except Exception as exc:
+                await AuditService.log(
+                    db=db,
+                    event_type="verification_alert_failed",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    payload={
+                        "reason": "verification_failure",
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
             if await StateMachine.atomic_transition_from_failed_to_running(
                 db,
                 task,
