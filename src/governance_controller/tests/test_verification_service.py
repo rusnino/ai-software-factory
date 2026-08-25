@@ -592,6 +592,58 @@ async def test_verify_and_advance_logs_cwd_fallback_when_worktree_missing(
     assert "/nonexistent/repo/path" in fallback.payload["expected_worktree"]
 
 
+async def test_verify_and_advance_sends_macro_agent_feedback_on_retry(
+    db_session: AsyncSession,
+) -> None:
+    """#191: failed verification pushes feedback to the macro-agent run."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+
+    task = Task(
+        id="task-feedback-1",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        execution_attempts=0,
+        latest_macro_agent_run_id="run-123",
+        task_contract_json=TaskContract(
+            task_id="task-feedback-1",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Feedback test",
+            acceptance=["send feedback"],
+            execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+            verification={"commands": ["false"]},
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    contract = TaskContract(**task.task_contract_json)
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"run_id": "run-124"})
+    fake_executor.feedback = AsyncMock(return_value={"status": "ok"})
+
+    await VerificationService.verify_and_advance(
+        db_session, task, contract, executor=fake_executor
+    )
+
+    refreshed = await db_session.scalar(
+        select(Task).where(Task.id == "task-feedback-1")
+    )
+    assert refreshed is not None
+    assert refreshed.state == TaskState.RUNNING
+    fake_executor.feedback.assert_awaited_once()
+    call_args = fake_executor.feedback.call_args
+    assert call_args is not None
+    # Feedback is sent to the *new* retry run (run-124), not the original.
+    assert call_args.args[0] == "run-124"
+    assert call_args.args[1]["controller_task_id"] == "task-feedback-1"
+    assert call_args.args[1]["verification_report"]["passed"] is False
+
+
 class TestVerificationConcurrency:
     """Regression tests for verification CAS and audit durability."""
 
