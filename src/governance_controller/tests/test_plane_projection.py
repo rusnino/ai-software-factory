@@ -48,6 +48,15 @@ class _FakePlaneClient:
         )
         return {"id": "issue-1", "name": name, "state_id": state}
 
+    async def update_issue(
+        self,
+        issue_id: str,
+        fields: dict[str, Any],
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(("update_issue", (issue_id, fields, project_id), {}))
+        return {"id": issue_id, "state_id": fields.get("state")}
+
     async def update_issue_state(
         self, issue_id: str, state_id: str, project_id: str | None = None
     ) -> dict[str, Any]:
@@ -80,6 +89,30 @@ async def test_ensure_plane_issue_creates_issue(fake_client: _FakePlaneClient) -
     assert fake_client.calls[1][1][2] == "state-proposed"  # state id
 
 
+async def test_ensure_plane_issue_writes_custom_fields(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """#229: SPEC-04 §4.7 fields are written on issue creation."""
+    service = PlaneProjectionService(client=fake_client)
+    await service.ensure_plane_issue(
+        controller_task_id="TASK-1",
+        title="Do work",
+        state=TaskState.PLAN_APPROVED,
+        source="telegram",
+        approval_required=False,
+        opentasks_id="OT-1",
+    )
+
+    create_call = next(c for c in fake_client.calls if c[0] == "create_issue")
+    extra = create_call[1][4]
+    assert extra == {
+        "controller_task_id": "TASK-1",
+        "source": "telegram",
+        "approval_required": False,
+        "opentasks_id": "OT-1",
+    }
+
+
 async def test_update_state_resolves_state_and_updates(
     fake_client: _FakePlaneClient,
 ) -> None:
@@ -93,7 +126,26 @@ async def test_update_state_resolves_state_and_updates(
     assert result is not None
     assert result["state_id"] == "state-done"
     assert fake_client.calls[0][0] == "list_states"
-    assert fake_client.calls[1][0] == "update_issue_state"
+    assert fake_client.calls[1][0] == "update_issue"
+    assert fake_client.calls[1][1][1]["state"] == "state-done"
+
+
+async def test_update_state_writes_opentasks_id(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """#229: opentasks_id is written back to Plane on state update."""
+    service = PlaneProjectionService(client=fake_client)
+    result = await service.update_state(
+        controller_task_id="TASK-1",
+        plane_issue_id="issue-1",
+        state=TaskState.RUNNING,
+        opentasks_id="OT-42",
+    )
+
+    assert result is not None
+    assert result["state_id"] == "state-in-progress"
+    update_call = next(c for c in fake_client.calls if c[0] == "update_issue")
+    assert update_call[1][1]["opentasks_id"] == "OT-42"
 
 
 async def test_update_state_unknown_controller_state_returns_none(

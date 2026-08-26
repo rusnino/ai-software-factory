@@ -59,6 +59,7 @@ async def create_task(
         task = await service.create(
             task_contract=payload.task_contract,
             project_profile=payload.project_profile,
+            source="api",
         )
     except IntegrityError as exc:
         await db.rollback()

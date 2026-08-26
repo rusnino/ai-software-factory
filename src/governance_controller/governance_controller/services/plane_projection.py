@@ -50,6 +50,9 @@ class PlaneProjectionService:
         description: str | None = None,
         state: TaskState = TaskState.PROPOSED,
         project_id: str | None = None,
+        source: str = "api",
+        approval_required: bool = True,
+        opentasks_id: str | None = None,
     ) -> dict[str, object] | None:
         """Create or update a Plane issue for the given Controller task.
 
@@ -61,18 +64,20 @@ class PlaneProjectionService:
             return None
 
         state_id = await self._resolve_state_id(state, project_id=project_id)
-        payload: dict[str, object] = {
-            "name": title,
-            "description_html": description or "",
+        extra: dict[str, object] = {
+            "controller_task_id": controller_task_id,
+            "source": source,
+            "approval_required": approval_required,
         }
-        if state_id is not None:
-            payload["state"] = state_id
+        if opentasks_id is not None:
+            extra["opentasks_id"] = opentasks_id
 
         return await client.create_issue(
             name=title,
             description=description,
             state=state_id,
             project_id=project_id,
+            extra=extra,
         )
 
     async def update_state(
@@ -81,6 +86,7 @@ class PlaneProjectionService:
         plane_issue_id: str,
         state: TaskState,
         project_id: str | None = None,
+        opentasks_id: str | None = None,
     ) -> dict[str, object] | None:
         """Update the Plane issue state to mirror the Controller state.
 
@@ -94,8 +100,12 @@ class PlaneProjectionService:
         if state_id is None:
             return None
 
-        return await client.update_issue_state(
-            plane_issue_id, state_id, project_id=project_id
+        fields: dict[str, object] = {"state": state_id}
+        if opentasks_id is not None:
+            fields["opentasks_id"] = opentasks_id
+
+        return await client.update_issue(
+            plane_issue_id, fields, project_id=project_id
         )
 
     async def add_comment(

@@ -26,6 +26,7 @@ class TaskService:
         self,
         task_contract: TaskContract,
         project_profile: ProjectProfile,
+        source: str = "api",
     ) -> Task:
         """Create a new PROPOSED task and upsert its project profile.
 
@@ -63,6 +64,8 @@ class TaskService:
                     else None,
                     state=task.state,
                     project_id=task.project_id,
+                    source=source,
+                    approval_required=task_contract.approval_required,
                 )
                 if isinstance(issue, dict):
                     plane_issue_id = issue.get("id")
