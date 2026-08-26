@@ -110,7 +110,11 @@ def service(
     db_session: AsyncSession,
     fake_executor: MacroAgentExecutor,
 ) -> ApprovalService:
-    return ApprovalService(db=db_session, executor=fake_executor)
+    return ApprovalService(
+        db=db_session,
+        executor=fake_executor,
+        permission_service=PermissionService(admins={"admin"}),
+    )
 
 
 class TestApprovalServiceStateTransitions:
@@ -189,6 +193,7 @@ class TestApprovalServiceStateTransitions:
             db=db_session,
             executor=fake_executor,
             plane_projection=fake_projection,
+            permission_service=PermissionService(admins={"admin"}),
         )
         task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()
@@ -380,7 +385,11 @@ class TestApprovalServicePolicyViolations:
                     {"allowed": False, "violations": ["injected-deny"]},
                 )()
 
-        service = ApprovalService(db=db_session, policy_engine=AlwaysDeny)
+        service = ApprovalService(
+            db=db_session,
+            policy_engine=AlwaysDeny,
+            permission_service=PermissionService(admins={"admin"}),
+        )
         task = await _make_task(db_session, TaskState.PROPOSED)
 
         with pytest.raises(PolicyViolationError, match="injected-deny"):
@@ -400,7 +409,9 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         self,
         db_session: AsyncSession,
     ) -> None:
-        service = ApprovalService(db=db_session)
+        service = ApprovalService(
+            db=db_session, permission_service=PermissionService(admins={"admin"})
+        )
         task = await _make_task(db_session, TaskState.PROPOSED)
 
         with pytest.raises(PolicyViolationError, match="cannot approve their own task"):
@@ -425,7 +436,9 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         self,
         db_session: AsyncSession,
     ) -> None:
-        service = ApprovalService(db=db_session)
+        service = ApprovalService(
+            db=db_session, permission_service=PermissionService(admins={"admin"})
+        )
         task = await _make_task(db_session, TaskState.PROPOSED)
 
         with pytest.raises(PolicyViolationError, match="may not request"):
@@ -508,7 +521,11 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         # but the atomic UPDATE's WHERE clause fails because the database row
         # has already advanced, so the concurrent-modification guard fires.
         async with local_session() as session_b:
-            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            service_b = ApprovalService(
+                db=session_b,
+                executor=fake_executor,
+                permission_service=PermissionService(admins={"admin"}),
+            )
             task_b = await session_b.scalar(
                 sa_select(Task).where(Task.id == "task-concurrent")
             )
@@ -525,7 +542,11 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
             assert result.state == TaskState.RUNNING
             await session_b.commit()
 
-        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        service_a = ApprovalService(
+            db=session_a,
+            executor=fake_executor,
+            permission_service=PermissionService(admins={"admin"}),
+        )
         with pytest.raises(ValueError, match="Concurrent modification"):
             await service_a.approve(
                 task=task_a,
@@ -558,7 +579,9 @@ class TestApprovalServiceSelfApprovalPrevention:
         self,
         db_session: AsyncSession,
     ) -> None:
-        service = ApprovalService(db=db_session)
+        service = ApprovalService(
+            db=db_session, permission_service=PermissionService(admins={"admin"})
+        )
         task = await _make_task(db_session, TaskState.PROPOSED)
         # Simulate the proposer attempting to approve their own task.
         with pytest.raises(PolicyViolationError, match="cannot approve their own task"):
@@ -576,7 +599,9 @@ class TestApprovalServiceSelfApprovalPrevention:
         self,
         db_session: AsyncSession,
     ) -> None:
-        service = ApprovalService(db=db_session)
+        service = ApprovalService(
+            db=db_session, permission_service=PermissionService(admins={"admin"})
+        )
         task = await _make_task(db_session, TaskState.PROPOSED)
         for forbidden_actor in ("system", "agent"):
             with pytest.raises(PolicyViolationError, match="may not request"):

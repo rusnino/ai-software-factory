@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     # minute. Set to 0 to disable rate limiting.
     intake_rate_limit_per_minute: int = 10
 
+    # Comma-separated list of actors that are allowed to grant EXECUTION and
+    # MERGE approvals. Must be set in production; the empty default denies all
+    # sensitive approvals so the Controller fails closed.
+    admins: str = ""
+
     # Shared secret for authenticating sensitive Controller API mutations
     # (POST /tasks, POST /approvals, etc.). Callers must send the secret in the
     # X-Controller-Secret header. Leave empty ONLY in local dev where the API is

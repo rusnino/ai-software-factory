@@ -8,7 +8,7 @@ from governance_controller.services.permission_service import PermissionService
 
 @pytest.fixture
 def service() -> PermissionService:
-    return PermissionService()
+    return PermissionService(admins={"admin"})
 
 
 class TestPermissionServicePlanApproval:
@@ -40,6 +40,19 @@ class TestPermissionServiceExecutionApproval:
         service = PermissionService(admins={"bob"})
         assert await service.may_approve("bob", "task-1", ApprovalType.EXECUTION)
 
+    async def test_default_fails_closed_without_config(self) -> None:
+        """#226: no default hardcoded admin; empty config denies everyone."""
+        from governance_controller.services.permission_service import (
+            PermissionService,
+        )
+
+        service = PermissionService(admins=set())
+        assert not await service.may_approve(
+            "admin",
+            "task-1",
+            ApprovalType.EXECUTION,
+        )
+
 
 class TestPermissionServiceMergeApproval:
     async def test_non_admin_cannot_approve_merge(
@@ -53,6 +66,19 @@ class TestPermissionServiceMergeApproval:
         service: PermissionService,
     ) -> None:
         assert await service.may_approve("admin", "task-1", ApprovalType.MERGE)
+
+    async def test_default_fails_closed_without_config_for_merge(self) -> None:
+        """#226: empty admin config denies MERGE approvals too."""
+        from governance_controller.services.permission_service import (
+            PermissionService,
+        )
+
+        service = PermissionService(admins=set())
+        assert not await service.may_approve(
+            "admin",
+            "task-1",
+            ApprovalType.MERGE,
+        )
 
 
 class TestPermissionServiceSystemAndAgent:

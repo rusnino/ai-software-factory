@@ -21,6 +21,19 @@ def test_database_url() -> str:
     return _test_database_url()
 
 
+@pytest.fixture(autouse=True)
+def _test_admin_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a non-empty admin list for tests that exercise EXECUTION/MERGE approvals.
+
+    Production defaults to an empty list (fail-closed); tests opt into a test
+    admin so they can verify approval state transitions without hardcoding the
+    same skeleton key.
+    """
+    monkeypatch.setattr(
+        "governance_controller.config.settings.admins", "admin"
+    )
+
+
 def _is_sqlite(url: str) -> bool:
     return url.startswith("sqlite")
 
