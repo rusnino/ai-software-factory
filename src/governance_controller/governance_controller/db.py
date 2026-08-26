@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -33,23 +34,84 @@ if not _is_in_memory_sqlite(settings.database_url):
         }
     )
 
-# Allow tests to override the engine so migration/helper functions can be
-# exercised against an isolated database.
-engine: AsyncEngine = create_async_engine(
-    settings.database_url,
-    **_ENGINE_KWARGS,
-)
+def _make_engine(url: str | None = None) -> AsyncEngine:
+    """Create a fresh async engine for *url* with project settings."""
+    database_url = url or settings.database_url
+    kwargs: dict[str, object] = {
+        "echo": False,
+        "future": True,
+        "pool_pre_ping": settings.database_pool_pre_ping,
+    }
+    if not _is_in_memory_sqlite(database_url):
+        kwargs.update(
+            {
+                "pool_size": settings.database_pool_size,
+                "max_overflow": settings.database_max_overflow,
+                "pool_timeout": settings.database_pool_timeout,
+            }
+        )
+    return create_async_engine(database_url, **kwargs)
 
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine,
-    expire_on_commit=False,
-)
+
+# Module-level engine kept for backwards compatibility with code and tests that
+# import it directly. Internal helpers use get_engine() so repeated asyncio.run()
+# calls in the same process do not recycle connections bound to a closed loop.
+engine: AsyncEngine = _make_engine()
+
+# Per-event-loop engine cache. WeakKeyDictionary lets engines be garbage
+# collected once their loop is gone, which is enough for CLI/test lifecycles.
+_engines_by_loop: dict[asyncio.AbstractEventLoop, AsyncEngine] = {}
+
+
+def get_engine() -> AsyncEngine:
+    """Return an engine bound to the current event loop.
+
+    Creates and caches a new engine when called from a loop that has not been
+    seen before. This prevents ``RuntimeError: attached to a different loop``
+    when the module is imported in one asyncio.run() context and its helpers
+    are used from another.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Fallback to the import-time engine when no loop is running.
+        return engine
+
+    existing = _engines_by_loop.get(loop)
+    if existing is None:
+        existing = _make_engine()
+        _engines_by_loop[loop] = existing
+    return existing
+
+
+def _get_session_maker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(
+        bind=get_engine(),
+        expire_on_commit=False,
+    )
+
+
+# Backwards-compatible module-level sessionmaker. Tests patch this directly.
+AsyncSessionLocal = _get_session_maker()
 
 
 def _get_audit_log_table() -> type[SQLModel]:
     from governance_controller.models.audit_log import AuditLog
 
     return AuditLog
+
+
+async def dispose_engines() -> None:
+    """Dispose all per-loop engines and the module-level fallback engine.
+
+    Call this once at the end of a top-level CLI command or process lifetime to
+    ensure connections bound to a particular event loop are not recycled by a
+    later asyncio.run() in the same process.
+    """
+    for eng in list(_engines_by_loop.values()):
+        await eng.dispose()
+    _engines_by_loop.clear()
+    await engine.dispose()
 
 
 async def run_migrations() -> None:
@@ -68,7 +130,7 @@ async def run_migrations() -> None:
     """
     # Force the AuditLog model to be imported so its table name is known.
     _get_audit_log_table()
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
@@ -141,7 +203,7 @@ async def run_migrations() -> None:
 
 
 async def init_db() -> None:
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
     await run_migrations()
 
@@ -150,14 +212,14 @@ async def ensure_sqlite_tables() -> None:
     """Create all tables for in-memory SQLite on the async connection."""
     if not settings.database_url.startswith("sqlite"):
         return
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession]:
     if settings.database_url.startswith("sqlite"):
         await ensure_sqlite_tables()
-    async with AsyncSessionLocal() as session:
+    async with _get_session_maker()() as session:
         try:
             yield session
             await session.commit()
@@ -176,7 +238,7 @@ async def get_db_session() -> AsyncGenerator[AsyncSession]:
     """
     if settings.database_url.startswith("sqlite"):
         await ensure_sqlite_tables()
-    async with AsyncSessionLocal() as session:
+    async with _get_session_maker()() as session:
         try:
             yield session
             await session.commit()

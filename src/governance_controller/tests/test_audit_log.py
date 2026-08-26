@@ -214,12 +214,33 @@ def _is_postgres(url: str) -> bool:
     return url.startswith("postgresql")
 
 
+def test_get_engine_returns_different_engine_per_loop() -> None:
+    """#190: engine must not be reused across different event loops."""
+    import asyncio
+
+    from governance_controller.db import get_engine
+
+    engines: list[AsyncEngine] = []
+
+    async def capture() -> None:
+        engines.append(get_engine())
+
+    asyncio.run(capture())
+    asyncio.run(capture())
+
+    assert len(engines) == 2
+    assert engines[0] is not engines[1]
+
+
 async def test_run_migrations_raises_when_auditlog_table_missing() -> None:
     """#137: run_migrations() guard raises before introspecting a missing table."""
+    import asyncio
+
+    from governance_controller.db import _engines_by_loop, run_migrations
     from governance_controller.db import engine as db_engine
-    from governance_controller.db import run_migrations
 
     original_engine = db_engine
+    original_engines = dict(_engines_by_loop)
     # Use a fresh, empty in-memory SQLite database with no create_all().
     test_engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -229,6 +250,7 @@ async def test_run_migrations_raises_when_auditlog_table_missing() -> None:
     try:
         db_module = __import__("governance_controller.db", fromlist=["engine"])
         db_module.engine = test_engine
+        _engines_by_loop[asyncio.get_running_loop()] = test_engine
         with pytest.raises(
             RuntimeError,
             match=r"run_migrations\(\) called before auditlog table exists",
@@ -236,6 +258,8 @@ async def test_run_migrations_raises_when_auditlog_table_missing() -> None:
             await run_migrations()
     finally:
         db_module.engine = original_engine
+        _engines_by_loop.clear()
+        _engines_by_loop.update(original_engines)
         await test_engine.dispose()
 
 

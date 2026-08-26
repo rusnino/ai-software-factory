@@ -86,7 +86,7 @@ def reconcile(
     fixes back to Plane.
     """
     from governance_controller import config
-    from governance_controller.db import engine
+    from governance_controller.db import dispose_engines
 
     if plane_base_url:
         config.settings.plane_base_url = plane_base_url
@@ -120,6 +120,6 @@ def reconcile(
     try:
         asyncio.run(_run())
     finally:
-        # Dispose of the engine pool so a later asyncio.run() in the same
+        # Dispose of per-loop engines so a later asyncio.run() in the same
         # process does not reuse connections bound to the now-closed loop.
-        asyncio.run(engine.dispose())
+        asyncio.run(dispose_engines())
