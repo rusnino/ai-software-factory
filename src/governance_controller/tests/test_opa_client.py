@@ -1,5 +1,6 @@
 """Tests for the OPA client and policy backend selector."""
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -73,9 +74,12 @@ async def test_opa_client_sends_minimal_input(
         project_name="SecretProject",
         repository=RepositoryConfig(path="/repo"),
         execution={"allowed_harnesses": ["opencode"]},
+        security={"forbidden_paths": [".env"]},
     )
 
-    result = await backend.evaluate(contract, profile, ApprovalType.PLAN)
+    result = await backend.evaluate(
+        contract, profile, ApprovalType.PLAN, actor="human-1"
+    )
 
     assert result.allowed is True
     assert captured is not None
@@ -83,6 +87,11 @@ async def test_opa_client_sends_minimal_input(
     assert "objective" not in captured
     assert "commands" in captured
     assert captured.get("allowed_harnesses") == ["opencode"]
+    assert captured.get("approval", {}).get("actor") == "human-1"
+    assert "security" in captured
+    assert "git" in captured
+    assert "execution" in captured
+    assert "role" in captured.get("execution", {})
 
 
 async def test_opa_client_raises_on_http_error(httpx_mock) -> None:
@@ -229,6 +238,21 @@ async def test_backend_falls_back_to_embedded_when_opa_unreachable(
 
     assert result.allowed is False
     assert any("OPA" in v for v in result.violations)
+
+
+def test_governance_rego_uses_data_minimized_input_shape() -> None:
+    """#216: rego must read the data-minimized input, not input.contract/profile."""
+    rego_path = (
+        Path(__file__).resolve().parents[1] / "policies" / "opa" / "governance.rego"
+    )
+    assert rego_path.exists(), f"governance.rego not found at {rego_path}"
+    text = rego_path.read_text()
+
+    assert "input.contract" not in text, "rego still references full contract input"
+    assert "input.profile" not in text, "rego still references full profile input"
+    for key in ["execution", "security", "git", "commands", "allowed_harnesses"]:
+        needle = f'object.get(input, "{key}"'
+        assert needle in text, f"rego missing data-minimized {key} input"
 
 
 async def test_backend_uses_embedded_engine_without_opa_config(

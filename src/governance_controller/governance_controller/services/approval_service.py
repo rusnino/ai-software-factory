@@ -144,7 +144,11 @@ class ApprovalService:
 
         # 1. Policy evaluation must happen before any state change or record.
         policy_result: PolicyResult = await self.policy_backend.evaluate(
-            contract, profile, approval_type, policy_engine=self.policy_engine
+            contract,
+            profile,
+            approval_type,
+            actor=actor,
+            policy_engine=self.policy_engine,
         )
         if not policy_result.allowed:
             await AuditService.log(

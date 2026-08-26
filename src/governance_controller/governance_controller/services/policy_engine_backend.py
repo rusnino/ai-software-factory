@@ -31,6 +31,7 @@ class PolicyEngineBackend:
         contract: TaskContract,
         profile: ProjectProfile,
         approval_type: ApprovalType,
+        actor: str | None = None,
         policy_engine: type[PolicyEngine] | None = None,
     ) -> PolicyResult:
         """Return a PolicyResult.
@@ -45,7 +46,9 @@ class PolicyEngineBackend:
             return embedded
 
         if settings.opa_base_url:
-            opa = await self._evaluate_opa(contract, profile, approval_type)
+            opa = await self._evaluate_opa(
+                contract, profile, approval_type, actor=actor
+            )
             if not opa.allowed:
                 return opa
             # Both allowed: merge violations (should be empty) and return.
@@ -61,13 +64,14 @@ class PolicyEngineBackend:
         contract: TaskContract,
         profile: ProjectProfile,
         approval_type: ApprovalType,
+        actor: str | None = None,
     ) -> PolicyResult:
         client = self._opa
         if client is None:
             client = OPAClient()
 
         input_data = self._minimal_opa_input(
-            contract, profile, approval_type
+            contract, profile, approval_type, actor=actor
         )
 
         try:
@@ -92,6 +96,7 @@ class PolicyEngineBackend:
         contract: TaskContract,
         profile: ProjectProfile,
         approval_type: ApprovalType,
+        actor: str | None = None,
     ) -> dict[str, object]:
         """Return a data-minimized input document for OPA.
 
@@ -118,20 +123,43 @@ class PolicyEngineBackend:
         if profile.execution and profile.execution.allowed_harnesses:
             allowed_harnesses = list(profile.execution.allowed_harnesses)
 
+        execution = contract.execution
+        security = profile.security
+        git = profile.git
+
         return {
             "task_id": contract.task_id,
             "project_id": contract.project_id,
             "proposed_by": contract.proposed_by,
             "approval_type": approval_type.value,
             "approval": {
-                "actor": contract.proposed_by,
+                "actor": actor or "",
                 "type": approval_type.value,
             },
             "execution": {
-                "harness": contract.execution.harness,
+                "harness": execution.harness,
+                "role": execution.role,
+                "uses_docker_socket": execution.uses_docker_socket,
+                "destructive_shell": execution.destructive_shell,
+                "network_access": execution.network_access,
+                "spawn_subagents": execution.spawn_subagents,
+                "force_push": execution.force_push,
+                "signed_commits": execution.signed_commits,
             },
             "commands": commands,
             "forbidden_paths": list(contract.forbidden_paths),
             "allowed_harnesses": allowed_harnesses,
+            "security": {
+                "docker_socket": security.docker_socket,
+                "destructive_shell": security.destructive_shell,
+                "network": security.network,
+                "spawn_subagents": security.spawn_subagents,
+                "forbidden_paths": list(security.forbidden_paths),
+            },
+            "git": {
+                "merge_requires_human": git.merge_requires_human,
+                "force_push": git.force_push,
+                "signed_commits": git.signed_commits,
+            },
         }
 
