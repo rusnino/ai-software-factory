@@ -52,9 +52,9 @@ class Settings(BaseSettings):
     # Leave empty ONLY for local/dev where the endpoint is not exposed.
     plane_webhook_secret: str = ""
     # Comma-separated list of Plane member emails that are allowed to originate
-    # state-change webhooks. If empty, any successfully authenticated webhook is
-    # accepted (NOT recommended for production). Use Plane member email addresses
-    # because they are stable, human-verified identifiers in Plane CE.
+    # state-change webhooks. If empty, no actor is trusted and every webhook is
+    # rejected (fail-closed). Use Plane member email addresses because they are
+    # stable, human-verified identifiers in Plane CE.
     plane_webhook_allowed_actors: str = ""
 
     # Generic intake webhook authentication. Email and generic idea intake
