@@ -69,9 +69,22 @@ class TaskService:
                     if isinstance(plane_issue_id, str):
                         task.plane_issue_id = plane_issue_id
                         await self.db.flush()
-            except Exception:
-                # Plane projection failures must not block task creation.
-                pass
+            except Exception as exc:
+                # Plane projection failures must not block task creation, but
+                # they must be durable and actionable. Record an audit entry so
+                # reconciliation can retry later.
+                await AuditService.log(
+                    db=self.db,
+                    event_type="plane_issue_creation_failed",
+                    task_id=task.id,
+                    actor="system",
+                    source="task_service",
+                    payload={
+                        "project_id": task.project_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
 
         await AuditService.log(
             db=self.db,

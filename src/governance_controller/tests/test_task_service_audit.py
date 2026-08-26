@@ -1,5 +1,8 @@
 """Tests for audit logging inside TaskService."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,3 +90,43 @@ async def test_profile_update_logs_only_when_content_changes(
 async def _count_audit_events(db_session: AsyncSession, task_id: str) -> int:
     rows = await db_session.execute(select(AuditLog).where(AuditLog.task_id == task_id))
     return len(rows.scalars().all())
+
+
+async def test_plane_issue_creation_failure_is_audited(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#215: a failed initial Plane issue creation must leave an audit trail."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+
+    failing_service = MagicMock()
+    failing_service.ensure_plane_issue = AsyncMock(
+        side_effect=RuntimeError("Plane unavailable")
+    )
+
+    with patch(
+        "governance_controller.services.task_service.PlaneProjectionService",
+        return_value=failing_service,
+    ):
+        contract = TaskContract(
+            task_id="audit-plane-fail",
+            project_id="audit-proj-5",
+            proposed_by="agent-1",
+            objective="Build the thing",
+            acceptance=["It works"],
+        )
+        profile = ProjectProfile(
+            project_id="audit-proj-5",
+            project_name="Audit Project",
+            repository=RepositoryConfig(path="/tmp/repo"),
+        )
+        service = TaskService(db_session)
+        await service.create(contract, profile)
+
+    rows = await db_session.execute(
+        select(AuditLog).where(AuditLog.task_id == "audit-plane-fail")
+    )
+    entries = rows.scalars().all()
+    assert any(e.event_type == "plane_issue_creation_failed" for e in entries)
