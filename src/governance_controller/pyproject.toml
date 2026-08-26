@@ -25,6 +25,7 @@ dependencies = [
     "structlog>=24.4",
     "typer>=0.27.1",
     "uvicorn>=0.30",
+    "psutil>=6.0",
 ]
 
 [project.optional-dependencies]

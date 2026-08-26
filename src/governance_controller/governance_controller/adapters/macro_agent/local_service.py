@@ -62,10 +62,14 @@ class LocalMacroAgentService:
             return sibling
         return os.path.join(repo_root, "macro_agent_service")
 
-    @staticmethod
-    def _wait_for_port(host: str, port: int, timeout: float) -> bool:
+    def _wait_for_port(self, host: str, port: int, timeout: float) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            proc = self._proc
+            if proc is not None and proc.poll() is not None:
+                # The subprocess exited before binding; no point waiting for the
+                # port, and a stale process on the same port must not be trusted.
+                return False
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(0.2)
                 if sock.connect_ex((host, port)) == 0:
@@ -100,16 +104,16 @@ class LocalMacroAgentService:
         return False
 
     def _port_owned_by_process(self) -> bool:
-        """Return True if the bound port belongs to our subprocess."""
+        """Return True if the bound port belongs to our subprocess.
+
+        Relies on ``psutil`` (declared as a production dependency) so a stale
+        service squatting the port is not mistaken for the freshly spawned one.
+        """
+        import psutil
+
         proc = self._proc
         if proc is None or proc.pid is None:
             return False
-        try:
-            import psutil
-        except ImportError:  # pragma: no cover
-            # Without psutil we cannot verify ownership; fall back to trusting
-            # the health check, which is the pre-fix behaviour.
-            return True
 
         try:
             process = psutil.Process(proc.pid)
@@ -121,7 +125,7 @@ class LocalMacroAgentService:
         candidates = [process] + list(process.children(recursive=True))
         for candidate in candidates:
             try:
-                for conn in candidate.connections(kind="inet"):
+                for conn in candidate.net_connections(kind="inet"):
                     if (
                         conn.status == psutil.CONN_LISTEN
                         and conn.laddr.port == self.port
