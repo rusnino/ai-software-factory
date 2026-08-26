@@ -134,9 +134,7 @@ class TestPolicyEngineRejections:
         assert any("subagents" in v for v in result.violations)
         assert any("Unrestricted network" in v for v in result.violations)
 
-    def test_network_access_miscased_or_padded_is_rejected(
-        self,
-    ) -> None:
+    def test_network_access_miscased_or_padded_is_rejected(self) -> None:
         """#232: schema layer must reject miscased/spaced network_access values."""
         profile = _make_profile()
         for value in ("Unrestricted", "unrestricted ", "UNRESTRICTED"):
@@ -147,6 +145,24 @@ class TestPolicyEngineRejections:
             contract.execution.network_access = "restricted"
             result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
             assert result.allowed is True
+
+    def test_empty_or_whitespace_command_rejected(self) -> None:
+        """#231: Check.command must not be empty or whitespace-only."""
+        for command in ("", "   ", "\t"):
+            with pytest.raises(ValidationError):
+                Check(type="x", command=command)
+
+    def test_scope_check_root_paths_rejected(self) -> None:
+        """#230: allowed_paths that normalize to root bypass the scope check."""
+        with pytest.raises(ValueError):
+            CompletionContract(
+                task_id="task-1",
+                scope_check=ScopeCheck(
+                    description="bypass",
+                    allowed_paths=["."],
+                    forbidden_paths=[],
+                ),
+            )
 
     def test_negative_timeout_minutes_rejected(self) -> None:
         """#233: timeout_minutes must not be negative."""

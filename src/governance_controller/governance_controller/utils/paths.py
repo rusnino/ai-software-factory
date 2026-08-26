@@ -15,7 +15,10 @@ def normalize_path(path: str) -> str:
 
     Expands ``~`` and resolves ``..`` segments using stdlib helpers. Relative
     paths are anchored at the root so that ``..`` segments cannot escape above
-    an absolute forbidden prefix. The result has no trailing slash.
+    an absolute forbidden prefix.
+
+    Paths that collapse to the filesystem root (``.``, ``..``, ``/``) are
+    rejected because they would match every path as an empty-string prefix.
     """
     expanded = os.path.expanduser(path)
     # Anchor relative paths at / so that normpath resolves .. without depending
@@ -23,4 +26,9 @@ def normalize_path(path: str) -> str:
     if not os.path.isabs(expanded):
         expanded = "/" + expanded
     normalized = os.path.normpath(expanded)
-    return normalized.rstrip("/")
+    root = normalized.rstrip("/")
+    if root == "":
+        raise ValueError(
+            f"path normalizes to root and cannot be used as a prefix: {path!r}"
+        )
+    return root
