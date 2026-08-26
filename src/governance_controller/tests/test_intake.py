@@ -4,6 +4,7 @@ import hashlib
 import hmac
 from collections.abc import AsyncGenerator
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -177,6 +178,70 @@ async def test_generic_idea_intake(
     body = response.json()
     assert body["status"] == "draft_created"
     assert fake_ingestion.calls[0][1].source == "api"
+
+
+async def test_duplicate_intake_returns_409(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#214: duplicate submissions must return 409, not 500."""
+    from governance_controller.services.idea_ingestion_service import (
+        DuplicateIntakeError,
+    )
+
+    monkeypatch.setattr(
+        "governance_controller.config.settings.intake_secret", "secret"
+    )
+    fake_ingestion.create_draft = AsyncMock(  # type: ignore[method-assign]
+        side_effect=DuplicateIntakeError("Duplicate intake submission: idea/1")
+    )
+    response = await async_client.post(
+        "/intake/idea",
+        json={
+            "source": "idea",
+            "source_id": "1",
+            "sender": "alice@example.com",
+            "subject": "Feature request",
+            "body": "We need a thing",
+        },
+        headers={"X-Intake-Secret": "secret"},
+    )
+
+    assert response.status_code == 409
+    assert "Duplicate" in response.json()["detail"]
+
+
+async def test_rate_limited_intake_returns_429(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#214: rate-limit violations must return 429, not 500."""
+    from governance_controller.services.idea_ingestion_service import (
+        IntakeRateLimitError,
+    )
+
+    monkeypatch.setattr(
+        "governance_controller.config.settings.intake_secret", "secret"
+    )
+    fake_ingestion.create_draft = AsyncMock(  # type: ignore[method-assign]
+        side_effect=IntakeRateLimitError("Rate limit exceeded")
+    )
+    response = await async_client.post(
+        "/intake/idea",
+        json={
+            "source": "idea",
+            "source_id": "2",
+            "sender": "alice@example.com",
+            "subject": "Feature request",
+            "body": "We need a thing",
+        },
+        headers={"X-Intake-Secret": "secret"},
+    )
+
+    assert response.status_code == 429
+    assert "Rate limit" in response.json()["detail"]
 
 
 async def test_telegram_invalid_secret_returns_403(

@@ -17,7 +17,9 @@ from governance_controller.db import get_db
 from governance_controller.schemas.intake import RawIdea
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.idea_ingestion_service import (
+    DuplicateIntakeError,
     IdeaIngestionService,
+    IntakeRateLimitError,
 )
 
 router = APIRouter(prefix="/intake", tags=["intake"])
@@ -70,6 +72,28 @@ def get_idea_ingestion_service() -> IdeaIngestionService:
     if _ServiceContainer.service is not None:
         return _ServiceContainer.service
     return IdeaIngestionService()
+
+
+def _raise_http_from_ingestion_error(exc: RuntimeError) -> None:
+    """Translate ingestion service errors into explicit HTTP responses.
+
+    Duplicate submissions become 409 Conflict so retry-on-error infra does not
+    loop. Rate-limit violations become 429 Too Many Requests.
+    """
+    if isinstance(exc, DuplicateIntakeError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    if isinstance(exc, IntakeRateLimitError):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(exc),
+        ) from exc
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=str(exc),
+    ) from exc
 
 
 async def _log_spam(
@@ -137,7 +161,10 @@ async def telegram_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified, db=db)
+    try:
+        draft = await ingestion.create_draft(classified, db=db)
+    except RuntimeError as exc:
+        _raise_http_from_ingestion_error(exc)
     return {
         "status": "draft_created",
         "category": classified.category,
@@ -159,7 +186,10 @@ async def email_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified, db=db)
+    try:
+        draft = await ingestion.create_draft(classified, db=db)
+    except RuntimeError as exc:
+        _raise_http_from_ingestion_error(exc)
     return {
         "status": "draft_created",
         "category": classified.category,
@@ -180,7 +210,10 @@ async def generic_idea_intake(
         await _log_spam(db, idea, classified.reason)
         return {"status": "ignored", "reason": classified.reason}
 
-    draft = await ingestion.create_draft(classified, db=db)
+    try:
+        draft = await ingestion.create_draft(classified, db=db)
+    except RuntimeError as exc:
+        _raise_http_from_ingestion_error(exc)
     return {
         "status": "draft_created",
         "category": classified.category,

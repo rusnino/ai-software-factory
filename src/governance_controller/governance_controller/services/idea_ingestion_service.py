@@ -20,6 +20,14 @@ _PROJECT_ID_RE = re.compile(
 )
 
 
+class DuplicateIntakeError(RuntimeError):
+    """Raised when the same intake submission is received twice."""
+
+
+class IntakeRateLimitError(RuntimeError):
+    """Raised when a sender exceeds the intake rate limit."""
+
+
 class IdeaIngestionService:
     """Classify intake ideas and create draft Plane issues.
 
@@ -142,7 +150,7 @@ class IdeaIngestionService:
             )
         )
         if existing is not None:
-            raise RuntimeError(
+            raise DuplicateIntakeError(
                 f"Duplicate intake submission: {source}/{source_id}"
             )
 
@@ -159,6 +167,6 @@ class IdeaIngestionService:
         )
         recent = count_result.scalar() or 0
         if recent >= limit:
-            raise RuntimeError(
+            raise IntakeRateLimitError(
                 f"Rate limit exceeded for sender {sender}: {recent} in the last minute"
             )
