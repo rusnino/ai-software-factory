@@ -1,4 +1,5 @@
 import asyncio
+import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -60,7 +61,10 @@ engine: AsyncEngine = _make_engine()
 
 # Per-event-loop engine cache. WeakKeyDictionary lets engines be garbage
 # collected once their loop is gone, which is enough for CLI/test lifecycles.
-_engines_by_loop: dict[asyncio.AbstractEventLoop, AsyncEngine] = {}
+_engines_by_loop: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    AsyncEngine,
+] = weakref.WeakKeyDictionary()
 
 
 def get_engine() -> AsyncEngine:
@@ -108,6 +112,8 @@ async def dispose_engines() -> None:
     ensure connections bound to a particular event loop are not recycled by a
     later asyncio.run() in the same process.
     """
+    # Copy values because WeakKeyDictionary may mutate during iteration if a
+    # loop's finalizer runs while we dispose its engine.
     for eng in list(_engines_by_loop.values()):
         await eng.dispose()
     _engines_by_loop.clear()
