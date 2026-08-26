@@ -230,10 +230,13 @@ Append-only, tamper-evident.
 
 ## 3.9 Reconciliation
 
-Controller runs periodic reconciliation (default 15 min):
+Reconciliation is implemented by ``ReconciliationService`` and exposed through the
+``governance_controller.cli reconcile`` command. In Phase 2 the Controller does **not** run an
+in-process scheduler; deployments should invoke the CLI on an external cron or systemd timer
+(default cadence: every 15 minutes). The CLI performs the same loop described in this section:
 
 1. Compare Plane task list with Controller DB.
 2. Compare Controller DB runtime graph with opentasks.
 3. Detect divergence.
 4. On divergence: alert human, do not auto-correct execution state.
-5. Allow auto-correct only for projection fields (Plane labels, comments).
+5. Allow auto-correct only for projection fields (Plane state, comments).

@@ -87,10 +87,18 @@ Uses macro-agent's REST/ACP interface.
 
 ## 5.6 Fallback Polling
 
-If Event Bridge is unhealthy:
+If Event Bridge stops delivering events, the Controller detects stuck executions through the
+``StuckExecutionPoller`` service and the ``poll-stuck-executions`` CLI command:
 
-- Controller polls macro-agent REST API `/executions/{id}` every 30 seconds.
-- After timeout (default 2x task timeout) without events → mark `BLOCKED` and alert human.
+- Poll macro-agent REST API `/runs/{run_id}` via ``MacroAgentClient.status()``.
+- Deadline is 2x the task's ``timeout_minutes`` from the latest ``Execution`` row's
+  ``started_at``.
+- When the run is not still active at deadline, move the task to ``BLOCKED``, finalize
+  the execution row, and record an ``execution_blocked_timeout`` audit alert.
+
+In Phase 2 this is a one-shot command meant to be invoked by an external scheduler alongside
+``reconcile``. A future phase may add an in-process background loop if deployment complexity
+justifies it.
 
 ## 5.7 Traceability
 

@@ -111,17 +111,16 @@ rounds of narrowly-scoped `policy_engine.py` command-validation review never loo
 angle. **Do not treat "Phase 2 review" as bounded to Phase 2 code** — the next round should keep
 auditing wherever the live issue list and fresh eyes lead, not stop at a phase boundary.
 
-## Immediate Next Step: Close the 14 Open Issues, Then Phase 3
+## Immediate Next Step: Verify Gate-Clean, Then Phase 3
 
-Prioritize the 2 CRITICAL (`#221` CLI silent no-op, `#226` hardcoded admin skeleton key) and 6 HIGH
-(`#223` no CI, `#227` case-sensitivity approval bypass, `#228` no background polling, `#230` scope-check
-bypass, `#231` empty-command silent pass, `#232` network-access casing bypass) issues first. Given
-this project's own track record — every "gate-clean" declaration so far has been wrong on
-independent re-verification — the next round after closing these should be another full
-live-reproduction review, not a trust-the-fix-commits pass.
+The 14 open issues from Round 5 have been addressed: `#221` (CLI main guard), `#226` (configurable
+admins), `#223` (CI workflow), `#227` (actor normalization), `#228` (stuck-execution fallback
+poller), `#230` (root-prefix scope-path rejection), `#231` (empty/whitespace command rejection),
+`#232` (network enum schema validation), plus the MEDIUM/LOW items `#222`, `#224`, `#225`, `#229`,
+`#233`, `#234`. Before declaring Phase 2 gate-clean, run a fresh live-reproduction review and
+confirm the live issue list has no open `severity:critical` or `severity:high` issues.
 
-Once the live issue list genuinely has no open `severity:critical`/`severity:high` issues, Phase 3
-scope (from SPEC-10 §10.3) is:
+Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
 - Docker sandboxing for verification/execution. See
   `docs/research-verification-sandboxing-scope-2026-08-24.md`.
