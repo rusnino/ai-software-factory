@@ -123,7 +123,7 @@ class ReconciliationService:
         try:
             issues_response = await client.list_all_issues(
                 project_id=effective_project_id,
-                page_size=1000,
+                per_page=1000,
             )
             states_response = await client.list_states(
                 project_id=effective_project_id

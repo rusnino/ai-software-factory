@@ -47,7 +47,7 @@ class _FakePlaneClient:
     async def list_all_issues(
         self,
         project_id: str | None = None,
-        page_size: int = 1000,
+        per_page: int = 1000,
     ) -> dict[str, Any]:
         return {"results": self.issues}
 

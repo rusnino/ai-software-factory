@@ -186,6 +186,18 @@ class OpentasksMaterializer:
             ) from exc
 
         dependencies: set[str] = set()
+        # Real Plane returns a grouped dict keyed by relation type.
+        # ``blocked_by`` holds the issues the current issue depends on.
+        blocked_by = result.get("blocked_by") if isinstance(result, dict) else None
+        if isinstance(blocked_by, list):
+            for item in blocked_by:
+                if isinstance(item, dict):
+                    dep_id = item.get("issue_id")
+                    if isinstance(dep_id, str):
+                        dependencies.add(dep_id)
+            return dependencies
+
+        # Fallback for paginated list shapes injected by tests/fakes.
         for item in _result_items(result):
             dep_id = _dependency_id(item)
             if dep_id:

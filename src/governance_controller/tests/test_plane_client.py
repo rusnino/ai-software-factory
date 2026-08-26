@@ -130,16 +130,16 @@ async def test_add_comment_request(httpx_mock, settings_override: Settings) -> N
 async def test_list_issue_dependencies_request(
     httpx_mock, settings_override: Settings
 ) -> None:
-    """list_issue_dependencies calls the issue-relations endpoint."""
-    httpx_mock.add_response(status_code=200, json={"results": []})
+    """list_issue_dependencies calls the real work-items relations endpoint."""
+    httpx_mock.add_response(status_code=200, json={"blocked_by": [], "blocking": []})
     client = PlaneClient()
     result = await client.list_issue_dependencies("issue-1")
 
-    assert result["results"] == []
+    assert result["blocked_by"] == []
     request = httpx_mock.get_request()
     assert (
         str(request.url)
-        == "http://plane.test/api/v1/workspaces/ws/projects/proj-1/issues/issue-1/issue-relations/?relation_type=blocking"
+        == "http://plane.test/api/v1/workspaces/ws/projects/proj-1/work-items/issue-1/relations/"
     )
 
 
@@ -174,6 +174,36 @@ async def test_malformed_json_raises_plane_client_error(
 
     with pytest.raises(PlaneClientError, match="invalid JSON"):
         await client.list_projects()
+
+
+async def test_list_all_issues_uses_next_page_results_for_termination(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """#189: pagination stops when next_page_results is false, not next_cursor."""
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [{"id": "issue-1"}],
+            "next_cursor": "1000:1:0",
+            "next_page_results": True,
+        },
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [{"id": "issue-2"}],
+            "next_cursor": "1000:2:0",
+            "next_page_results": False,
+        },
+    )
+
+    client = PlaneClient()
+    result = await client.list_all_issues(per_page=1000)
+
+    assert [i["id"] for i in result["results"]] == ["issue-1", "issue-2"]
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert "cursor=1000%3A1%3A0" in str(requests[1].url)
 
 
 async def test_update_issue_accepts_extra_fields(

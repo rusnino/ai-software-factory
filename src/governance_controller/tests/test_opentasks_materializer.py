@@ -181,3 +181,59 @@ async def test_opentasks_id_fallback(fake_client: _FakePlaneClient) -> None:
 
     task_by_plane = {t.plane_task_id: t for t in dag.tasks}
     assert task_by_plane["P-1"].id == "OT-P-1"
+
+
+async def test_materialize_parses_grouped_plane_relations(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """#200: real Plane returns grouped relations, not a paginated results list."""
+
+    async def grouped_relations(
+        issue_id: str, project_id: str | None = None
+    ) -> dict[str, Any]:
+        if issue_id == "P-1":
+            return {
+                "blocking": [],
+                "blocked_by": [{"project_id": "proj-1", "issue_id": "P-2"}],
+            }
+        if issue_id == "P-2":
+            return {
+                "blocking": [],
+                "blocked_by": [{"project_id": "proj-1", "issue_id": "P-3"}],
+            }
+        return {"blocking": [], "blocked_by": []}
+
+    fake_client.list_issue_dependencies = grouped_relations
+
+    materializer = OpentasksMaterializer(client=fake_client)
+    dag = await materializer.materialize("P-1", "proj-1")
+
+    task_by_id = {t.id: t for t in dag.tasks}
+    assert task_by_id["OT-1"].dependencies == ["OT-2"]
+    assert task_by_id["OT-2"].dependencies == ["OT-3"]
+
+
+async def test_grouped_relations_use_blocked_by_direction(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """#200: blocking issues must not be treated as dependencies."""
+
+    async def grouped_relations(
+        issue_id: str, project_id: str | None = None
+    ) -> dict[str, Any]:
+        if issue_id == "P-1":
+            return {
+                # P-2 depends on P-1, not the other way around.
+                "blocking": [{"project_id": "proj-1", "issue_id": "P-2"}],
+                "blocked_by": [],
+            }
+        return {"blocking": [], "blocked_by": []}
+
+    fake_client.list_issue_dependencies = grouped_relations
+
+    materializer = OpentasksMaterializer(client=fake_client)
+    dag = await materializer.materialize("P-1", "proj-1")
+
+    task_by_id = {t.id: t for t in dag.tasks}
+    assert task_by_id["OT-1"].dependencies == []
+    assert len(dag.tasks) == 1

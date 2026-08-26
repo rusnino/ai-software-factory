@@ -238,18 +238,24 @@ class PlaneClient:
         issue_id: str,
         project_id: str | None = None,
     ) -> dict[str, Any]:
-        """List dependencies for an issue."""
+        """List relations for an issue.
+
+        Uses Plane CE's ``work-items/{id}/relations/`` endpoint, which returns
+        a grouped dict keyed by relation type. ``blocked_by`` contains the
+        issues the requested issue depends on; ``blocking`` contains issues
+        that depend on it.
+        """
         project_id = project_id or self.project_id
         return await self._request(
             "GET",
-            f"/projects/{self._path_segment(project_id)}/issues/{self._path_segment(issue_id)}/issue-relations/?relation_type=blocking",
+            f"/projects/{self._path_segment(project_id)}/work-items/{self._path_segment(issue_id)}/relations/",
             project_id=project_id,
         )
 
     async def list_all_issues(
         self,
         project_id: str | None = None,
-        page_size: int = 1000,
+        per_page: int = 1000,
     ) -> dict[str, Any]:
         """List all issues in a project, following Plane pagination.
 
@@ -259,11 +265,12 @@ class PlaneClient:
         """
         project_id = project_id or self.project_id
         all_results: list[dict[str, Any]] = []
-        params: dict[str, Any] = {"page_size": page_size}
+        params: dict[str, Any] = {"per_page": per_page}
         next_cursor: str | None = None
         last_page: dict[str, Any] = {}
+        max_pages = 1000
 
-        while True:
+        for _ in range(max_pages):
             if next_cursor is not None:
                 params["cursor"] = next_cursor
             page = await self._request(
@@ -276,9 +283,14 @@ class PlaneClient:
             items = page.get("results")
             if isinstance(items, list):
                 all_results.extend(items)
-            next_cursor = page.get("next_page_results")
-            if not next_cursor:
+            next_cursor = page.get("next_cursor")
+            has_more = page.get("next_page_results")
+            if not has_more:
                 break
+        else:
+            raise PlaneClientError(
+                f"Plane pagination exceeded {max_pages} pages; aborting"
+            )
 
         merged = dict(last_page)
         merged["results"] = all_results
