@@ -1,5 +1,9 @@
 # Dev-only local orchestration. Credentials are intentionally local defaults;
 # production uses externally injected secrets.
+#
+# Ports are bound to 127.0.0.1 only so a dev laptop does not accidentally
+# expose Postgres or the API to the local network. Secret variables below are
+# set to explicit dev placeholders; rotate them before any non-local exposure.
 services:
   db:
     image: postgres:16-alpine
@@ -9,7 +13,7 @@ services:
       POSTGRES_PASSWORD: controller
       POSTGRES_DB: controller
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U controller -d controller"]
       interval: 5s
@@ -22,8 +26,15 @@ services:
       # Dev-only local database URL.
       GC_DATABASE_URL: postgresql+asyncpg://controller:controller@db:5432/controller
       GC_LOG_LEVEL: info
+      # Dev-only secrets. These must be rotated in any environment where the
+      # API, webhooks, intake, or event-bridge endpoints are reachable.
+      GC_CONTROLLER_API_SECRET: dev-controller-secret-change-me
+      GC_PLANE_WEBHOOK_SECRET: dev-plane-webhook-secret-change-me
+      GC_INTAKE_SECRET: dev-intake-secret-change-me
+      GC_EVENT_BRIDGE_SECRET: dev-event-bridge-secret-change-me
+      GC_MACRO_AGENT_API_SECRET: dev-macro-agent-secret-change-me
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
