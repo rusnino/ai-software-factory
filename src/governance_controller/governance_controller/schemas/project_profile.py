@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ProjectExecutionConfig(BaseModel):
@@ -12,9 +12,9 @@ class ProjectExecutionConfig(BaseModel):
 
     allowed_harnesses: list[str] = ["opencode"]
     sandbox: str = "worktree"
-    timeout_minutes: int = 60
-    max_retries: int = 2
-    max_parallel_agents: int = 3
+    timeout_minutes: int = Field(default=60, ge=0)
+    max_retries: int = Field(default=2, ge=0)
+    max_parallel_agents: int = Field(default=3, ge=0)
 
 
 class RepositoryConfig(BaseModel):
@@ -24,22 +24,22 @@ class RepositoryConfig(BaseModel):
 
 class SecurityConfig(BaseModel):
     forbidden_paths: list[str] = []
-    docker_socket: str = "deny"
-    network: str = "restricted"
-    destructive_shell: str = "deny"
-    spawn_subagents: str = "deny"
+    docker_socket: Literal["allow", "deny"] = "deny"
+    network: Literal["restricted", "unrestricted"] = "restricted"
+    destructive_shell: Literal["allow", "deny"] = "deny"
+    spawn_subagents: Literal["allow", "deny"] = "deny"
 
 
 class GitConfig(BaseModel):
-    force_push: str = "deny"
+    force_push: Literal["allow", "deny"] = "deny"
     merge_requires_human: bool = True
-    signed_commits: str = "optional"
+    signed_commits: Literal["optional", "required"] = "optional"
 
 
 class ProjectProfile(BaseModel):
     profile_version: str = "1.0"
-    project_id: str
-    project_name: str
+    project_id: str = Field(..., min_length=1, max_length=128)
+    project_name: str = Field(default="", max_length=256)
     repository: RepositoryConfig
     security: SecurityConfig = SecurityConfig()
     git: GitConfig = GitConfig()

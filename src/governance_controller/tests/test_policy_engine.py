@@ -1,6 +1,7 @@
 """Tests for the embedded PolicyEngine."""
 
 import pytest
+from pydantic import ValidationError
 
 from governance_controller.constants import ApprovalType
 from governance_controller.harness import registry
@@ -27,6 +28,9 @@ def _make_contract(
     completion_contract: CompletionContract | None = None,
     uses_docker_socket: bool = False,
     destructive_shell: bool = False,
+    network_access: str = "restricted",
+    timeout_minutes: int = 60,
+    max_retries: int = 2,
     verification: dict | None = None,
 ) -> TaskContract:
     data: dict = {
@@ -38,6 +42,9 @@ def _make_contract(
             harness=harness,
             uses_docker_socket=uses_docker_socket,
             destructive_shell=destructive_shell,
+            network_access=network_access,
+            timeout_minutes=timeout_minutes,
+            max_retries=max_retries,
         ),
         "forbidden_paths": forbidden_paths or [],
     }
@@ -63,6 +70,7 @@ def _make_profile(
     merge_requires_human: bool = True,
     docker_socket: str = "deny",
     destructive_shell: str = "deny",
+    network: str = "restricted",
     timeout_minutes: int = 60,
     max_retries: int = 2,
 ) -> ProjectProfile:
@@ -79,6 +87,7 @@ def _make_profile(
             "forbidden_paths": forbidden_paths or [],
             "docker_socket": docker_socket,
             "destructive_shell": destructive_shell,
+            "network": network,
         },
         git={"merge_requires_human": merge_requires_human},
     )
@@ -124,6 +133,30 @@ class TestPolicyEngineRejections:
         assert any("Destructive shell" in v for v in result.violations)
         assert any("subagents" in v for v in result.violations)
         assert any("Unrestricted network" in v for v in result.violations)
+
+    def test_network_access_miscased_or_padded_is_rejected(
+        self,
+    ) -> None:
+        """#232: schema layer must reject miscased/spaced network_access values."""
+        profile = _make_profile()
+        for value in ("Unrestricted", "unrestricted ", "UNRESTRICTED"):
+            with pytest.raises(ValidationError):
+                _make_contract(network_access=value)
+            # Confirm the policy engine never sees the bypassed value.
+            contract = _make_contract()
+            contract.execution.network_access = "restricted"
+            result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+            assert result.allowed is True
+
+    def test_negative_timeout_minutes_rejected(self) -> None:
+        """#233: timeout_minutes must not be negative."""
+        with pytest.raises(ValidationError):
+            _make_contract(timeout_minutes=-1)
+
+    def test_negative_max_retries_rejected(self) -> None:
+        """#233: max_retries must not be negative."""
+        with pytest.raises(ValidationError):
+            _make_contract(max_retries=-1)
 
     def test_timeout_minutes_above_profile_cap_rejected(self) -> None:
         contract = _make_contract()

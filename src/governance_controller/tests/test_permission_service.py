@@ -11,6 +11,19 @@ def service() -> PermissionService:
     return PermissionService(admins={"admin"})
 
 
+async def test_default_permission_service_reads_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#226: default PermissionService reads GC_ADMINS from config."""
+    from governance_controller.config import settings
+
+    monkeypatch.setattr(settings, "admins", "alice,bob")
+
+    from governance_controller.services.permission_service import _configured_admins
+
+    assert _configured_admins() == {"alice", "bob"}
+
+
 class TestPermissionServicePlanApproval:
     async def test_non_admin_can_approve_plan(
         self,
@@ -125,3 +138,28 @@ class TestPermissionServiceSystemAndAgent:
                 "task-1",
                 approval_type,
             )
+
+    async def test_miscased_system_actor_blocked(
+        self,
+        service: PermissionService,
+    ) -> None:
+        """#227: 'System' and other case variants must be blocked."""
+        for approval_type in ApprovalType:
+            for actor in ("System", "SYSTEM", " Agent:worker ", "Agent:worker"):
+                assert not await service.may_approve(
+                    actor,
+                    "task-1",
+                    approval_type,
+                )
+
+    async def test_admin_matching_is_case_insensitive(
+        self,
+        service: PermissionService,
+    ) -> None:
+        """#227: configured admins match case-insensitively after normalization."""
+        service = PermissionService(admins={"Alice@Example.com"})
+        assert await service.may_approve(
+            "alice@example.com",
+            "task-1",
+            ApprovalType.EXECUTION,
+        )

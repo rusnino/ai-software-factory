@@ -28,6 +28,24 @@ class PermissionService:
     def __init__(self, admins: set[str] | None = None) -> None:
         self.admins: set[str] = admins if admins is not None else _configured_admins()
 
+    @staticmethod
+    def _normalize_actor(actor: str) -> str:
+        """Return a normalized actor identifier.
+
+        Strips surrounding whitespace, folds to lower case, and removes ASCII
+        control / zero-width characters so casing/whitespace cannot bypass
+        system/agent blocks or self-approval checks.
+        """
+        stripped = actor.strip()
+        # Strip zero-width and control characters commonly used to evade
+        # simple string checks.
+        cleaned = "".join(
+            ch
+            for ch in stripped
+            if ch.isprintable() or ch.isspace()
+        )
+        return cleaned.strip().lower()
+
     async def may_approve(
         self,
         actor: str,
@@ -35,15 +53,17 @@ class PermissionService:
         approval_type: ApprovalType,
     ) -> bool:
         """Return whether ``actor`` may request ``approval_type`` for ``task_id``."""
+        normalized = self._normalize_actor(actor)
+
         if (
-            actor == "system"
-            or actor == "agent"
-            or actor.startswith("system:")
-            or actor.startswith("agent:")
+            normalized == "system"
+            or normalized == "agent"
+            or normalized.startswith("system:")
+            or normalized.startswith("agent:")
         ):
             return False
 
         if approval_type == ApprovalType.PLAN:
             return True
 
-        return actor in self.admins
+        return normalized in {a.strip().lower() for a in self.admins}

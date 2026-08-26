@@ -104,8 +104,10 @@ class ApprovalService:
                 or the state transition is invalid.
         """
         # 0. Permission check: agents/system cannot approve, and the proposer
-        #    cannot approve their own task.
-        if actor == task.proposed_by:
+        #    cannot approve their own task. Normalize identifiers so casing or
+        #    whitespace cannot bypass the self-approval guard.
+        normalized_actor = PermissionService._normalize_actor(actor)
+        if normalized_actor == PermissionService._normalize_actor(task.proposed_by):
             await self._log_rejection_and_raise(
                 event_type="approval_rejected",
                 task_id=task.id,
@@ -115,13 +117,14 @@ class ApprovalService:
                     "approval_type": approval_type.value,
                     "reason": "self-approval",
                     "proposed_by": task.proposed_by,
+                    "actor": actor,
                 },
                 message="Policy violation(s): actor cannot approve their own task",
                 policy_violations=["actor cannot approve their own task"],
             )
 
         permitted = await self.permission_service.may_approve(
-            actor, task.id, approval_type
+            normalized_actor, task.id, approval_type
         )
         if not permitted:
             await self._log_rejection_and_raise(
