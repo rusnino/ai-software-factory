@@ -52,9 +52,9 @@ class ReconciliationService:
     """Compare Plane state with Controller state and report/fix divergences.
 
     Plane is a projection for execution-status fields, so the Controller
-    always wins for status. Content drift on tasks that are already executing
-    or beyond requires human attention; the service records an alert instead
-    of overwriting.
+    always wins for status. State mismatches are corrected when ``fix=True``;
+    missing Plane issues and DAG validation failures remain ``alert``
+    divergences requiring human attention.
 
     Args:
         plane_client: Optional PlaneClient override.
