@@ -7,12 +7,16 @@ import httpx
 import typer
 from sqlalchemy import select
 
+from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
 from governance_controller.db import get_db_session
 from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
+)
+from governance_controller.services.stuck_execution_poller import (
+    StuckExecutionPoller,
 )
 
 app = typer.Typer(help="Governance Controller CLI")
@@ -86,7 +90,6 @@ def reconcile(
     fixes back to Plane.
     """
     from governance_controller import config
-    from governance_controller.config import settings
     from governance_controller.db import dispose_engines
     from governance_controller.services.plane_projection import (
         PlaneProjectionService,
@@ -169,6 +172,40 @@ def reconcile(
     finally:
         # Dispose of per-loop engines so a later asyncio.run() in the same
         # process does not reuse connections bound to the now-closed loop.
+        asyncio.run(dispose_engines())
+
+
+@app.command()
+def poll_stuck_executions(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report stuck executions without marking them BLOCKED.",
+    ),
+) -> None:
+    """Run one pass of the stuck-execution fallback poller.
+
+    Scans RUNNING tasks whose latest execution has exceeded twice its configured
+    timeout_minutes. When the macro-agent run is not still active, the task is
+    moved to BLOCKED and an audit alert is recorded.
+    """
+    from governance_controller.db import dispose_engines
+
+    async def _run() -> None:
+        async with get_db_session() as db:
+            poller = StuckExecutionPoller(db, dry_run=dry_run)
+            actions = await poller.poll()
+            for action in actions:
+                typer.echo(
+                    f"{action['task_id']}: {action['action']} "
+                    f"(deadline {action.get('deadline', 'n/a')})"
+                )
+            if not actions:
+                typer.echo("No stuck executions detected")
+
+    try:
+        asyncio.run(_run())
+    finally:
         asyncio.run(dispose_engines())
 
 
