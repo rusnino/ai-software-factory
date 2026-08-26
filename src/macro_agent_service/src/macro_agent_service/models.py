@@ -24,6 +24,7 @@ class RunRequest(BaseModel):
     network_access: str = "restricted"
     force_push: bool = False
     signed_commits: bool = False
+    opentasks_dag: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

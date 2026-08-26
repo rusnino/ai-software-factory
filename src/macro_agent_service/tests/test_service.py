@@ -18,11 +18,13 @@ def _client() -> AsyncClient:
 @pytest.fixture
 def fresh_store(monkeypatch: pytest.MonkeyPatch) -> RunStore:
     """Provide an isolated run store for each test."""
+    from macro_agent_service import main as main_module
     from macro_agent_service import store as store_module
     from macro_agent_service.config import config
 
     isolated = RunStore()
     monkeypatch.setattr(store_module, "store", isolated)
+    monkeypatch.setattr(main_module, "store", isolated)
     monkeypatch.setattr(config, "api_secret", "")
     return isolated
 
@@ -115,6 +117,40 @@ async def test_missing_secret_returns_401(
             json={"task_id": "task-1", "objective": "x"},
         )
     assert response.status_code == 401
+
+
+async def test_start_run_accepts_opentasks_dag(fresh_store: RunStore) -> None:
+    """#220: opentasks DAG must be accepted and stored, not silently dropped."""
+    dag = {
+        "project_id": "proj-1",
+        "tasks": [
+            {
+                "id": "OT-1",
+                "plane_task_id": "P-1",
+                "objective": "Root",
+                "acceptance": ["done"],
+                "dependencies": ["OT-2"],
+            }
+        ],
+    }
+    async with _client() as client:
+        response = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-1",
+                "objective": "Implement a feature",
+                "acceptance": ["Tests pass"],
+                "opentasks_dag": dag,
+            },
+        )
+
+    assert response.status_code == 201
+    body = response.json()
+    run_id = body["run_id"]
+
+    snapshot = fresh_store.snapshot()
+    stored_request = snapshot[run_id]["request"]
+    assert stored_request["opentasks_dag"] == dag
 
 
 async def test_valid_secret_allowed(
