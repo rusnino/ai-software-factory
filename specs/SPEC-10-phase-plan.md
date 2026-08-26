@@ -56,12 +56,16 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-25): implemented and gate-clean — all `phase-2` issues closed.** Three review
-rounds fixed the live-reproduced gaps: Round 1 closed 12 of 13 issues (`#154`-`#163`), Round 2
-closed 21 issues (`#164`-`#185`), and Round 3 closed 28 issues (`#186`-`#213`), including the
-reopened HIGH `#152` (OPA now runs embedded PolicyEngine first, making OPA additive only) and all
-6 CRITICAL findings from the third round. Before declaring Phase 2 complete, verify the live issue
-list has no open `severity:critical` or `severity:high` issues.
+**Status (2026-08-26): implemented, NOT gate-clean — 14 open issues (2 CRITICAL, 6 HIGH).** Five
+review rounds have run. Rounds 1-3 (`#154`-`#213`) fixed 62 live-reproduced gaps. A 4th round found
+8 of a "gate-clean" fix batch were still broken and 6 more new (net: `#189`-`#221`, one — `#221` —
+still open). A 5th round found 13 more, including two in Phase 1 core code that five rounds of
+`policy_engine.py`-focused hardening never surfaced: `#226` (a hardcoded, unconfigurable `admin`
+skeleton key granting EXECUTION/MERGE approval to anyone holding the shared API secret) and `#227`
+(the self-approval and `system:`/`agent:` actor checks are bypassable via letter casing). This
+project's own history — three separate premature "gate-clean" declarations, each wrong on
+independent re-verification — means this status line should never be trusted without re-running
+`gh issue list --label phase-2 --state open` first.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired

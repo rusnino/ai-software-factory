@@ -39,8 +39,8 @@ Git + CI + Reviewer + Human Review → Done
 | `decisions/` | Architecture Decision Records |
 | `requirements/` | Requirements traceability matrix |
 | `docs/` | Supporting docs, diagrams, deferred-risk notes |
-| `reviews/` | Review findings (`REVIEW-NNN-*.md`) and the cross-review gap ledger (`GAPS.md`) — see `AGENTS.md` § Review Findings and Gap Tracking |
-| `src/governance_controller/` | Phase 1 Governance Controller (FastAPI/SQLModel/PostgreSQL); its own `tests/` live inside this subproject, not at repo root. See `reviews/GAPS.md` for the current gap ledger. |
+| `reviews/` | Review findings (`REVIEW-NNN-*.md`); the cross-review gap ledger `GAPS.md` is frozen/superseded — gap tracking moved to GitHub Issues, see `AGENTS.md` § Review Findings and Gap Tracking |
+| `src/governance_controller/` | Phase 1 Governance Controller (FastAPI/SQLModel/PostgreSQL); its own `tests/` live inside this subproject, not at repo root. See the live `gh issue list --label phase-1` / `--label phase-2` for the current gap ledger, not `reviews/GAPS.md`. |
 | `tmp/` | Generated archives, diagrams, scratch files (ignored by git) |
 
 ## Documentation

@@ -88,7 +88,7 @@ Stop Phase 1 and document a blocker if:
 
 ## Review Findings and Gap Tracking
 
-**As of 2026-08-19, gap tracking lives in GitHub Issues on `rusnino/ai-software-factory`, not in
+**As of 2026-08-23, gap tracking lives in GitHub Issues on `rusnino/ai-software-factory`, not in
 `reviews/GAPS.md`/`reviews/REVIEW-NNN-*.md`.** Those files are a frozen historical record (106 gaps,
 `GAP-001` through `GAP-106`, all migrated as closed/resolved Issues — see the banner at the top of
 `reviews/GAPS.md`) — do not add new rows or new `REVIEW-NNN` files to them. Any agent that reviews

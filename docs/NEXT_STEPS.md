@@ -2,17 +2,37 @@
 
 ## Current State
 
-**Phase 1 is complete** (all `phase-1`-labeled `severity:critical`/`severity:high` issues closed).
-**Phase 2 is gate-clean** (all `phase-2` issues closed as of 2026-08-25, including the reopened
-HIGH `#152` and the third review round `#186`-`#213`). Three review rounds fixed all live-reproduced
-gaps: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), and Round 3 (`#186`-`#213`). Before starting
-Phase 3, re-verify the live issue list:
+**Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
+it has been declared prematurely at least three separate times (`#152`'s first close, an earlier
+"gate-clean" doc commit, and the third review round's `7622c77`), each later found wrong by
+independent live verification.** As of 2026-08-26, five review rounds have run. Rounds 1-3
+(`#154`-`#213`) were verified fixed. A fourth round found 14 of a "gate-clean" 28-issue fix batch
+were still broken (8 reopened: `#189`/`#190`/`#198`/`#200`/`#203`/`#208`/`#214`/`#215`/`#217`, later
+re-verified and re-closed, except `#221` which is **still open**) and found 6 new issues
+(`#216`-`#221`). A fifth round then found **13 more issues never seen before**, including a
+**hardcoded, unconfigurable admin skeleton key (`#226`)** and a **case-sensitivity bypass of the
+self-approval check (`#227`)** in `permission_service.py`/`approval_service.py` — files that are
+Phase 1 core, not Phase 2, and survived five separate `policy_engine.py`-focused Phase 1 hardening
+rounds (`#107`-`#150`) untouched because every one of those rounds asked "what can an authenticated
+caller do," never "does the caller need to be authenticated as who they claim at all." **Query the
+live issue list before trusting anything else in this file:**
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:high
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
+
+As of this writing: **14 open issues (2 CRITICAL, 6 HIGH, 5 MEDIUM, 1 LOW)** — `#221` (CLI silent
+no-op for the documented invocation), `#226` (hardcoded `admin` skeleton key for EXECUTION/MERGE
+approval), `#223` (no CI exists anywhere in this repo — every test/lint claim in this project's
+history, including this file's, has been a manual local run), `#227` (self-approval/`system:`/`agent:`
+actor-block bypass via casing), `#228` (neither spec'd background-polling mechanism — periodic
+reconciliation, Event-Bridge-health fallback — was ever built), `#230` (`CompletionContract`
+scope-check allowlist becomes a universal bypass via `"."`/`"/"`/`".."`), `#231` (empty/whitespace
+`Check.command` silently "passes" without running anything), `#232` (network-access restriction
+bypass via casing — third instance of the same string-comparison defect class as `#227`), plus six
+MEDIUM/LOW items (`#222`, `#224`, `#225`, `#229`, `#233`, `#234`).
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -33,9 +53,11 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status: **369 passed / 5 skipped** on SQLite, **369 passed / 5 skipped** on PostgreSQL,
-`ruff` clean, `mypy governance_controller` clean (65 source files); `macro_agent_service` tests
-**7 passed**, `ruff`/`mypy` clean.
+Test status (2026-08-26): **380 passed / 5 skipped** on SQLite, **383 passed / 2 skipped** on
+PostgreSQL, `ruff` clean, `mypy governance_controller` clean (67 source files); `macro_agent_service`
+tests still pass, `ruff`/`mypy` clean. Green tests are not evidence of correctness in this project —
+re-read the "Current State" section above before trusting this number to mean anything beyond
+"nothing crashes." There is still no CI (`#223`); every one of these numbers is a manual local run.
 
 Implemented components:
 
@@ -78,14 +100,28 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Three review rounds
-followed and all issues are now closed: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), and Round 3
-(`#186`-`#213`). **Phase 2 is gate-clean** as of 2026-08-25; re-verify with the live issue list before
-starting Phase 3.
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Five review rounds
+have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`), Round 4
+(fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
+deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`). **14 issues remain open,
+including 2 CRITICAL and 6 HIGH.** Round 5 in particular found that several of the most severe
+open issues are not in Phase 2's own surface area at all — they're in Phase 1 core code
+(`permission_service.py`, `approval_service.py`, `policy_engine.py`, the schema layer) that five
+rounds of narrowly-scoped `policy_engine.py` command-validation review never looked at from this
+angle. **Do not treat "Phase 2 review" as bounded to Phase 2 code** — the next round should keep
+auditing wherever the live issue list and fresh eyes lead, not stop at a phase boundary.
 
-## Immediate Next Step: Phase 3
+## Immediate Next Step: Close the 14 Open Issues, Then Phase 3
 
-Phase 3 scope (from SPEC-10 §10.3) is:
+Prioritize the 2 CRITICAL (`#221` CLI silent no-op, `#226` hardcoded admin skeleton key) and 6 HIGH
+(`#223` no CI, `#227` case-sensitivity approval bypass, `#228` no background polling, `#230` scope-check
+bypass, `#231` empty-command silent pass, `#232` network-access casing bypass) issues first. Given
+this project's own track record — every "gate-clean" declaration so far has been wrong on
+independent re-verification — the next round after closing these should be another full
+live-reproduction review, not a trust-the-fix-commits pass.
+
+Once the live issue list genuinely has no open `severity:critical`/`severity:high` issues, Phase 3
+scope (from SPEC-10 §10.3) is:
 
 - Docker sandboxing for verification/execution. See
   `docs/research-verification-sandboxing-scope-2026-08-24.md`.

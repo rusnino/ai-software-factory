@@ -17,6 +17,7 @@ must be documented.
 | `structlog` | Structured, typed logging; renders the audit trail. Application-level request/response logs are emitted by FastAPI/uvicorn; `structlog` is not used for those. |
 | `typer` | CLI framework for the `governance-controller` command-line tool. |
 | `uvicorn` | ASGI server used by the Docker image's `CMD` to run the FastAPI app. |
+| `psutil` | Verifies port ownership in `LocalMacroAgentService`'s readiness check, so a newly spawned macro-agent-service subprocess can't be mistaken for a stale process already squatting the same port (#203). |
 
 ## Development dependencies
 
