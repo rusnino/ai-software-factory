@@ -170,3 +170,7 @@ def reconcile(
         # Dispose of per-loop engines so a later asyncio.run() in the same
         # process does not reuse connections bound to the now-closed loop.
         asyncio.run(dispose_engines())
+
+
+if __name__ == "__main__":
+    app()
