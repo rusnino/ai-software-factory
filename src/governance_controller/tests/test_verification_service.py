@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
@@ -642,6 +643,108 @@ async def test_verify_and_advance_sends_macro_agent_feedback_on_retry(
     assert call_args.args[0] == "run-124"
     assert call_args.args[1]["controller_task_id"] == "task-feedback-1"
     assert call_args.args[1]["verification_report"]["passed"] is False
+
+
+async def test_verify_and_advance_finalizes_execution_to_human_review(
+    db_session: AsyncSession,
+) -> None:
+    """#219: a passing verification finalizes the RUNNING execution row."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    execution = Execution(
+        id="exec-pass-1",
+        task_id="task-pass-finalize",
+        state=TaskState.RUNNING,
+        macro_agent_run_id="run-123",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(execution)
+
+    task = Task(
+        id="task-pass-finalize",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        latest_macro_agent_run_id="run-123",
+        task_contract_json=TaskContract(
+            task_id="task-pass-finalize",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Finalize on pass",
+            acceptance=["finalize"],
+            execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+            verification={"commands": ["true"]},
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    contract = TaskContract(**task.task_contract_json)
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"run_id": "run-124"})
+
+    await VerificationService.verify_and_advance(
+        db_session, task, contract, executor=fake_executor
+    )
+
+    refreshed = await db_session.scalar(
+        select(Execution).where(Execution.id == "exec-pass-1")
+    )
+    assert refreshed is not None
+    assert refreshed.state == TaskState.HUMAN_REVIEW
+    assert refreshed.ended_at is not None
+
+
+async def test_verify_and_advance_finalizes_execution_to_failed(
+    db_session: AsyncSession,
+) -> None:
+    """#219: a failing verification finalizes the RUNNING execution row."""
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    execution = Execution(
+        id="exec-fail-1",
+        task_id="task-fail-finalize",
+        state=TaskState.RUNNING,
+        macro_agent_run_id="run-123",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(execution)
+
+    task = Task(
+        id="task-fail-finalize",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        execution_attempts=2,
+        latest_macro_agent_run_id="run-123",
+        task_contract_json=TaskContract(
+            task_id="task-fail-finalize",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Finalize on fail",
+            acceptance=["finalize"],
+            execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+            verification={"commands": ["false"]},
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    contract = TaskContract(**task.task_contract_json)
+
+    await VerificationService.verify_and_advance(db_session, task, contract)
+
+    refreshed = await db_session.scalar(
+        select(Execution).where(Execution.id == "exec-fail-1")
+    )
+    assert refreshed is not None
+    assert refreshed.state == TaskState.FAILED
+    assert refreshed.ended_at is not None
 
 
 class TestVerificationConcurrency:

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import structlog
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -403,6 +404,12 @@ class VerificationService:
                 "task state changed during verification"
             )
 
+        await cls._finalize_current_execution(
+            db,
+            task_id=task.id,
+            state=target_state,
+        )
+
         await AuditService.log(
             db=db,
             event_type=event_type,
@@ -522,6 +529,66 @@ class VerificationService:
 
         return report
 
+    @staticmethod
+    async def _finalize_current_execution(
+        db: AsyncSession,
+        task_id: str,
+        state: TaskState,
+    ) -> None:
+        """Finalize the active execution row for *task_id* to *state*.
+
+        The most recent execution row that is still ``RUNNING`` (or ``READY`` if
+        the transition to ``RUNNING`` has not yet been persisted) is updated with
+        the supplied terminal/transition state and an ``ended_at`` timestamp.
+        Failures are audited but never raised: execution finalization is a
+        bookkeeping side effect and must not block the state machine.
+        """
+        now = datetime.now(UTC)
+        result = await db.execute(
+            select(Execution)
+            .where(
+                Execution.task_id == task_id,  # type: ignore[arg-type]
+                Execution.__table__.c.state.in_(  # type: ignore[attr-defined]
+                    [TaskState.RUNNING.value, TaskState.READY.value]
+                ),
+            )
+            .order_by(desc(Execution.__table__.c.started_at))  # type: ignore[attr-defined]
+            .limit(1)
+        )
+        execution = result.scalar_one_or_none()
+        if execution is None:
+            await AuditService.log(
+                db=db,
+                event_type="execution_finalization_skipped",
+                task_id=task_id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "reason": "no_active_execution_row",
+                    "target_state": state.value,
+                },
+            )
+            return
+
+        previous_state = execution.state
+        execution.state = state
+        execution.ended_at = now
+        await db.flush()
+        await AuditService.log(
+            db=db,
+            event_type="execution_finalized",
+            task_id=task_id,
+            actor="system",
+            source="verification_service",
+            execution_id=execution.id,
+            payload={
+                "execution_id": execution.id,
+                "previous_state": previous_state.value,
+                "new_state": state.value,
+                "ended_at": now.isoformat(),
+            },
+        )
+
     async def _start_retry_execution(
         self,
         db: AsyncSession,
@@ -535,6 +602,16 @@ class VerificationService:
         Mirrors ``ApprovalService._trigger_execution`` but skips the READY phase
         because the task is already approved and we are resuming execution.
         """
+        # The failed execution is already in FAILED at this point because
+        # verify_and_advance finalized it before invoking this helper. Guard
+        # against any caller that skipped that step by finalizing the active
+        # row first so we never leave two executions marked RUNNING.
+        await self._finalize_current_execution(
+            db,
+            task_id=task.id,
+            state=TaskState.FAILED,
+        )
+
         started_at = datetime.now(UTC)
         execution = Execution(
             id=str(uuid4()),
