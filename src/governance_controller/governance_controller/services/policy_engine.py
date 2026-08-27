@@ -334,8 +334,13 @@ def _normalize_path(path: str) -> str:
 
 def _is_inside(path: str, forbidden: str) -> bool:
     """Return True if *path* is exactly *forbidden* or lives underneath it."""
-    normalized_path = _normalize_path(path)
-    normalized_forbidden = _normalize_path(forbidden)
+    try:
+        normalized_path = _normalize_path(path)
+        normalized_forbidden = _normalize_path(forbidden)
+    except ValueError:
+        # Treat un-normalizable paths as forbidden so a bad entry cannot silently
+        # bypass the check.
+        return True
     if normalized_path == normalized_forbidden:
         return True
     prefix = normalized_forbidden + "/"
@@ -845,7 +850,14 @@ class PolicyEngine:
         forbidden_paths = list(
             set(profile.security.forbidden_paths) | set(contract.forbidden_paths)
         )
-        conflicts = _forbidden_path_conflicts(touched_paths, forbidden_paths)
+        try:
+            conflicts = _forbidden_path_conflicts(touched_paths, forbidden_paths)
+        except ValueError:
+            # A forbidden path entry cannot be normalized; fail closed.
+            conflicts = set()
+            violations.append(
+                "Forbidden path list contains an un-normalizable entry"
+            )
         for path in sorted(conflicts):
             violations.append(f"Task touches forbidden path: {path}")
 

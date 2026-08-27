@@ -3,6 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from governance_controller.schemas.completion_contract import CompletionContract
+from governance_controller.utils.paths import reject_root_prefixes
 
 
 class ExecutionConfig(BaseModel):
@@ -39,6 +40,8 @@ class TaskContract(BaseModel):
     execution: ExecutionConfig = ExecutionConfig()
     verification: dict[str, Any] = {}
     forbidden_paths: list[str] = []
+    _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
+
     approval_required: bool = True
     completion_contract: CompletionContract | None = None
     opentasks_dag: dict[str, Any] | None = None

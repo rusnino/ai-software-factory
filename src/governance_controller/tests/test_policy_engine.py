@@ -164,6 +164,38 @@ class TestPolicyEngineRejections:
                 ),
             )
 
+    def test_forbidden_paths_root_rejected_at_schema(self) -> None:
+        """#235: root forbidden_paths are rejected at schema time for contracts."""
+        for value in (".", "/", ".."):
+            with pytest.raises(ValidationError):
+                _make_contract(forbidden_paths=[value])
+
+    def test_profile_forbidden_paths_root_rejected_at_schema(self) -> None:
+        """#235: root forbidden_paths are rejected at schema time for profiles."""
+        for value in (".", "/", ".."):
+            with pytest.raises(ValidationError):
+                _make_profile(forbidden_paths=[value])
+
+    def test_forbidden_path_check_root_rejected_at_schema(self) -> None:
+        """#235: root ForbiddenPathCheck.paths are rejected at schema time."""
+        for value in (".", "/", ".."):
+            with pytest.raises(ValidationError):
+                ForbiddenPathCheck(paths=[value])
+
+    def test_policy_engine_forbidden_paths_crash_becomes_violation(self) -> None:
+        """#235: root forbidden paths in already-stored data don't 500."""
+        contract = _make_contract(forbidden_paths=["/safe"], inputs=["/some/file.py"])
+        profile = _make_profile()
+        # Bypass the schema validator to simulate legacy/buggy stored data.
+        profile.security.forbidden_paths = ["."]
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "forbidden" in v.lower() or "un-normalizable" in v.lower()
+            for v in result.violations
+        )
+
     def test_negative_timeout_minutes_rejected(self) -> None:
         """#233: timeout_minutes must not be negative."""
         with pytest.raises(ValidationError):

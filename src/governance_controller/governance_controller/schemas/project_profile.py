@@ -2,6 +2,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from governance_controller.utils.paths import reject_root_prefixes
+
 
 class ProjectExecutionConfig(BaseModel):
     """Project-level execution constraints.
@@ -24,6 +26,8 @@ class RepositoryConfig(BaseModel):
 
 class SecurityConfig(BaseModel):
     forbidden_paths: list[str] = []
+    _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
+
     docker_socket: Literal["allow", "deny"] = "deny"
     network: Literal["restricted", "unrestricted"] = "restricted"
     destructive_shell: Literal["allow", "deny"] = "deny"

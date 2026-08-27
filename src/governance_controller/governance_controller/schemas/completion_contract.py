@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field, field_validator
 
+from governance_controller.utils.paths import reject_root_prefixes
+
 
 class Check(BaseModel):
     type: str = Field(..., min_length=1, max_length=128)
@@ -23,32 +25,16 @@ class Check(BaseModel):
 class ForbiddenPathCheck(BaseModel):
     paths: list[str] = []
 
+    _validate_paths = reject_root_prefixes("paths")
+
 
 class ScopeCheck(BaseModel):
     description: str
     allowed_paths: list[str] = []
     forbidden_paths: list[str] = []
 
-    @field_validator("allowed_paths", "forbidden_paths")
-    @classmethod
-    def _reject_root_prefix_paths(cls, value: list[str]) -> list[str]:
-        """Reject paths that normalize to the filesystem root.
-
-        Such paths would match every touched path as an empty-string prefix and
-        therefore break the scope/forbidden-path check intent.
-        """
-        from governance_controller.utils.paths import normalize_path
-
-        for path in value:
-            try:
-                normalized = normalize_path(path)
-            except ValueError as exc:
-                raise ValueError(str(exc)) from exc
-            if normalized == "/":
-                raise ValueError(
-                    f"path normalizes to root and cannot be used as a prefix: {path!r}"
-                )
-        return value
+    _validate_allowed_paths = reject_root_prefixes("allowed_paths")
+    _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
 
 
 class CompletionContract(BaseModel):

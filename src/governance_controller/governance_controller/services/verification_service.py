@@ -317,8 +317,13 @@ class VerificationService:
     @staticmethod
     def _is_prefixed_by(path: str, prefix: str) -> bool:
         """Return True if *path* equals *prefix* or is under it."""
-        normalized_path = normalize_path(path)
-        normalized_prefix = normalize_path(prefix)
+        try:
+            normalized_path = normalize_path(path)
+            normalized_prefix = normalize_path(prefix)
+        except ValueError:
+            # Treat un-normalizable prefixes as non-matching so a bad entry fails
+            # closed in scope checks rather than causing an unhandled exception.
+            return False
         return normalized_path == normalized_prefix or normalized_path.startswith(
             normalized_prefix + "/"
         )
