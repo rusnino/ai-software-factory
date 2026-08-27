@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,9 +161,8 @@ class EventBridge:
         # Phase 1: landing:completed triggers automated verification that gates
         # AGENT_REVIEW -> HUMAN_REVIEW. This is a stub-grade integration until
         # real CI/artifact checks exist in Phase 2. Skip verification if the
-        # task has no stored contract (e.g., tests that only exercise state
+        # task has no stored contract (e.g. tests that only exercise state
         # transitions).
-        verification_happened = False
         if (
             transition_error is None
             and target_state == TaskState.AGENT_REVIEW
@@ -173,6 +172,23 @@ class EventBridge:
             # Commit before verification so no task row lock is held across the
             # potentially slow subprocess execution (GAP-095).
             await db.commit()
+
+            # Write a durable "verification in progress" marker *before* the
+            # slow verification runs. A duplicate delivery inside the window now
+            # fails the uniqueness check (HTTP 409 from the caller) instead of
+            # running verification twice. We roll the marker back only if no
+            # state transition occurred, preserving the #118 retry semantics.
+            in_progress_key: dict[str, Any] | None = None
+            if event_id and event_timestamp:
+                in_progress_key = {
+                    "task_id": task_id,
+                    "event_type": event_type,
+                    "event_timestamp": event_timestamp,
+                    "event_id": event_id,
+                }
+                await EventBridge._record_processed_event(db, **in_progress_key)
+                await db.commit()
+
             verifier = verification_service or VerificationService()
             contract = TaskContract(**cast(dict[str, Any], task.task_contract_json))
             # Profile is optional in Phase 1; retry execution falls back to
@@ -190,41 +206,33 @@ class EventBridge:
             # Capture the state before verification so we can tell whether this
             # delivery actually advanced the task. If verify_and_advance raises
             # before any transition (e.g. a non-existent guessed worktree path),
-            # the dedup key must NOT be committed so the event can be redelivered
+            # the dedup key must be removed so the event can be redelivered
             # (#118).
             state_before_verify = task.state
             try:
                 await verifier.verify_and_advance(
                     db, task, contract, profile=profile, executor=verifier.executor
                 )
-                verification_happened = True
             except Exception:
                 # Re-load the task to see whether a transition occurred before
                 # the exception. If it did, this delivery is "spent" and should
-                # be deduplicated; if not, re-raise without recording the key so
-                # the caller can retry.
+                # remain deduplicated; if not, delete the marker so the caller
+                # can retry without needing a fresh event_id.
                 fresh_task = await db.get(Task, task_id)
-                if fresh_task is not None and fresh_task.state != state_before_verify:
-                    verification_happened = True
-                raise
-            finally:
-                # Record the event as processed so a replay is ignored only when
-                # verification actually ran or changed state. A missing
-                # event_id/event_timestamp means we cannot deduplicate, so we
-                # persist only when the full key is present.
-                #
-                # COMMIT BEFORE RE-RAISING: get_db() rolls back the session on
-                # any exception, so the dedup key must be committed while we are
-                # still inside this call (GAP-097).
-                if verification_happened and event_id and event_timestamp:
-                    await EventBridge._record_processed_event(
-                        db,
-                        task_id=task_id,
-                        event_type=event_type,
-                        event_timestamp=event_timestamp,
-                        event_id=event_id,
+                transition_happened = (
+                    fresh_task is not None and fresh_task.state != state_before_verify
+                )
+                if not transition_happened and in_progress_key is not None:
+                    await db.execute(
+                        delete(ProcessedEvent).where(
+                            ProcessedEvent.task_id == task_id,
+                            ProcessedEvent.event_type == event_type,
+                            ProcessedEvent.event_timestamp == event_timestamp,  # type: ignore[arg-type]
+                            ProcessedEvent.event_id == event_id,  # type: ignore[arg-type]
+                        )
                     )
                     await db.commit()
+                raise
 
         # Record the event as processed so a replay is ignored regardless of
         # whether verification passed, failed terminally, failed with a retry
