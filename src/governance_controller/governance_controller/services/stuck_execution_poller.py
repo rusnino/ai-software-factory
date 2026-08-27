@@ -108,7 +108,13 @@ class StuckExecutionPoller:
     async def _running_tasks_with_executions(
         self,
     ) -> list[tuple[Task, Execution]]:
-        """Return RUNNING tasks joined with their latest execution row."""
+        """Return RUNNING tasks joined with their latest execution row.
+
+        ``task.latest_macro_agent_run_id`` stores the external macro-agent run id
+        returned by ``MacroAgentExecutor.start()``, not the internal
+        ``Execution.id`` primary key. The join must use
+        ``Execution.macro_agent_run_id`` so real approval-created tasks match.
+        """
         # SQLModel/StrEnum mypy interaction: pass the string value and
         # ignore the false-positive bool-argument error.
         result = await self.db.execute(
@@ -121,7 +127,8 @@ class StuckExecutionPoller:
                 continue
             exec_result = await self.db.execute(
                 select(Execution).where(
-                    Execution.id == task.latest_macro_agent_run_id  # type: ignore[arg-type]
+                    Execution.macro_agent_run_id  # type: ignore[arg-type]
+                    == task.latest_macro_agent_run_id
                 )
             )
             execution = exec_result.scalar_one_or_none()
@@ -165,8 +172,9 @@ class StuckExecutionPoller:
         except Exception:
             return False
 
-        state = status.get("state") if isinstance(status, dict) else None
-        return state in {"running", "allocated", "active"}
+        # The macro-agent service returns status under the key "status".
+        run_status = status.get("status") if isinstance(status, dict) else None
+        return run_status in {"running", "allocated", "active", "queued"}
 
     async def _mark_blocked(self, task: Task, execution: Execution) -> None:
         """Transition task to BLOCKED and record a human-alert audit entry."""

@@ -19,23 +19,25 @@ async def _running_task_with_execution(
     timeout_minutes: int = 60,
     macro_agent_run_id: str | None = None,
 ) -> tuple[Task, Execution]:
-    execution_id = str(uuid4())
+    internal_id = str(uuid4())
+    external_run_id = macro_agent_run_id or f"run-{internal_id[:8]}"
     task = Task(
-        id=f"task-{execution_id[:8]}",
+        id=f"task-{internal_id[:8]}",
         project_id="proj-1",
         proposed_by="agent-1",
         state=TaskState.RUNNING,
-        latest_macro_agent_run_id=execution_id,
+        # Store the external macro-agent run id, matching ApprovalService wiring.
+        latest_macro_agent_run_id=external_run_id,
         task_contract_json={
             "execution": {"timeout_minutes": timeout_minutes},
         },
     )
     execution = Execution(
-        id=execution_id,
+        id=internal_id,
         task_id=task.id,
         state=TaskState.RUNNING,
         started_at=started_at,
-        macro_agent_run_id=macro_agent_run_id or f"run-{execution_id[:8]}",
+        macro_agent_run_id=external_run_id,
     )
     db_session.add(task)
     db_session.add(execution)
@@ -129,11 +131,11 @@ class TestStuckExecutionPoller:
 
 
 class _FakeMacroAgentClient:
-    def __init__(self, states: dict[str, str] | None = None) -> None:
-        self._states = states or {}
+    def __init__(self, statuses: dict[str, str] | None = None) -> None:
+        self._statuses = statuses or {}
 
     async def status(self, run_id: str) -> dict[str, Any]:
-        return {"state": self._states.get(run_id, "completed")}
+        return {"status": self._statuses.get(run_id, "completed")}
 
 
 class _FailingMacroAgentClient:
