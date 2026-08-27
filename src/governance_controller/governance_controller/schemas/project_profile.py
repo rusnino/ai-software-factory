@@ -20,8 +20,8 @@ class ProjectExecutionConfig(BaseModel):
 
 
 class RepositoryConfig(BaseModel):
-    path: str
-    default_branch: str = "main"
+    path: str = Field(..., min_length=1, max_length=1024)
+    default_branch: str = Field(default="main", min_length=1, max_length=256)
 
 
 class SecurityConfig(BaseModel):

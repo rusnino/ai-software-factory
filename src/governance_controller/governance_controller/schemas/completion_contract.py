@@ -5,8 +5,8 @@ from governance_controller.utils.paths import reject_root_prefixes
 
 class Check(BaseModel):
     type: str = Field(..., min_length=1, max_length=128)
-    command: str = Field(..., min_length=1, max_length=4096)
-    expect_exit: int = 0
+    command: str = Field(..., min_length=1, max_length=8192)
+    expect_exit: int = Field(default=0, ge=0, le=255)
 
     @field_validator("command")
     @classmethod

@@ -32,11 +32,11 @@ class TaskContract(BaseModel):
     project_id: str = Field(..., min_length=1, max_length=128)
     proposed_by: str = Field(..., min_length=1, max_length=128)
     objective: str
-    inputs: list[str] = []
-    dependencies: list[str] = []
-    constraints: list[str] = []
+    inputs: list[str] = Field(default=[], max_length=1000)
+    dependencies: list[str] = Field(default=[], max_length=1000)
+    constraints: list[str] = Field(default=[], max_length=1000)
     acceptance: list[str]
-    deliverables: list[str] = []
+    deliverables: list[str] = Field(default=[], max_length=1000)
     execution: ExecutionConfig = ExecutionConfig()
     verification: dict[str, Any] = {}
     forbidden_paths: list[str] = []
