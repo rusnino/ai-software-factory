@@ -207,6 +207,18 @@ class TestPhase1Smoke:
         assert any(
             e.payload.get("new_state") == TaskState.RUNNING.value for e in state_changes
         )
+        # #241: the READY state_change audit entry must reflect the actual
+        # pre-READY state (EXEC_APPROVED), not the stale PLAN_APPROVED value.
+        ready_changes = [
+            e
+            for e in state_changes
+            if e.payload.get("new_state") == TaskState.READY.value
+        ]
+        assert len(ready_changes) == 1
+        assert (
+            ready_changes[0].payload.get("previous_state")
+            == TaskState.EXEC_APPROVED.value
+        )
 
         exec_start_entries = [
             e for e in audit_entries if e.event_type == "execution_start"

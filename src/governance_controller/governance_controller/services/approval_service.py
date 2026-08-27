@@ -421,6 +421,9 @@ class ApprovalService:
                 "task state changed during execution trigger"
             )
 
+        # Capture the actual state immediately before the READY transition for
+        # the audit log, not the stale previous_state from the approval call.
+        ready_previous_state = TaskState.EXEC_APPROVED
         await AuditService.log(
             db=self.db,
             event_type="state_change",
@@ -428,7 +431,7 @@ class ApprovalService:
             actor=actor,
             source=source,
             payload={
-                "previous_state": previous_state.value,
+                "previous_state": ready_previous_state.value,
                 "new_state": TaskState.READY.value,
                 "approval_type": ApprovalType.EXECUTION.value,
             },
