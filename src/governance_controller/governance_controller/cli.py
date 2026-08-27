@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
-from governance_controller.db import get_db_session
+from governance_controller.db import dispose_engines_sync, get_db_session
 from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
 from governance_controller.services.reconciliation_service import (
@@ -90,7 +90,6 @@ def reconcile(
     fixes back to Plane.
     """
     from governance_controller import config
-    from governance_controller.db import dispose_engines
     from governance_controller.services.plane_projection import (
         PlaneProjectionService,
     )
@@ -168,11 +167,15 @@ def reconcile(
             raise typer.Exit(code=1)
 
     try:
-        asyncio.run(_run())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
     finally:
-        # Dispose of per-loop engines so a later asyncio.run() in the same
-        # process does not reuse connections bound to the now-closed loop.
-        asyncio.run(dispose_engines())
+        # Dispose the engine while the loop is still alive so pooled
+        # connections close cleanly, then tear down the loop.
+        dispose_engines_sync(loop)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 @app.command()
@@ -189,8 +192,6 @@ def poll_stuck_executions(
     timeout_minutes. When the macro-agent run is not still active, the task is
     moved to BLOCKED and an audit alert is recorded.
     """
-    from governance_controller.db import dispose_engines
-
     async def _run() -> None:
         async with get_db_session() as db:
             poller = StuckExecutionPoller(db, dry_run=dry_run)
@@ -204,9 +205,15 @@ def poll_stuck_executions(
                 typer.echo("No stuck executions detected")
 
     try:
-        asyncio.run(_run())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
     finally:
-        asyncio.run(dispose_engines())
+        # Dispose the engine while the loop is still alive so pooled
+        # connections close cleanly, then tear down the loop.
+        dispose_engines_sync(loop)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
 
 
 if __name__ == "__main__":

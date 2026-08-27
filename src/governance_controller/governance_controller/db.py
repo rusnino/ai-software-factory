@@ -105,19 +105,48 @@ def _get_audit_log_table() -> type[SQLModel]:
     return AuditLog
 
 
-async def dispose_engines() -> None:
-    """Dispose all per-loop engines and the module-level fallback engine.
+async def dispose_engines(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Dispose per-loop engines and the module-level fallback engine.
 
-    Call this once at the end of a top-level CLI command or process lifetime to
-    ensure connections bound to a particular event loop are not recycled by a
-    later asyncio.run() in the same process.
+    If ``loop`` is provided, only that loop's engine is disposed and evicted
+    from the cache. This is the recommended pattern for callers that create a
+    fresh event loop, run Controller DB work, and then tear down: dispose the
+    engine while still inside the same loop so pool connections close cleanly,
+    and remove the entry from ``_engines_by_loop`` immediately instead of waiting
+    for GC.
+
+    When called without a loop, all cached engines and the fallback engine are
+    disposed.
     """
-    # Copy values because WeakKeyDictionary may mutate during iteration if a
-    # loop's finalizer runs while we dispose its engine.
+    if loop is not None:
+        eng = _engines_by_loop.pop(loop, None)
+        if eng is not None:
+            await eng.dispose()
+        return
+
     for eng in list(_engines_by_loop.values()):
         await eng.dispose()
     _engines_by_loop.clear()
     await engine.dispose()
+
+
+def dispose_engines_sync(loop: asyncio.AbstractEventLoop | None = None) -> None:
+    """Synchronous wrapper around :func:`dispose_engines`.
+
+    Runs the async disposal inside the provided loop (or the current loop),
+    which avoids crossing into a different loop and triggering spurious
+    ``attached to a different loop``/``Event loop is closed`` errors.
+    """
+    if loop is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+    if loop.is_running():
+        asyncio.ensure_future(dispose_engines(loop))
+    else:
+        loop.run_until_complete(dispose_engines(loop))
 
 
 async def run_migrations() -> None:
