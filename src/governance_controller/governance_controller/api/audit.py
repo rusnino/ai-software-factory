@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.api.auth import require_controller_secret
 from governance_controller.db import get_db
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
@@ -16,8 +17,13 @@ router = APIRouter(tags=["audit"])
 async def get_task_audit_log(
     task_id: str,
     db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(require_controller_secret),
 ) -> list[AuditLogEntry]:
-    """Return the append-only audit log for a given task."""
+    """Return the append-only audit log for a given task.
+
+    Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
+    configured.
+    """
     task = await db.scalar(select(Task).where(Task.id == task_id))  # type: ignore[arg-type]
     if task is None:
         raise HTTPException(

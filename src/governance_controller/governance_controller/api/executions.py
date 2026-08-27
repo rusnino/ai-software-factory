@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.api.auth import require_controller_secret
 from governance_controller.db import get_db
 from governance_controller.models.execution import Execution
 from governance_controller.schemas.execution import ExecutionResponse
@@ -15,8 +16,13 @@ router = APIRouter(tags=["executions"])
 async def get_execution(
     execution_id: str,
     db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(require_controller_secret),
 ) -> ExecutionResponse:
-    """Return an execution by its primary key."""
+    """Return an execution by its primary key.
+
+    Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
+    configured.
+    """
     execution = await db.scalar(
         select(Execution).where(Execution.id == execution_id)  # type: ignore[arg-type]
     )

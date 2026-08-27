@@ -103,7 +103,10 @@ class TestTaskApi:
             headers={"X-Controller-Secret": _CONTROLLER_SECRET},
         )
 
-        response = await async_client.get("/tasks/api-task-1")
+        response = await async_client.get(
+            "/tasks/api-task-1",
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -132,7 +135,10 @@ class TestTaskApi:
         task.execution_attempts += 1
         await client_db_session.commit()
 
-        response = await async_client.get("/tasks/api-task-1")
+        response = await async_client.get(
+            "/tasks/api-task-1",
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 200
         body = response.json()
@@ -142,11 +148,22 @@ class TestTaskApi:
         self,
         async_client: AsyncClient,
     ) -> None:
-        response = await async_client.get("/tasks/does-not-exist")
+        response = await async_client.get(
+            "/tasks/does-not-exist",
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
 
         assert response.status_code == 404
         body = response.json()
         assert body["detail"] == "Task does-not-exist not found"
+
+    async def test_get_task_without_secret_returns_401(
+        self,
+        async_client: AsyncClient,
+    ) -> None:
+        """#236: read-side routes require the controller secret."""
+        response = await async_client.get("/tasks/api-task-1")
+        assert response.status_code == 401
 
     async def test_create_task_duplicate_returns_409(
         self,

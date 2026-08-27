@@ -79,8 +79,13 @@ async def create_task(
 async def get_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
+    _authenticated: None = Depends(require_controller_secret),
 ) -> TaskResponse:
-    """Look up a task by its primary key."""
+    """Look up a task by its primary key.
+
+    Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
+    configured.
+    """
     service = TaskService(db)
     task = await service.get_by_id(task_id)
     if task is None:

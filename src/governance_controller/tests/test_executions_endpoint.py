@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,16 @@ from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
+
+_CONTROLLER_SECRET = "controller-secret"
+
+
+@pytest.fixture(autouse=True)
+def _configure_controller_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.controller_api_secret",
+        _CONTROLLER_SECRET,
+    )
 
 
 @pytest_asyncio.fixture
@@ -44,7 +55,10 @@ async def test_get_execution_returns_record(
     client_db_session.add(execution)
     await client_db_session.flush()
 
-    response = await async_client.get("/executions/exec-1")
+    response = await async_client.get(
+        "/executions/exec-1",
+        headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -57,6 +71,17 @@ async def test_get_execution_returns_record(
 async def test_get_execution_missing_returns_404(
     async_client: AsyncClient,
 ) -> None:
-    response = await async_client.get("/executions/missing-exec")
+    response = await async_client.get(
+        "/executions/missing-exec",
+        headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+    )
 
     assert response.status_code == 404
+
+
+async def test_get_execution_without_secret_returns_401(
+    async_client: AsyncClient,
+) -> None:
+    """#236: read-side execution route requires the controller secret."""
+    response = await async_client.get("/executions/missing-exec")
+    assert response.status_code == 401
