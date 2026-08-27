@@ -42,6 +42,7 @@ class ReconciliationReport:
     projection_fixes: list[tuple[str, str, Any]] = field(
         default_factory=list
     )
+    opentasks_ids: dict[str, str] = field(default_factory=dict)
 
 
 class ReconciliationError(Exception):
@@ -182,6 +183,7 @@ class ReconciliationService:
                             state=state,
                             expected_plane=expected_plane,
                             report=report,
+                            opentasks_id=report.opentasks_ids.get(task_id),
                         )
                     except ReconciliationError as exc:
                         report.divergences.append(
@@ -200,16 +202,19 @@ class ReconciliationService:
 
         # Validate runtime DAG for tasks in EXEC_APPROVED+ states that do
         # exist in Plane. Missing tasks are already reported above.
+        opentasks_ids: dict[str, str] = {}
         for task_id, state, _proj in controller_tasks:
             if state.value in {"PROPOSED", "PLAN_APPROVED"}:
                 continue
             if task_id not in plane_issues:
                 continue
             try:
-                await self._materializer_or_default().materialize(
+                dag = await self._materializer_or_default().materialize(
                     root_plane_task_id=task_id,
                     project_id=effective_project_id,
                 )
+                if dag.tasks:
+                    opentasks_ids[task_id] = dag.tasks[0].id
             except MaterializerError as exc:
                 report.divergences.append(
                     Divergence(
@@ -223,6 +228,7 @@ class ReconciliationService:
                     )
                 )
 
+        report.opentasks_ids = opentasks_ids
         return report
 
     async def _apply_state_fix(
@@ -233,6 +239,7 @@ class ReconciliationService:
         state: TaskState,
         expected_plane: str,
         report: ReconciliationReport,
+        opentasks_id: str | None = None,
     ) -> None:
         """Update Plane state to match Controller and record the fix.
 
@@ -265,6 +272,7 @@ class ReconciliationService:
                 controller_task_id=controller_task_id,
                 plane_issue_id=plane_issue_id,
                 state=state,
+                opentasks_id=opentasks_id,
             )
             if updated is None:
                 return

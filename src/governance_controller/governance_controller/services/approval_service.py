@@ -292,6 +292,7 @@ class ApprovalService:
             task=task,
             state=target_state,
             approval_type=approval_type,
+            opentasks_id=None,
         )
 
         if approval_type == ApprovalType.EXECUTION:
@@ -306,6 +307,7 @@ class ApprovalService:
         task: Task,
         state: TaskState,
         approval_type: ApprovalType,
+        opentasks_id: str | None = None,
     ) -> None:
         """Project the new Controller state to Plane when configured.
 
@@ -324,6 +326,7 @@ class ApprovalService:
                 plane_issue_id=task.plane_issue_id or task.id,
                 state=state,
                 project_id=task.project_id,
+                opentasks_id=opentasks_id,
             )
         except Exception as exc:
             await AuditService.log(
@@ -448,6 +451,7 @@ class ApprovalService:
         await self.db.commit()
 
         # Materialize the approved runtime DAG from Plane when configured.
+        opentasks_id: str | None = None
         opentasks_dag: dict[str, object] | None = None
         if settings.plane_base_url:
             try:
@@ -456,6 +460,8 @@ class ApprovalService:
                     project_id=task.project_id,
                 )
                 opentasks_dag = dag.model_dump(mode="json")
+                if dag.tasks:
+                    opentasks_id = dag.tasks[0].id
             except MaterializerError as exc:
                 await AuditService.log(
                     db=self.db,
@@ -567,6 +573,13 @@ class ApprovalService:
                 "execution_id": execution.id,
                 "macro_agent_run_id": execution.macro_agent_run_id,
             },
+        )
+
+        await self._project_state_to_plane(
+            task=task,
+            state=TaskState.RUNNING,
+            approval_type=ApprovalType.EXECUTION,
+            opentasks_id=opentasks_id,
         )
 
         return task

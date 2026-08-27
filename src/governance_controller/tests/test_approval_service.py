@@ -32,6 +32,7 @@ class _FakePlaneProjection:
         plane_issue_id: str,
         state: Any,
         project_id: str | None = None,
+        opentasks_id: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -39,6 +40,7 @@ class _FakePlaneProjection:
                 "plane_issue_id": plane_issue_id,
                 "state": state,
                 "project_id": project_id,
+                "opentasks_id": opentasks_id,
             }
         )
         return {"id": plane_issue_id}
