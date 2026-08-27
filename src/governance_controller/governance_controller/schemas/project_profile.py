@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 from governance_controller.utils.paths import reject_root_prefixes
 
+SandboxMode = Literal["worktree", "docker", "firecracker", "kata"]
+
 
 class ProjectExecutionConfig(BaseModel):
     """Project-level execution constraints.
@@ -13,7 +15,7 @@ class ProjectExecutionConfig(BaseModel):
     """
 
     allowed_harnesses: list[str] = ["opencode"]
-    sandbox: str = "worktree"
+    sandbox: SandboxMode = "worktree"
     timeout_minutes: int = Field(default=60, ge=0)
     max_retries: int = Field(default=2, ge=0)
     max_parallel_agents: int = Field(default=3, ge=0)

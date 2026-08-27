@@ -182,20 +182,26 @@ class ApprovalService:
             )
         )
         if existing is not None:
+            # Re-fetch the task's current state so a duplicate delivery returns
+            # the true post-approval state, not the caller's stale in-memory copy
+            # (#242).
+            fresh_task = await self.db.get(Task, task.id)
+            if fresh_task is None:
+                fresh_task = task
             await AuditService.log(
                 db=self.db,
                 event_type="approval_idempotent",
-                task_id=task.id,
+                task_id=fresh_task.id,
                 actor=actor,
                 source=source,
                 payload={
                     "approval_type": approval_type.value,
                     "idempotency_key": idempotency_key,
-                    "previous_state": task.state.value,
-                    "new_state": task.state.value,
+                    "previous_state": fresh_task.state.value,
+                    "new_state": fresh_task.state.value,
                 },
             )
-            return task
+            return fresh_task
 
         # 3. Validate the state machine transition in-memory first, but do NOT
         #    mutate the task object yet. The actual state advance is done by an

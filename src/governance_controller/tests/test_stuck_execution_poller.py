@@ -129,6 +129,50 @@ class TestStuckExecutionPoller:
         state = await _fetch_task_state(db_session, task.id)
         assert state == TaskState.BLOCKED
 
+    async def test_poller_ignores_stale_latest_run_id_during_retry_window(
+        self,
+        db_session: Any,
+    ) -> None:
+        """#237: a stale latest_macro_agent_run_id pointing at an old FAILED
+        execution must not cause the poller to block a task whose real, current
+        retry execution is still RUNNING without an external run id yet.
+        """
+        internal_id = str(uuid4())
+        task = Task(
+            id=f"task-retry-race-{internal_id[:8]}",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            state=TaskState.RUNNING,
+            latest_macro_agent_run_id="old-run-id",
+            task_contract_json={"execution": {"timeout_minutes": 60}},
+        )
+        old_execution = Execution(
+            id=str(uuid4()),
+            task_id=task.id,
+            state=TaskState.FAILED,
+            started_at=datetime.now(UTC) - timedelta(hours=5),
+            ended_at=datetime.now(UTC) - timedelta(hours=4),
+            macro_agent_run_id="old-run-id",
+        )
+        new_execution = Execution(
+            id=internal_id,
+            task_id=task.id,
+            state=TaskState.RUNNING,
+            started_at=datetime.now(UTC),
+            macro_agent_run_id=None,
+        )
+        db_session.add(task)
+        db_session.add(old_execution)
+        db_session.add(new_execution)
+        await db_session.flush()
+
+        poller = StuckExecutionPoller(db_session)
+        actions = await poller.poll()
+
+        assert actions == []
+        state = await _fetch_task_state(db_session, task.id)
+        assert state == TaskState.RUNNING
+
 
 class _FakeMacroAgentClient:
     def __init__(self, statuses: dict[str, str] | None = None) -> None:

@@ -1,8 +1,10 @@
 """Pydantic models for the macro-agent service API."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+SandboxMode = Literal["worktree", "docker", "firecracker", "kata"]
 
 
 class RunRequest(BaseModel):
@@ -16,7 +18,7 @@ class RunRequest(BaseModel):
     acceptance: list[str] = Field(default_factory=list)
     timeout_minutes: int = 60
     max_retries: int = 2
-    sandbox: str = "worktree"
+    sandbox: SandboxMode = "worktree"
     max_parallel_agents: int = 3
     uses_docker_socket: bool = False
     destructive_shell: bool = False

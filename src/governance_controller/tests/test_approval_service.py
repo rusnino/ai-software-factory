@@ -164,6 +164,38 @@ class TestApprovalServiceStateTransitions:
         assert result.state == TaskState.RUNNING
         fake_executor.start.assert_awaited_once()
 
+    async def test_execution_approval_ready_audit_previous_state_is_exec_approved(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#241: READY transition audit entry must use EXEC_APPROVED."""
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+        contract = _make_contract()
+        profile = _make_profile()
+
+        await service.approve(
+            task=task,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.EXECUTION,
+            source="telegram",
+            actor="admin",
+            idempotency_key="key-exec-audit-241",
+        )
+
+        entries = await _audit_rows_for_task(db_session, task.id)
+        ready_changes = [
+            e
+            for e in entries
+            if e.event_type == "state_change"
+            and e.payload.get("new_state") == TaskState.READY.value
+        ]
+        assert len(ready_changes) == 1
+        previous = ready_changes[0].payload.get("previous_state")
+        assert previous == TaskState.EXEC_APPROVED.value
+
     async def test_merge_approval_advances_state_to_done(
         self,
         service: ApprovalService,
@@ -248,6 +280,47 @@ class TestApprovalServiceIdempotency:
         )
 
         assert second.state == TaskState.PLAN_APPROVED
+
+    async def test_duplicate_idempotency_key_returns_fresh_state_not_stale_in_memory(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#242: duplicate approval must re-fetch current DB state, not stale object."""
+        service = ApprovalService(
+            db=db_session,
+            executor=AsyncMock(spec=MacroAgentExecutor),
+            permission_service=PermissionService(admins={"admin"}),
+        )
+        service.executor.start.return_value = {"run_id": "run-test"}
+
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+        contract = _make_contract()
+        profile = _make_profile()
+
+        first = await service.approve(
+            task=task,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.EXECUTION,
+            source="plane",
+            actor="admin",
+            idempotency_key="key-dup-242",
+        )
+        assert first.state == TaskState.RUNNING
+
+        # Re-approve with the same key using the original in-memory task object,
+        # which still conceptually represents PLAN_APPROVED. The response must
+        # report the true current state from the database.
+        second = await service.approve(
+            task=task,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.EXECUTION,
+            source="plane",
+            actor="admin",
+            idempotency_key="key-dup-242",
+        )
+        assert second.state == TaskState.RUNNING
 
         approvals = await service.db.execute(
             Approval.__table__.select().where(Approval.task_id == task.id)

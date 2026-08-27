@@ -29,17 +29,17 @@ class ForbiddenPathCheck(BaseModel):
 
 
 class ScopeCheck(BaseModel):
-    description: str
-    allowed_paths: list[str] = []
-    forbidden_paths: list[str] = []
+    description: str = Field(..., min_length=1, max_length=4096)
+    allowed_paths: list[str] = Field(default=[], max_length=1000)
+    forbidden_paths: list[str] = Field(default=[], max_length=1000)
 
     _validate_allowed_paths = reject_root_prefixes("allowed_paths")
     _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
 
 
 class CompletionContract(BaseModel):
-    task_id: str
-    required: list[Check] = []
-    optional: list[Check] = []
+    task_id: str = Field(..., min_length=1, max_length=128)
+    required: list[Check] = Field(default=[], max_length=1000)
+    optional: list[Check] = Field(default=[], max_length=1000)
     forbidden_path_check: ForbiddenPathCheck = ForbiddenPathCheck()
     scope_check: ScopeCheck

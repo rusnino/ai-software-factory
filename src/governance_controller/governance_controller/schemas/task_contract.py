@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from governance_controller.schemas.completion_contract import CompletionContract
 from governance_controller.utils.paths import reject_root_prefixes
@@ -31,16 +31,42 @@ class TaskContract(BaseModel):
     task_id: str = Field(..., min_length=1, max_length=128)
     project_id: str = Field(..., min_length=1, max_length=128)
     proposed_by: str = Field(..., min_length=1, max_length=128)
-    objective: str
+    objective: str = Field(..., min_length=1, max_length=8192)
     inputs: list[str] = Field(default=[], max_length=1000)
     dependencies: list[str] = Field(default=[], max_length=1000)
     constraints: list[str] = Field(default=[], max_length=1000)
-    acceptance: list[str]
+    acceptance: list[str] = Field(..., min_length=1, max_length=1000)
     deliverables: list[str] = Field(default=[], max_length=1000)
     execution: ExecutionConfig = ExecutionConfig()
     verification: dict[str, Any] = {}
-    forbidden_paths: list[str] = []
+    forbidden_paths: list[str] = Field(default=[], max_length=1000)
     _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
+
+    @field_validator("objective")
+    @classmethod
+    def _validate_objective(cls, value: str) -> str:
+        """Reject empty/whitespace-only objectives that bypass policy checks."""
+        if not value.strip():
+            raise ValueError("objective is empty or whitespace-only")
+        return value
+
+    @field_validator(
+        "inputs",
+        "dependencies",
+        "constraints",
+        "acceptance",
+        "deliverables",
+        "forbidden_paths",
+    )
+    @classmethod
+    def _validate_string_list_items(cls, value: list[str]) -> list[str]:
+        """Bound individual string items to keep audit logs and shell args safe."""
+        for item in value:
+            if not item.strip():
+                raise ValueError("list item cannot be empty or whitespace-only")
+            if len(item) > 4096:
+                raise ValueError("list item exceeds maximum length of 4096 characters")
+        return value
 
     approval_required: bool = True
     completion_contract: CompletionContract | None = None

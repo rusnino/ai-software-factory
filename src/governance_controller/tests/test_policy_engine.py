@@ -245,27 +245,20 @@ class TestPolicyEngineRejections:
         assert any("Force push" in v for v in result.violations)
         assert any("Signed commits" in v for v in result.violations)
 
-    @pytest.mark.parametrize(
-        ("objective", "acceptance", "expected_message"),
-        [
-            ("", ["passes tests"], "objective is empty"),
-            ("Do thing", [], "acceptance criteria are empty"),
-            ("   ", ["passes tests"], "objective is empty"),
-        ],
-    )
-    def test_missing_acceptance_or_objective_rejected(
-        self,
-        objective: str,
-        acceptance: list[str],
-        expected_message: str,
-    ) -> None:
-        contract = _make_contract(objective=objective, acceptance=acceptance)
-        profile = _make_profile()
+    def test_empty_objective_rejected_at_schema(self) -> None:
+        """#234: objective must be non-empty at the schema layer."""
+        with pytest.raises(ValidationError):
+            _make_contract(objective="")
 
-        result = PolicyEngine.evaluate(contract, profile, ApprovalType.PLAN)
+    def test_whitespace_objective_rejected_at_schema(self) -> None:
+        """#234: whitespace-only objective must not bypass policy checks."""
+        with pytest.raises(ValidationError):
+            _make_contract(objective="   ")
 
-        assert result.allowed is False
-        assert any(expected_message in v for v in result.violations)
+    def test_empty_acceptance_rejected_at_schema(self) -> None:
+        """#234: acceptance criteria must contain at least one item."""
+        with pytest.raises(ValidationError):
+            _make_contract(acceptance=[])
 
     def test_forbidden_path_agreement_is_allowed(self) -> None:
         # The task and profile both forbid a path: this is not a conflict.

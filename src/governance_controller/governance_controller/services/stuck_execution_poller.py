@@ -42,11 +42,13 @@ class StuckExecutionPoller:
         executor: MacroAgentExecutor | None = None,
         client: MacroAgentClient | None = None,
         dry_run: bool = False,
+        batch_size: int = 100,
     ) -> None:
         self.db = db
         self._executor = executor
         self._client = client
         self._dry_run = dry_run
+        self._batch_size = batch_size
 
     def _timeout_factor(self) -> int:
         return 2
@@ -102,38 +104,40 @@ class StuckExecutionPoller:
                     "deadline": deadline.isoformat(),
                 }
             )
+            # Commit incrementally so a large backlog does not hold one
+            # unbounded transaction open for the entire poll pass (#238).
+            await self.db.commit()
 
         return actions
 
     async def _running_tasks_with_executions(
         self,
     ) -> list[tuple[Task, Execution]]:
-        """Return RUNNING tasks joined with their latest execution row.
+        """Return a bounded batch of RUNNING tasks joined with their latest
+        execution row.
 
         ``task.latest_macro_agent_run_id`` stores the external macro-agent run id
         returned by ``MacroAgentExecutor.start()``, not the internal
-        ``Execution.id`` primary key. The join must use
-        ``Execution.macro_agent_run_id`` so real approval-created tasks match.
+        ``Execution.id`` primary key. The join uses ``Execution.macro_agent_run_id``
+        so real approval-created tasks match, and restricts the join to executions
+        still in ``RUNNING`` state to avoid matching a stale pointer left by a
+        retry in flight (#237).
         """
         # SQLModel/StrEnum mypy interaction: pass the string value and
         # ignore the false-positive bool-argument error.
         result = await self.db.execute(
-            select(Task).where(Task.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
-        )
-        tasks: list[Task] = list(result.scalars().all())
-        pairs: list[tuple[Task, Execution]] = []
-        for task in tasks:
-            if not task.latest_macro_agent_run_id:
-                continue
-            exec_result = await self.db.execute(
-                select(Execution).where(
-                    Execution.macro_agent_run_id  # type: ignore[arg-type]
-                    == task.latest_macro_agent_run_id
-                )
+            select(Task, Execution)
+            .join(
+                Execution,
+                Execution.macro_agent_run_id == Task.latest_macro_agent_run_id,  # type: ignore[arg-type]
             )
-            execution = exec_result.scalar_one_or_none()
-            if execution is not None:
-                pairs.append((task, execution))
+            .where(Task.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
+            .where(Execution.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
+            .limit(self._batch_size)
+        )
+        pairs: list[tuple[Task, Execution]] = []
+        for task, execution in result.tuples().all():
+            pairs.append((task, execution))
         return pairs
 
     async def _task_timeout_minutes(self, task: Task) -> int:
