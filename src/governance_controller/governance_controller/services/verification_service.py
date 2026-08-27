@@ -627,6 +627,15 @@ class VerificationService:
         db.add(execution)
         await db.flush()
 
+        # Point the task at the new execution row before committing, so the
+        # stuck-execution poller cannot see a stale execution id during the
+        # potentially slow macro-agent network call. We do not yet have a real
+        # macro-agent run id, so use the execution's internal id as a sentinel;
+        # it is overwritten with the external run id once `executor.start()`
+        # returns.
+        task.latest_macro_agent_run_id = execution.id
+        await db.flush()
+
         # Commit before the outbound macro-agent call so no task row lock is held
         # across the potentially slow network request.
         await db.commit()
