@@ -51,7 +51,12 @@ class MacroAgentClient:
             return cast(dict[str, Any], response.json())
 
     def _client(self) -> httpx.AsyncClient:
-        """Return a configured httpx client with explicit timeouts."""
+        """Return a configured httpx client with explicit timeouts.
+
+        SECURITY: this header contains a secret. Never log ``exc.request`` or
+        ``exc.request.headers`` from a caught ``httpx`` exception, as that
+        would leak the secret into logs/audit (#249).
+        """
         headers: dict[str, str] = {}
         if settings.macro_agent_api_secret:
             headers["X-Macro-Agent-Secret"] = settings.macro_agent_api_secret

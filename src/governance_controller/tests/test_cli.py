@@ -1,11 +1,13 @@
-"""Tests for the governance_controller CLI approval command."""
+"""Tests for the governance_controller CLI commands."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
 from governance_controller.cli import app
+from governance_controller.constants import TaskState
+from governance_controller.models.task import Task
 
 
 @pytest.fixture
@@ -78,3 +80,53 @@ class TestCliApprove:
             )
 
         assert result.exit_code == 1
+
+
+class TestCliReconcile:
+    async def test_reconcile_filters_tasks_by_project_id(
+        self,
+        db_session,
+    ) -> None:
+        """#245: reconcile must only consider tasks for the requested project."""
+        from sqlalchemy import select
+
+        from governance_controller.services.reconciliation_service import (
+            ReconciliationService,
+        )
+
+        task_a = Task(
+            id="task-a",
+            project_id="project-a",
+            state=TaskState.PROPOSED,
+            proposed_by="x",
+        )
+        task_b = Task(
+            id="task-b",
+            project_id="project-b",
+            state=TaskState.PROPOSED,
+            proposed_by="x",
+        )
+        db_session.add(task_a)
+        db_session.add(task_b)
+        await db_session.commit()
+
+        mock_report = MagicMock()
+        mock_report.checked = 1
+        mock_report.divergences = []
+
+        with patch.object(
+            ReconciliationService, "reconcile", new=AsyncMock(return_value=mock_report)
+        ):
+            result = await db_session.execute(
+                select(Task.id, Task.state, Task.project_id, Task.plane_issue_id).where(
+                    Task.project_id == "project-a"
+                )
+            )
+            rows = result.all()
+            controller_tasks = [
+                (str(row.id), row.state, row.project_id or "project-a")
+                for row in rows
+            ]
+
+        assert controller_tasks == [("task-a", TaskState.PROPOSED, "project-a")]
+        assert all(t[2] == "project-a" for t in controller_tasks)

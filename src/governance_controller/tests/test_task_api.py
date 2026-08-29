@@ -114,6 +114,31 @@ class TestTaskApi:
         assert body["state"] == TaskState.PROPOSED.value
         assert body["execution_attempts"] == 0
 
+    async def test_create_task_with_mismatched_project_id_returns_422(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """#244: cross-project profile poisoning must be rejected at the schema."""
+        poisoned_profile = sample_profile.model_copy(
+            update={"project_id": "other-project"}
+        )
+        payload = {
+            "task_contract": sample_contract.model_dump(),
+            "project_profile": poisoned_profile.model_dump(),
+        }
+
+        response = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert "project_id" in str(body.get("detail", "")).lower()
+
     async def test_execution_attempts_increments_on_retry(
         self,
         async_client: AsyncClient,

@@ -100,9 +100,9 @@ def reconcile(
     async def _run() -> None:
         async with get_db_session() as db:
             result = await db.execute(
-                select(Task.id, Task.state, Task.project_id, Task.plane_issue_id)  # type: ignore[call-overload]
+                select(Task).where(Task.project_id == project_id)  # type: ignore[arg-type]
             )
-            rows = result.all()
+            rows = result.scalars().all()
             controller_tasks = [
                 (str(row.id), row.state, row.project_id or project_id)
                 for row in rows

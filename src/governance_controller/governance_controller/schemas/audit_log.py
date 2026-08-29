@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AuditLogEntry(BaseModel):
@@ -17,3 +17,12 @@ class AuditLogEntry(BaseModel):
     source: str
     timestamp: datetime
     payload: dict[str, Any]
+
+
+class AuditLogPage(BaseModel):
+    """Paginated audit log response."""
+
+    entries: list[AuditLogEntry]
+    total: int
+    limit: int = Field(..., ge=1, le=1000)
+    offset: int = Field(..., ge=0)

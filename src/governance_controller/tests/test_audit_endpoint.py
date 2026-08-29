@@ -60,9 +60,10 @@ async def test_get_audit_log_returns_entries(
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body) == 1
-    assert body[0]["event_type"] == "state_change"
-    assert body[0]["actor"] == "human-1"
+    assert body["total"] == 1
+    assert len(body["entries"]) == 1
+    assert body["entries"][0]["event_type"] == "state_change"
+    assert body["entries"][0]["actor"] == "human-1"
 
 
 async def test_get_audit_log_for_missing_task_returns_404(
@@ -82,3 +83,37 @@ async def test_get_audit_log_without_secret_returns_401(
     """#236: read-side audit route requires the controller secret."""
     response = await async_client.get("/tasks/audit-task-1/audit-log")
     assert response.status_code == 401
+
+
+async def test_get_audit_log_pagination_bounds_response(
+    async_client: AsyncClient,
+    client_db_session: AsyncSession,
+) -> None:
+    """#247: audit log endpoint must paginate and report total."""
+    task = Task(id="audit-task-page", project_id="proj-1", proposed_by="agent-1")
+    client_db_session.add(task)
+    await client_db_session.flush()
+
+    for idx in range(5):
+        await AuditService.log(
+            db=client_db_session,
+            event_type="state_change",
+            task_id="audit-task-page",
+            actor="human-1",
+            source="test",
+            payload={"index": idx},
+        )
+
+    response = await async_client.get(
+        "/tasks/audit-task-page/audit-log?limit=2&offset=1",
+        headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 5
+    assert body["limit"] == 2
+    assert body["offset"] == 1
+    assert len(body["entries"]) == 2
+    assert body["entries"][0]["payload"]["index"] == 1
+    assert body["entries"][1]["payload"]["index"] == 2

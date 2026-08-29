@@ -167,3 +167,78 @@ async def test_valid_secret_allowed(
             headers={"X-Macro-Agent-Secret": "secret"},
         )
     assert response.status_code == 201
+
+
+async def test_feedback_on_cancelled_run_returns_409(fresh_store: RunStore) -> None:
+    """#246: feedback must be rejected for terminal-state runs."""
+    async with _client() as client:
+        created = await client.post(
+            "/runs",
+            json={"task_id": "task-1", "objective": "Implement a feature"},
+        )
+        run_id = created.json()["run_id"]
+        await client.post(f"/runs/{run_id}/cancel")
+
+        response = await client.post(
+            f"/runs/{run_id}/feedback",
+            json={
+                "controller_task_id": "task-1",
+                "controller_state": "RUNNING",
+                "verification_report": {},
+                "execution_attempts": 1,
+                "max_retries": 2,
+                "objective": "Implement a feature",
+            },
+        )
+
+    assert response.status_code == 409
+
+
+async def test_run_store_evicts_oldest_terminal_run(fresh_store: RunStore) -> None:
+    """#243: terminal runs are evicted when the in-memory store reaches its cap."""
+    capped = RunStore(max_runs=3)
+    from macro_agent_service import main as main_module
+    from macro_agent_service import store as store_module
+
+    # Patch the module-level singleton used by the app for this test only.
+    store_module.store = capped
+    main_module.store = capped
+
+    created_ids: list[str] = []
+    for idx in range(3):
+        response = await capped.create(
+            type(
+                "RunRequest",
+                (),
+                {
+                    "model_dump": (
+                        lambda idx=idx: {  # noqa: ARG005
+                            "task_id": f"task-{idx}",
+                            "objective": f"obj-{idx}",
+                        }
+                    )
+                },
+            )()
+        )
+        created_ids.append(response.run_id)
+
+    # Mark the first run terminal, then create a fourth run. The first should
+    # be evicted, while the remaining two active runs stay.
+    capped._runs[created_ids[0]]["status"] = "cancelled"
+    response = await capped.create(
+        type(
+            "RunRequest",
+            (),
+            {
+                "model_dump": lambda self: {  # noqa: ARG005
+                    "task_id": "task-3",
+                    "objective": "obj-3",
+                }
+            },
+        )()
+    )
+
+    assert created_ids[0] not in capped._runs
+    assert created_ids[1] in capped._runs
+    assert created_ids[2] in capped._runs
+    assert response.run_id in capped._runs

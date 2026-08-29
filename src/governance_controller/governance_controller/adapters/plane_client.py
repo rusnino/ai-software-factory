@@ -54,6 +54,12 @@ class PlaneClient:
         return effective
 
     def _client(self) -> httpx.AsyncClient:
+        """Return a configured httpx client.
+
+        SECURITY: the ``X-API-Key`` header contains a secret. Never log
+        ``exc.request`` or ``exc.request.headers`` from a caught ``httpx``
+        exception, as that would leak the API token into logs/audit (#249).
+        """
         return httpx.AsyncClient(
             timeout=self.timeout,
             headers={"X-API-Key": self.api_key},

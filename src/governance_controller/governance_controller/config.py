@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     # minute. Set to 0 to disable rate limiting.
     intake_rate_limit_per_minute: int = 10
 
+    # Global API rate limiting: maximum requests per originating IP per minute
+    # for all Controller endpoints except /health. Set to 0 to disable.
+    rate_limit_per_minute: int = 120
+
     # Comma-separated list of actors that are allowed to grant EXECUTION and
     # MERGE approvals. Must be set in production; the empty default denies all
     # sensitive approvals so the Controller fails closed.

@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel
 
+from governance_controller.middleware import reset_rate_limits
+
 _TEST_DB_URL_ENV = "GC_TEST_DATABASE_URL"
 _TEST_DB_URL_DEFAULT = "sqlite+aiosqlite:///:memory:"
 
@@ -32,6 +34,12 @@ def _test_admin_config(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "governance_controller.config.settings.admins", "admin"
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits() -> None:
+    """Clear in-memory rate-limit counters before every test."""
+    reset_rate_limits()
 
 
 def _is_sqlite(url: str) -> bool:

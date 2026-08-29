@@ -20,7 +20,10 @@ from governance_controller.api.intake import IntakeAuthError
 from governance_controller.api.webhooks import WebhookAuthError
 from governance_controller.config import settings
 from governance_controller.db import init_db
-from governance_controller.middleware import WriteBodySizeLimitMiddleware
+from governance_controller.middleware import (
+    InMemoryRateLimitMiddleware,
+    WriteBodySizeLimitMiddleware,
+)
 
 
 @asynccontextmanager
@@ -48,6 +51,7 @@ app = FastAPI(
 )
 
 app.add_middleware(WriteBodySizeLimitMiddleware)
+app.add_middleware(InMemoryRateLimitMiddleware)
 
 
 @app.exception_handler(WebhookAuthError)

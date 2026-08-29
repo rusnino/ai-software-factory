@@ -10,20 +10,20 @@ SandboxMode = Literal["worktree", "docker", "firecracker", "kata"]
 class RunRequest(BaseModel):
     """Payload to start a macro-agent run."""
 
-    task_id: str
-    team: str = "default"
-    harness: str = "opencode"
-    role: str = "worker"
-    objective: str
-    acceptance: list[str] = Field(default_factory=list)
-    timeout_minutes: int = 60
-    max_retries: int = 2
+    task_id: str = Field(..., min_length=1, max_length=256)
+    team: str = Field(default="default", min_length=1, max_length=128)
+    harness: str = Field(default="opencode", min_length=1, max_length=128)
+    role: str = Field(default="worker", min_length=1, max_length=128)
+    objective: str = Field(..., min_length=1, max_length=65536)
+    acceptance: list[str] = Field(default_factory=list, max_length=1000)
+    timeout_minutes: int = Field(default=60, ge=1, le=10080)
+    max_retries: int = Field(default=2, ge=0, le=100)
     sandbox: SandboxMode = "worktree"
-    max_parallel_agents: int = 3
+    max_parallel_agents: int = Field(default=3, ge=1, le=1000)
     uses_docker_socket: bool = False
     destructive_shell: bool = False
     spawn_subagents: bool = False
-    network_access: str = "restricted"
+    network_access: str = Field(default="restricted", min_length=1, max_length=64)
     force_push: bool = False
     signed_commits: bool = False
     opentasks_dag: dict[str, Any] | None = None
