@@ -56,17 +56,20 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-29): implemented, NOT gate-clean — 7 open issues (1 CRITICAL, 2 HIGH).** Seven
+**Status (2026-08-30): implemented, NOT gate-clean — 9 open issues (2 CRITICAL, 3 HIGH).** Eight
 review rounds have run. Rounds 1-4 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13
 more, including two in Phase 1 core code that five rounds of `policy_engine.py`-focused hardening
 never surfaced: a hardcoded admin skeleton key and a casing-based self-approval bypass. Round 6
 fixed both and found the write-side auth fix (`#218`) had a same-shaped gap on the read side
-(`#236`) plus a new stuck-execution-poller race (`#237`). **Round 7 found the most severe issue of
-any round: `#244`, a live cross-tenant `ProjectProfile` poisoning vulnerability — any caller holding
-the one shared API secret can overwrite any OTHER project's security posture via `POST /tasks`,
-because `TaskContract.project_id` and `ProjectProfile.project_id` are never cross-checked.** No
-prior round had tested multi-project isolation. This project's own history — three separate
-premature "gate-clean" declarations, each wrong on independent re-verification — means this status
+(`#236`) plus a new stuck-execution-poller race (`#237`). Round 7 found the then-most-severe issue —
+`#244`, a live cross-tenant `ProjectProfile` poisoning vulnerability, since fixed with a schema
+validator. **Round 8 found two issues more severe still: `#253` and `#254`, a Controller process
+crash at either of two specific points in the approval/verification pipeline leaves a task
+permanently stuck with no automatic recovery path — and for `#254`, the crash also disables the
+event-redelivery mechanism that would otherwise have recovered it, since the in-progress dedup
+marker `#240` added can't distinguish a crashed writer from a completed one.** No prior round had
+tested process-level crash resilience. This project's own history — three separate premature
+"gate-clean" declarations, each wrong on independent re-verification — means this status
 line should never be trusted without re-running `gh issue list --label phase-2 --state open` first.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*

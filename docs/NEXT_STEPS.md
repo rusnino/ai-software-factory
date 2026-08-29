@@ -3,22 +3,23 @@
 ## Current State
 
 **Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
-it has been declared prematurely at least three separate times (`#152`'s first close, an earlier
-"gate-clean" doc commit, and the third review round's `7622c77`), each later found wrong by
-independent live verification.** As of 2026-08-29, seven review rounds have run. Rounds 1-4
-(`#154`-`#221`) landed. Round 5 found 13 issues never seen before, including a hardcoded admin
-skeleton key and a casing-based self-approval bypass in Phase 1 core code (`permission_service.py`)
-that five rounds of narrow `policy_engine.py` hardening (`#107`-`#150`) never looked at from that
-angle. Round 6 fixed round 5's two CRITICALs and immediately found the fix for one of them
-(write-side auth, `#218`) had a same-shaped gap on the read side (`#236`: `GET /tasks`, `GET
-/tasks/{id}/audit-log`, `GET /executions/{id}` had zero auth) plus a new stuck-execution-poller race
-(`#237`). **Round 7 found the most severe issue yet: `POST /tasks` let any caller — using only the
-one shared API secret every legitimate integration holds — silently overwrite ANY other project's
-`ProjectProfile` security posture** (network restriction, forbidden paths, harness allowlist,
-timeout/retry caps), by naming a foreign `project_id` in the `project_profile` half of the request
-body while creating an unrelated task under their own project (`#244`). Nobody had tested
-cross-project isolation before round 7. **Query the live issue list before trusting anything else
-in this file:**
+it has been declared prematurely at least three separate times, each later found wrong by
+independent live verification.** As of 2026-08-30, eight review rounds have run. Rounds 1-6
+(`#154`-`#242`) landed and hold up on re-verification. Round 7 found the project's then-most-severe
+issue — cross-project `ProjectProfile` poisoning via `POST /tasks` (`#244`) — by trying a genuinely
+new angle (multi-tenancy isolation) no prior round had tried. **Round 8 found two issues more severe
+than that: a Controller crash at either of two specific points in the approval/verification pipeline
+permanently strands a task with NO automatic recovery path, and for one of them, no manual recovery
+path either short of hand-editing Postgres** (`#253`: crash between the `READY` commit and the
+macro-agent call; `#254`: crash during verification, where the very dedup-marker mechanism `#240`
+added to prevent duplicate verification now actively suppresses the event redelivery that would
+otherwise recover the task). Round 8 also found a HIGH path-traversal in `TaskContract.task_id`
+(`#255`, redirects a task's own completion-contract checks' cwd/`$HOME` to any directory on the
+Controller host) and that round 7's own rate-limit fix (`#248`) reintroduced the exact unbounded-
+growth bug it was fixed alongside (`#250`, in `#243`). **Every round that tried a genuinely new
+angle — Phase 1 core in round 5, the read side in round 6, cross-tenancy in round 7, process-crash
+resilience in round 8 — found something no prior round's angles could have found.** Query the live
+issue list before trusting anything else in this file:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -26,14 +27,14 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **7 open issues (1 CRITICAL, 2 HIGH, 2 MEDIUM, 2 LOW)** — `#244` (CRITICAL —
-cross-project `ProjectProfile` poisoning via `POST /tasks`, live-reproduced), `#247` (HIGH — the
-audit-log endpoint has no pagination, ~11.5MB response at 20k rows), `#248` (HIGH — no rate limiting
-anywhere except `/intake/*`, live-verified 150/150 unthrottled requests), `#245` (MEDIUM — `gc
-reconcile <project_id>` reads every project's tasks with no filter), `#243` (MEDIUM — the
-macro-agent-service scaffold accepts unbounded/negative fields and has no cap on its in-memory
-store — a real memory-exhaustion DoS), plus two LOW items (`#246`, `#249`). Every prior round's
-findings (`#151`-`#242`) are closed and independently re-verified.
+As of this writing: **9 open issues (2 CRITICAL, 3 HIGH, 2 MEDIUM, 2 LOW)** — `#253`/`#254`
+(CRITICAL — unrecoverable stuck states from a Controller crash mid-pipeline), `#255` (HIGH —
+`task_id` path traversal into the verification worktree cwd), `#250` (HIGH — the round-7 rate-limit
+fix leaks memory unboundedly, same bug class as `#243`), `#256` (HIGH — intake duplicate/rate-limit
+guard is dead code whenever Plane isn't configured), `#252` (MEDIUM — three Plane write call sites
+drop `project_id`, falling back to the wrong project), `#257` (MEDIUM — Telegram actor derivation
+trusts a mutable username over the stable numeric id), plus two LOW items (`#251`, `#258`). Every
+prior round's findings (`#151`-`#249`) are closed and independently re-verified.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -54,13 +55,14 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status (2026-08-29): **406 passed / 5 skipped** on SQLite, **409 passed / 2 skipped** on
+Test status (2026-08-30): **413 passed / 5 skipped** on SQLite, **416 passed / 2 skipped** on
 PostgreSQL, `ruff` clean, `mypy governance_controller` clean (68 source files); `macro_agent_service`
 tests still pass, `ruff`/`mypy` clean. Green tests are not evidence of correctness in this project —
 re-read the "Current State" section above before trusting this number to mean anything beyond
-"nothing crashes." A real CI workflow now exists (`.github/workflows/ci.yml`, added by `#223`,
-live-verified to actually run both backends), but every "N passed" claim above this line is still
-a manual local run.
+"nothing crashes." None of round 8's findings (`#253`-`#258`) — including two CRITICAL unrecoverable
+stuck-state bugs — were caught by this suite; they required actually killing a live process and
+inspecting real Postgres state afterward. A real CI workflow exists (`.github/workflows/ci.yml`,
+added by `#223`), but it runs this same suite, so it would not have caught these either.
 
 Implemented components:
 
@@ -103,30 +105,37 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Seven review
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Eight review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
 of rounds 4-6's own new code, GET-endpoint auth audit, concurrency sweep, fresh end-to-end pipeline,
 `#236`-`#242`), Round 7 (macro-agent adversarial testing, cross-project isolation, resource
-limits/rate limiting, secret-leakage audit, `#243`-`#249`). **7 issues remain open, including 1
-CRITICAL.** Round 7's CRITICAL (`#244`) is the most severe finding of any round so far — a
-cross-tenant `ProjectProfile` poisoning vulnerability nobody had tested for because no prior round
-had specifically looked at multi-project isolation boundaries. **Do not treat "Phase 2 review" as
+limits/rate limiting, secret-leakage audit, `#243`-`#249`), Round 8 (adversarial review of round 7's
+own fixes, systematic project-scoping sweep, Controller crash/restart resilience, unconstrained
+schema fields, `#250`-`#258`). **9 issues remain open, including 2 CRITICAL.** Round 8's two
+CRITICALs (`#253`, `#254`) are the most severe findings of any round so far — a Controller process
+crash at either of two specific points in the approval/verification pipeline leaves a task
+permanently stuck with no automatic recovery, and for `#254` specifically, the crash also disables
+the one mechanism (event redelivery) that would otherwise have recovered it. Nobody had tested
+process-level crash resilience before round 8 — every round so far tested request-level races and
+logic, never "what if the Controller itself dies mid-operation." **Do not treat "Phase 2 review" as
 bounded to Phase 2 code, or to any fixed set of angles** — every round that tried a genuinely new
-angle (Phase 1 core in round 5, the read side in round 6, cross-tenancy in round 7) found something
-the previous rounds' angles couldn't have found. The next round should keep trying new angles, not
-repeat the ones already covered.
+angle (Phase 1 core in round 5, the read side in round 6, cross-tenancy in round 7, crash resilience
+in round 8) found something the previous rounds' angles couldn't have found. The next round should
+keep trying new angles, not repeat the ones already covered.
 
-## Immediate Next Step: Fix the Cross-Tenant Profile-Poisoning CRITICAL, Then Verify Gate-Clean
+## Immediate Next Step: Fix the Two Unrecoverable-Crash CRITICALs, Then Verify Gate-Clean
 
-Prioritize `#244` first (any caller can overwrite any other project's security posture via `POST
-/tasks` — this is a live, actively exploitable vulnerability in the current codebase, not a
-theoretical gap). Then the 2 HIGH issues (`#247` unbounded audit-log, `#248` no rate limiting) and
-2 MEDIUM (`#243` macro-agent-service resource limits, `#245` reconcile CLI cross-project leak).
-Before declaring Phase 2 gate-clean, run a fresh live-reproduction review and confirm the live issue
-list has no open `severity:critical` or `severity:high` issues — and try an angle no prior round has
-tried yet, given the track record above.
+Prioritize `#253` and `#254` first (a Controller crash mid-pipeline permanently strands a task with
+no recovery path — this is a live, reproducible reliability gap in the current codebase, not a
+theoretical one, and both were confirmed by actually killing a real process and inspecting real
+Postgres state afterward). Then the 3 HIGH issues (`#255` task_id path traversal, `#250` rate-limit
+middleware memory leak, `#256` intake guard dead-code-without-Plane) and 2 MEDIUM (`#252` Plane
+writes dropping project_id, `#257` Telegram username-vs-id trust). Before declaring Phase 2
+gate-clean, run a fresh live-reproduction review and confirm the live issue list has no open
+`severity:critical` or `severity:high` issues — and try an angle no prior round has tried yet, given
+the track record above.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
