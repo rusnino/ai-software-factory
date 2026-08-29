@@ -322,7 +322,7 @@ async def receive_plane_webhook(
         previous_plane,
         _current_plane,
         issue_id,
-        _project_id,
+        project_id,
         legacy_actor,
     ) = translation
 
@@ -336,6 +336,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             "No actor found in webhook activity",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -349,6 +350,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             "No allowed actors configured for webhook approvals",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -366,6 +368,7 @@ async def receive_plane_webhook(
                 issue_id,
                 event.activity.old_value,
                 f"Actor '{actor_email}' could not be verified",
+                project_id=project_id,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -377,6 +380,7 @@ async def receive_plane_webhook(
                 issue_id,
                 event.activity.old_value,
                 f"Actor '{actor_email}' is not authorised to approve via webhook",
+                project_id=project_id,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -393,6 +397,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             f"Task {issue_id} not found in Controller",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -409,6 +414,7 @@ async def receive_plane_webhook(
                 "Stale webhook: Controller state is "
                 f"{task.state.value}, expected {previous_plane.value}"
             ),
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -421,6 +427,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             "Project profile not found for task",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -451,6 +458,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             f"Policy violation: {exc.violations}",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -463,6 +471,7 @@ async def receive_plane_webhook(
                 issue_id,
                 event.activity.old_value,
                 f"State conflict: {message}",
+                project_id=project_id,
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -472,6 +481,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             f"Approval rejected: {message}",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -482,6 +492,7 @@ async def receive_plane_webhook(
             issue_id,
             event.activity.old_value,
             f"Execution unavailable: {exc}",
+            project_id=project_id,
         )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -493,6 +504,7 @@ async def _revert_plane_state(
     task_id: str,
     previous_state: Any,
     reason: str,
+    project_id: str | None = None,
 ) -> None:
     """Revert Plane state and comment when Controller rejects the change.
 
@@ -507,4 +519,8 @@ async def _revert_plane_state(
     # the state list; as a pragmatic fallback we comment the reason. Failures
     # are swallowed so Plane projection errors do not mask the HTTP response.
     with contextlib.suppress(Exception):
-        await client.add_comment(task_id, f"Controller rejected state change: {reason}")
+        await client.add_comment(
+            task_id,
+            f"Controller rejected state change: {reason}",
+            project_id=project_id,
+        )

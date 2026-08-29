@@ -56,7 +56,7 @@ class TestTelegramAdapter:
                 "task_id": "TASK-1",
                 "approval_type": "execution",
                 "source": "telegram",
-                "actor": "telegram:alice",
+                "actor": "telegram:111:alice",
                 "timestamp": mock_client.post.call_args.kwargs["json"]["timestamp"],
                 "comment": None,
             },
@@ -129,12 +129,13 @@ class TestTelegramAdapter:
 
         assert result == {"status": "ok"}
 
-    async def test_derive_actor_prefers_username(
+    async def test_derive_actor_prefers_stable_numeric_id(
         self, adapter: TelegramAdapter
     ) -> None:
+        """#257: Telegram actor must use the immutable numeric id."""
         message = {"from": {"id": 123, "username": "bob"}}
 
-        assert adapter.derive_actor(message) == "telegram:bob"
+        assert adapter.derive_actor(message) == "telegram:123:bob"
 
     async def test_derive_actor_falls_back_to_user_id(
         self, adapter: TelegramAdapter

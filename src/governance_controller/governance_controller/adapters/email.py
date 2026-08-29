@@ -7,11 +7,26 @@ pre-fetched and validated email JSON.
 
 from typing import Any
 
+from fastapi import HTTPException, status
+
 from governance_controller.schemas.intake import RawIdea
 
 
 class EmailAdapter:
     """Translate a parsed email payload into a RawIdea."""
+
+    @staticmethod
+    def _coerce(value: Any, field: str) -> str:
+        """Return a cleaned string, raising 422 for non-string values (#258)."""
+        if isinstance(value, str):
+            return value
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Email field {field!r} must be a string, "
+                f"got {type(value).__name__}"
+            ),
+        )
 
     @staticmethod
     def parse(payload: dict[str, Any]) -> RawIdea:
@@ -24,8 +39,12 @@ class EmailAdapter:
             sender = sender.get("address", "unknown")
         return RawIdea(
             source="email",
-            source_id=payload.get("message_id", "email-unknown"),
-            sender=str(sender),
-            subject=payload.get("subject", "No subject"),
-            body=payload.get("body_text", ""),
+            source_id=EmailAdapter._coerce(
+                payload.get("message_id", "email-unknown"), "message_id"
+            ),
+            sender=EmailAdapter._coerce(sender, "from"),
+            subject=EmailAdapter._coerce(
+                payload.get("subject", "No subject"), "subject"
+            ),
+            body=EmailAdapter._coerce(payload.get("body_text", ""), "body_text"),
         )

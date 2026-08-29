@@ -86,7 +86,9 @@ class IdeaIngestionService:
 
         Returns the Plane issue JSON or None if Plane is not configured or the
         idea is spam. When ``db`` is provided, duplicate submissions and sender
-        rate limits are enforced before calling Plane.
+        rate limits are enforced and the submission is recorded before any
+        Plane call, so the guards remain effective even when Plane is disabled
+        (#256).
         """
         if classified.category == "spam":
             return None
@@ -98,6 +100,17 @@ class IdeaIngestionService:
                 classified.idea.source_id,
                 classified.idea.sender,
             )
+            # Persist the submission unconditionally. The row must exist for
+            # duplicate/rate-limit enforcement even if Plane is disabled or its
+            # call fails.
+            db.add(
+                IntakeSubmission(
+                    source=classified.idea.source,
+                    source_id=classified.idea.source_id,
+                    sender=classified.idea.sender,
+                )
+            )
+            await db.flush()
 
         client = self._client
         if client is None:
@@ -126,16 +139,6 @@ class IdeaIngestionService:
             },
             project_id=effective_project,
         )
-
-        if db is not None:
-            db.add(
-                IntakeSubmission(
-                    source=classified.idea.source,
-                    source_id=classified.idea.source_id,
-                    sender=classified.idea.sender,
-                )
-            )
-            await db.flush()
 
         return result
 

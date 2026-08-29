@@ -3,6 +3,10 @@
 SPEC-05 §5.6: if the Event Bridge stops delivering events, the Controller must
 poll the macro-agent service for execution status and transition tasks that
 have exceeded their timeout budget to BLOCKED with a human-alert audit entry.
+
+This poller also recovers from two crash windows identified in #253 and #254:
+tasks left at ``READY`` because ``executor.start()`` crashed mid-flight, and
+tasks left at ``AGENT_REVIEW`` because verification crashed mid-flight.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
 from governance_controller.models.execution import Execution
+from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.state_machine import StateMachine
@@ -53,8 +58,27 @@ class StuckExecutionPoller:
     def _timeout_factor(self) -> int:
         return 2
 
+    def _crash_timeout_factor(self) -> int:
+        """Multiplier for crash-recovery windows (#253/#254)."""
+        return 2
+
     async def poll(self) -> list[dict[str, Any]]:
         """Run one polling pass and return a list of actions taken."""
+        actions: list[dict[str, Any]] = []
+
+        running_actions = await self._poll_running()
+        actions.extend(running_actions)
+
+        ready_actions = await self._poll_ready()
+        actions.extend(ready_actions)
+
+        agent_review_actions = await self._poll_agent_review()
+        actions.extend(agent_review_actions)
+
+        return actions
+
+    async def _poll_running(self) -> list[dict[str, Any]]:
+        """Block RUNNING tasks whose execution has genuinely timed out."""
         tasks = await self._running_tasks_with_executions()
         if not tasks:
             return []
@@ -104,8 +128,134 @@ class StuckExecutionPoller:
                     "deadline": deadline.isoformat(),
                 }
             )
+
             # Commit incrementally so a large backlog does not hold one
             # unbounded transaction open for the entire poll pass (#238).
+            await self.db.commit()
+
+        return actions
+
+    async def _poll_ready(self) -> list[dict[str, Any]]:
+        """Fail READY tasks whose executor.start() never completed (#253).
+
+        A crash between the READY transition commit and the macro-agent /runs
+        response leaves the task at READY with an Execution row in READY state
+        and ``macro_agent_run_id`` still NULL. After a short grace window we
+        treat this as a failed execution start so the task is not stranded
+        forever.
+        """
+        result = await self.db.execute(
+            select(Task, Execution)
+            .join(Execution, Execution.task_id == Task.id)  # type: ignore[arg-type]
+            .where(Task.state == TaskState.READY.value)  # type: ignore[arg-type]
+            .where(Execution.state == TaskState.READY.value)  # type: ignore[arg-type]
+            .where(Execution.macro_agent_run_id.is_(None))  # type: ignore[union-attr]
+            .limit(self._batch_size)
+        )
+
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task, execution in result.tuples().all():
+            timeout = await self._task_timeout_minutes(task)
+            deadline = execution.started_at + timedelta(
+                minutes=timeout * self._crash_timeout_factor()
+            )
+            if now < deadline:
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "would_fail_ready",
+                        "reason": "execution start never completed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            await self._mark_failed(task, execution, "execution_start_never_completed")
+            actions.append(
+                {
+                    "task_id": task.id,
+                    "execution_id": execution.id,
+                    "action": "failed_ready",
+                    "reason": "execution start never completed",
+                    "deadline": deadline.isoformat(),
+                }
+            )
+            await self.db.commit()
+
+        return actions
+
+    async def _poll_agent_review(self) -> list[dict[str, Any]]:
+        """Recover AGENT_REVIEW tasks abandoned by a crash during verification.
+
+        The in-progress ProcessedEvent marker written by the EventBridge
+        prevents duplicate verification runs, but after a Controller crash the
+        marker remains forever and blocks legitimate redelivery (#254). If the
+        marker is older than the verification timeout window and the task is
+        still at AGENT_REVIEW, we delete the marker and move the task to BLOCKED
+        so a human is alerted and a fresh event can recover it.
+        """
+        result = await self.db.execute(
+            select(Task, ProcessedEvent)
+            .join(
+                ProcessedEvent,
+                ProcessedEvent.task_id == Task.id,  # type: ignore[arg-type]
+            )
+            .where(Task.state == TaskState.AGENT_REVIEW.value)  # type: ignore[arg-type]
+            .where(ProcessedEvent.event_type == "landing:completed")  # type: ignore[arg-type]
+            .limit(self._batch_size)
+        )
+
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task, marker in result.tuples().all():
+            timeout = await self._task_timeout_minutes(task)
+            deadline = marker.processed_at + timedelta(
+                minutes=timeout * self._crash_timeout_factor()
+            )
+            if now < deadline:
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "would_unblock_agent_review",
+                        "reason": "verification marker stale after Controller crash",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            # Delete the stale marker so a redelivery can resume verification.
+            await self.db.delete(marker)
+            success = await StateMachine.atomic_transition(
+                self.db, task, TaskState.BLOCKED
+            )
+            if success:
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_blocked_timeout",
+                    task_id=task.id,
+                    actor="system:poller",
+                    source="stuck_execution_poller",
+                    payload={
+                        "reason": "verification abandoned after Controller crash",
+                        "processed_event_id": marker.event_id,
+                    },
+                )
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "unblocked_agent_review",
+                        "reason": "verification marker stale after Controller crash",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
             await self.db.commit()
 
         return actions
@@ -200,5 +350,30 @@ class StuckExecutionPoller:
             payload={
                 "reason": "execution timed out without successful event delivery",
                 "macro_agent_run_id": execution.macro_agent_run_id,
+            },
+        )
+
+    async def _mark_failed(
+        self, task: Task, execution: Execution, reason_code: str
+    ) -> None:
+        """Transition a READY/RUNNING execution and its task to FAILED."""
+        success = await StateMachine.atomic_transition(self.db, task, TaskState.FAILED)
+        if not success:
+            return
+
+        execution.state = TaskState.FAILED
+        execution.ended_at = datetime.now(UTC)
+        await self.db.flush()
+
+        await AuditService.log(
+            db=self.db,
+            event_type="execution_start_failed",
+            task_id=task.id,
+            actor="system:poller",
+            source="stuck_execution_poller",
+            execution_id=execution.id,
+            payload={
+                "reason": "execution start never completed after READY transition",
+                "reason_code": reason_code,
             },
         )

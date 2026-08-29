@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # Global API rate limiting: maximum requests per originating IP per minute
     # for all Controller endpoints except /health. Set to 0 to disable.
     rate_limit_per_minute: int = 120
+    # Maximum distinct source IPs tracked simultaneously by the in-memory rate
+    # limiter. Prevents unbounded growth when clients vary forwarded headers.
+    rate_limit_max_ips: int = 10_000
 
     # Comma-separated list of actors that are allowed to grant EXECUTION and
     # MERGE approvals. Must be set in production; the empty default denies all

@@ -62,7 +62,9 @@ class AlertService:
             max_retries=max_retries,
             summary=summary,
         )
-        await self._plane_comment(task.plane_issue_id or task.id, summary)
+        await self._plane_comment(
+            task.plane_issue_id or task.id, summary, project_id=task.project_id
+        )
 
     async def notify_terminal_failure(
         self,
@@ -101,7 +103,9 @@ class AlertService:
                 detail="duplicate alert suppressed",
             )
             return
-        await self._plane_comment(task.plane_issue_id or task.id, summary)
+        await self._plane_comment(
+            task.plane_issue_id or task.id, summary, project_id=task.project_id
+        )
         if db is not None:
             await self._record_alert(
                 db, task.id, "terminal_failure", reason
@@ -146,12 +150,15 @@ class AlertService:
         self,
         plane_issue_id: str,
         text: str,
+        project_id: str | None = None,
     ) -> dict[str, Any] | None:
         client = self._plane()
         if client is None:
             return None
         try:
-            return await client.add_comment(plane_issue_id, text)
+            return await client.add_comment(
+                plane_issue_id, text, project_id=project_id
+            )
         except Exception as exc:
             logger.warning(
                 "plane_comment_failed",

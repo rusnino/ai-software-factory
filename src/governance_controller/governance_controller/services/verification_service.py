@@ -357,7 +357,11 @@ class VerificationService:
         if profile is not None:
             repo_path = getattr(profile.repository, "path", None)
             if repo_path:
-                candidate = os.path.join(str(repo_path), "worktrees", task.id)
+                # task.id is validated to be path-safe at TaskContract time, but
+                # defense-in-depth: basename() ensures no traversal even if a
+                # legacy row somehow contains unsafe characters (#255).
+                safe_task_id = os.path.basename(task.id)
+                candidate = os.path.join(str(repo_path), "worktrees", safe_task_id)
                 if os.path.isdir(candidate):
                     worktree_path = candidate
                 else:

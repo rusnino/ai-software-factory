@@ -60,18 +60,19 @@ class TelegramAdapter:
     def derive_actor(message: dict[str, Any]) -> str:
         """Derive an actor identifier from a Telegram ``message.from`` dict.
 
-        Prefer the human-readable ``username``; fall back to the numeric
-        ``id`` so approvals remain attributable even when a username is not
-        set. The literal ``telegram-user`` fallback remains only for payloads
-        that contain no ``from`` field.
+        Use the numeric ``id`` as the primary identifier because it is stable
+        and immutable, unlike ``username`` which can be reassigned. ``username``
+        is appended for human readability only (#257).
         """
         sender = cast(dict[str, Any], message.get("from", {}))
-        username = sender.get("username")
-        if username and isinstance(username, str):
-            return f"telegram:{username}"
         user_id = sender.get("id")
+        username = sender.get("username")
         if user_id is not None and str(user_id):
+            if isinstance(username, str) and username:
+                return f"telegram:{user_id}:{username}"
             return f"telegram:{user_id}"
+        if isinstance(username, str) and username:
+            return f"telegram:unknown:{username}"
         return "telegram-user"
 
     @staticmethod

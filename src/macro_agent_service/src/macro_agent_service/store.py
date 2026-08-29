@@ -33,13 +33,19 @@ class RunStore:
         self._max_runs = max_runs
 
     def _evict_if_needed(self) -> None:
-        """Drop oldest terminal runs when the store reaches its cap.
+        """Drop oldest collected terminal runs when the store reaches its cap.
 
-        Raises HTTPException when no terminal runs can be evicted and the cap
-        is still exceeded.
+        Prefer runs whose terminal result has already been observed via
+        ``.collect()`` or ``.status()``. Raises HTTPException when no terminal
+        runs can be evicted and the cap is still exceeded.
         """
         while len(self._runs) >= self._max_runs:
-            terminal_keys = [
+            collected_terminal_keys = [
+                run_id
+                for run_id, run in self._runs.items()
+                if run["status"] in _TERMINAL_STATUSES and run.get("collected", False)
+            ]
+            terminal_keys = collected_terminal_keys or [
                 run_id
                 for run_id, run in self._runs.items()
                 if run["status"] in _TERMINAL_STATUSES
@@ -51,6 +57,12 @@ class RunStore:
                 )
             oldest = min(terminal_keys, key=lambda k: self._runs[k]["created_at"])
             del self._runs[oldest]
+
+    def _mark_collected(self, run_id: str) -> None:
+        """Mark a run as observed so it can be evicted before uncollected ones."""
+        run = self._runs.get(run_id)
+        if run is not None:
+            run["collected"] = True
 
     async def create(self, request: RunRequest) -> RunResponse:
         """Create a new run and return its handle."""
@@ -72,6 +84,8 @@ class RunStore:
         run = self._runs.get(run_id)
         if run is None:
             return None
+        if run["status"] in _TERMINAL_STATUSES:
+            self._mark_collected(run_id)
         return RunStatus(
             run_id=run_id,
             status=run["status"],
@@ -96,6 +110,7 @@ class RunStore:
         run = self._runs.get(run_id)
         if run is None:
             return None
+        self._mark_collected(run_id)
         return RunResult(
             run_id=run_id,
             status=run["status"],

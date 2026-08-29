@@ -1,3 +1,4 @@
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -26,6 +27,9 @@ class ExecutionConfig(BaseModel):
     signed_commits: bool = False
 
 
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
 class TaskContract(BaseModel):
     contract_version: str = "1.0"
     task_id: str = Field(..., min_length=1, max_length=128)
@@ -41,6 +45,17 @@ class TaskContract(BaseModel):
     verification: dict[str, Any] = {}
     forbidden_paths: list[str] = Field(default=[], max_length=1000)
     _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
+
+    @field_validator("task_id")
+    @classmethod
+    def _validate_task_id(cls, value: str) -> str:
+        """Reject path-traversal and other unsafe characters in task_id (#255)."""
+        if not _TASK_ID_RE.match(value):
+            raise ValueError(
+                "task_id may only contain letters, digits, underscores, "
+                "hyphens, dots, and must not contain path separators"
+            )
+        return value
 
     @field_validator("objective")
     @classmethod

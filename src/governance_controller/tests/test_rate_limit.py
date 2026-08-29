@@ -1,5 +1,8 @@
 """Tests for the global per-IP rate-limiting middleware (#248)."""
 
+import time
+from collections import deque
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -7,7 +10,11 @@ from httpx import ASGITransport, AsyncClient
 from governance_controller.config import settings
 from governance_controller.db import get_db
 from governance_controller.main import app
-from governance_controller.middleware import _requests_by_ip, reset_rate_limits
+from governance_controller.middleware import (
+    _requests_by_ip,
+    _requests_last_access,
+    reset_rate_limits,
+)
 
 _CONTROLLER_SECRET = "controller-secret"
 
@@ -87,7 +94,7 @@ async def test_rate_limit_tracks_per_ip(
     monkeypatch.setattr(settings, "rate_limit_per_minute", 2)
     reset_rate_limits()
 
-    _requests_by_ip["other-ip"] = [0.0, 0.0]
+    _requests_by_ip["other-ip"] = deque([0.0, 0.0])
 
     for _ in range(2):
         response = await async_client.get(
@@ -101,3 +108,28 @@ async def test_rate_limit_tracks_per_ip(
         headers={"X-Controller-Secret": _CONTROLLER_SECRET},
     )
     assert response.status_code == 429
+
+
+async def test_rate_limit_evicts_least_recently_used_ip(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#250: the per-IP tracking dict must not grow without bound."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "rate_limit_max_ips", 2)
+    reset_rate_limits()
+
+    # Two distinct IPs are tracked.
+    _requests_by_ip["ip-1"] = deque([time.monotonic()])
+    _requests_last_access["ip-1"] = time.monotonic()
+    _requests_by_ip["ip-2"] = deque([time.monotonic()])
+    _requests_last_access["ip-2"] = time.monotonic()
+
+    # A third IP request evicts the least-recently-accessed one.
+    response = await async_client.get(
+        "/tasks/does-not-exist",
+        headers={"X-Controller-Secret": _CONTROLLER_SECRET, "X-Forwarded-For": "ip-3"},
+    )
+    assert response.status_code == 404
+    assert len(_requests_by_ip) <= 2
+    assert "ip-1" not in _requests_by_ip

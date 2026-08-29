@@ -184,6 +184,7 @@ class ReconciliationService:
                             expected_plane=expected_plane,
                             report=report,
                             opentasks_id=report.opentasks_ids.get(task_id),
+                            project_id=effective_project_id,
                         )
                     except ReconciliationError as exc:
                         report.divergences.append(
@@ -240,6 +241,7 @@ class ReconciliationService:
         expected_plane: str,
         report: ReconciliationReport,
         opentasks_id: str | None = None,
+        project_id: str | None = None,
     ) -> None:
         """Update Plane state to match Controller and record the fix.
 
@@ -272,6 +274,7 @@ class ReconciliationService:
                 controller_task_id=controller_task_id,
                 plane_issue_id=plane_issue_id,
                 state=state,
+                project_id=project_id,
                 opentasks_id=opentasks_id,
             )
             if updated is None:
@@ -290,6 +293,7 @@ class ReconciliationService:
                     f"authoritative Controller state '{state.value}' "
                     f"(expected Plane state '{expected_plane}')."
                 ),
+                project_id=project_id,
             )
         except Exception as exc:
             raise ReconciliationError(

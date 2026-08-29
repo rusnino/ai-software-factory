@@ -21,14 +21,19 @@ WRITE_PATHS = {
 }
 
 _RATE_LIMIT_WINDOW_SECONDS = 60
+# Cap on distinct source IPs tracked simultaneously; prevents unbounded memory
+# growth when clients vary X-Forwarded-For or rotate source addresses (#250).
+_DEFAULT_MAX_DISTINCT_IPS = 10_000
 
 # Module-level request tracking so tests and CLI commands can reset state.
 _requests_by_ip: dict[str, deque[float]] = {}
+_requests_last_access: dict[str, float] = {}
 
 
 def reset_rate_limits() -> None:
     """Clear all in-memory rate-limit counters."""
     _requests_by_ip.clear()
+    _requests_last_access.clear()
 
 
 class InMemoryRateLimitMiddleware:
@@ -70,9 +75,22 @@ class InMemoryRateLimitMiddleware:
         ip = client[0] if isinstance(client, (list, tuple)) and client else "unknown"
         now = time.monotonic()
         window = _requests_by_ip.setdefault(ip, deque())
+        _requests_last_access[ip] = now
         cutoff = now - _RATE_LIMIT_WINDOW_SECONDS
         while window and window[0] <= cutoff:
             window.popleft()
+        if not window:
+            _requests_by_ip.pop(ip, None)
+            _requests_last_access.pop(ip, None)
+            window = _requests_by_ip.setdefault(ip, deque())
+            _requests_last_access[ip] = now
+
+        # Evict least-recently-accessed IPs once we exceed the distinct-IP cap.
+        max_ips = getattr(settings, "rate_limit_max_ips", _DEFAULT_MAX_DISTINCT_IPS)
+        while len(_requests_by_ip) > max_ips:
+            oldest_ip = min(_requests_last_access, key=_requests_last_access.get)  # type: ignore[arg-type]
+            _requests_by_ip.pop(oldest_ip, None)
+            _requests_last_access.pop(oldest_ip, None)
 
         if len(window) >= limit:
             await send(
