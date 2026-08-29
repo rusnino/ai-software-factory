@@ -5,17 +5,20 @@
 **Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
 it has been declared prematurely at least three separate times (`#152`'s first close, an earlier
 "gate-clean" doc commit, and the third review round's `7622c77`), each later found wrong by
-independent live verification.** As of 2026-08-26, five review rounds have run. Rounds 1-3
-(`#154`-`#213`) were verified fixed. A fourth round found 14 of a "gate-clean" 28-issue fix batch
-were still broken (8 reopened: `#189`/`#190`/`#198`/`#200`/`#203`/`#208`/`#214`/`#215`/`#217`, later
-re-verified and re-closed, except `#221` which is **still open**) and found 6 new issues
-(`#216`-`#221`). A fifth round then found **13 more issues never seen before**, including a
-**hardcoded, unconfigurable admin skeleton key (`#226`)** and a **case-sensitivity bypass of the
-self-approval check (`#227`)** in `permission_service.py`/`approval_service.py` — files that are
-Phase 1 core, not Phase 2, and survived five separate `policy_engine.py`-focused Phase 1 hardening
-rounds (`#107`-`#150`) untouched because every one of those rounds asked "what can an authenticated
-caller do," never "does the caller need to be authenticated as who they claim at all." **Query the
-live issue list before trusting anything else in this file:**
+independent live verification.** As of 2026-08-29, seven review rounds have run. Rounds 1-4
+(`#154`-`#221`) landed. Round 5 found 13 issues never seen before, including a hardcoded admin
+skeleton key and a casing-based self-approval bypass in Phase 1 core code (`permission_service.py`)
+that five rounds of narrow `policy_engine.py` hardening (`#107`-`#150`) never looked at from that
+angle. Round 6 fixed round 5's two CRITICALs and immediately found the fix for one of them
+(write-side auth, `#218`) had a same-shaped gap on the read side (`#236`: `GET /tasks`, `GET
+/tasks/{id}/audit-log`, `GET /executions/{id}` had zero auth) plus a new stuck-execution-poller race
+(`#237`). **Round 7 found the most severe issue yet: `POST /tasks` let any caller — using only the
+one shared API secret every legitimate integration holds — silently overwrite ANY other project's
+`ProjectProfile` security posture** (network restriction, forbidden paths, harness allowlist,
+timeout/retry caps), by naming a foreign `project_id` in the `project_profile` half of the request
+body while creating an unrelated task under their own project (`#244`). Nobody had tested
+cross-project isolation before round 7. **Query the live issue list before trusting anything else
+in this file:**
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -23,16 +26,14 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **14 open issues (2 CRITICAL, 6 HIGH, 5 MEDIUM, 1 LOW)** — `#221` (CLI silent
-no-op for the documented invocation), `#226` (hardcoded `admin` skeleton key for EXECUTION/MERGE
-approval), `#223` (no CI exists anywhere in this repo — every test/lint claim in this project's
-history, including this file's, has been a manual local run), `#227` (self-approval/`system:`/`agent:`
-actor-block bypass via casing), `#228` (neither spec'd background-polling mechanism — periodic
-reconciliation, Event-Bridge-health fallback — was ever built), `#230` (`CompletionContract`
-scope-check allowlist becomes a universal bypass via `"."`/`"/"`/`".."`), `#231` (empty/whitespace
-`Check.command` silently "passes" without running anything), `#232` (network-access restriction
-bypass via casing — third instance of the same string-comparison defect class as `#227`), plus six
-MEDIUM/LOW items (`#222`, `#224`, `#225`, `#229`, `#233`, `#234`).
+As of this writing: **7 open issues (1 CRITICAL, 2 HIGH, 2 MEDIUM, 2 LOW)** — `#244` (CRITICAL —
+cross-project `ProjectProfile` poisoning via `POST /tasks`, live-reproduced), `#247` (HIGH — the
+audit-log endpoint has no pagination, ~11.5MB response at 20k rows), `#248` (HIGH — no rate limiting
+anywhere except `/intake/*`, live-verified 150/150 unthrottled requests), `#245` (MEDIUM — `gc
+reconcile <project_id>` reads every project's tasks with no filter), `#243` (MEDIUM — the
+macro-agent-service scaffold accepts unbounded/negative fields and has no cap on its in-memory
+store — a real memory-exhaustion DoS), plus two LOW items (`#246`, `#249`). Every prior round's
+findings (`#151`-`#242`) are closed and independently re-verified.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -53,11 +54,13 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status (2026-08-26): **380 passed / 5 skipped** on SQLite, **383 passed / 2 skipped** on
-PostgreSQL, `ruff` clean, `mypy governance_controller` clean (67 source files); `macro_agent_service`
+Test status (2026-08-29): **406 passed / 5 skipped** on SQLite, **409 passed / 2 skipped** on
+PostgreSQL, `ruff` clean, `mypy governance_controller` clean (68 source files); `macro_agent_service`
 tests still pass, `ruff`/`mypy` clean. Green tests are not evidence of correctness in this project —
 re-read the "Current State" section above before trusting this number to mean anything beyond
-"nothing crashes." There is still no CI (`#223`); every one of these numbers is a manual local run.
+"nothing crashes." A real CI workflow now exists (`.github/workflows/ci.yml`, added by `#223`,
+live-verified to actually run both backends), but every "N passed" claim above this line is still
+a manual local run.
 
 Implemented components:
 
@@ -100,25 +103,30 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Five review rounds
-have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`), Round 4
-(fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
-deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`). **14 issues remain open,
-including 2 CRITICAL and 6 HIGH.** Round 5 in particular found that several of the most severe
-open issues are not in Phase 2's own surface area at all — they're in Phase 1 core code
-(`permission_service.py`, `approval_service.py`, `policy_engine.py`, the schema layer) that five
-rounds of narrowly-scoped `policy_engine.py` command-validation review never looked at from this
-angle. **Do not treat "Phase 2 review" as bounded to Phase 2 code** — the next round should keep
-auditing wherever the live issue list and fresh eyes lead, not stop at a phase boundary.
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Seven review
+rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
+Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
+deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
+of rounds 4-6's own new code, GET-endpoint auth audit, concurrency sweep, fresh end-to-end pipeline,
+`#236`-`#242`), Round 7 (macro-agent adversarial testing, cross-project isolation, resource
+limits/rate limiting, secret-leakage audit, `#243`-`#249`). **7 issues remain open, including 1
+CRITICAL.** Round 7's CRITICAL (`#244`) is the most severe finding of any round so far — a
+cross-tenant `ProjectProfile` poisoning vulnerability nobody had tested for because no prior round
+had specifically looked at multi-project isolation boundaries. **Do not treat "Phase 2 review" as
+bounded to Phase 2 code, or to any fixed set of angles** — every round that tried a genuinely new
+angle (Phase 1 core in round 5, the read side in round 6, cross-tenancy in round 7) found something
+the previous rounds' angles couldn't have found. The next round should keep trying new angles, not
+repeat the ones already covered.
 
-## Immediate Next Step: Verify Gate-Clean, Then Phase 3
+## Immediate Next Step: Fix the Cross-Tenant Profile-Poisoning CRITICAL, Then Verify Gate-Clean
 
-The 14 open issues from Round 5 have been addressed: `#221` (CLI main guard), `#226` (configurable
-admins), `#223` (CI workflow), `#227` (actor normalization), `#228` (stuck-execution fallback
-poller), `#230` (root-prefix scope-path rejection), `#231` (empty/whitespace command rejection),
-`#232` (network enum schema validation), plus the MEDIUM/LOW items `#222`, `#224`, `#225`, `#229`,
-`#233`, `#234`. Before declaring Phase 2 gate-clean, run a fresh live-reproduction review and
-confirm the live issue list has no open `severity:critical` or `severity:high` issues.
+Prioritize `#244` first (any caller can overwrite any other project's security posture via `POST
+/tasks` — this is a live, actively exploitable vulnerability in the current codebase, not a
+theoretical gap). Then the 2 HIGH issues (`#247` unbounded audit-log, `#248` no rate limiting) and
+2 MEDIUM (`#243` macro-agent-service resource limits, `#245` reconcile CLI cross-project leak).
+Before declaring Phase 2 gate-clean, run a fresh live-reproduction review and confirm the live issue
+list has no open `severity:critical` or `severity:high` issues — and try an angle no prior round has
+tried yet, given the track record above.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
