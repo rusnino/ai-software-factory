@@ -56,45 +56,48 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-30): implemented, NOT gate-clean — 3 open issues (1 CRITICAL, 0 HIGH).** Eleven
+**Status (2026-08-30): implemented, NOT gate-clean — 3 open issues (0 CRITICAL, 1 HIGH).** Twelve
 review rounds have run. Rounds 1-4 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13
 more, including two in Phase 1 core code that five rounds of `policy_engine.py`-focused hardening
 never surfaced: a hardcoded admin skeleton key and a casing-based self-approval bypass. Round 6
 fixed both and found the write-side auth fix (`#218`) had a same-shaped gap on the read side
 (`#236`) plus a new stuck-execution-poller race (`#237`). Round 7 found the then-most-severe issue —
 `#244`, a live cross-tenant `ProjectProfile` poisoning vulnerability, since fixed with a schema
-validator. Round 8 found two issues more severe still: `#253` and `#254`, a Controller process
-crash at either of two specific points in the approval/verification pipeline leaves a task
-permanently stuck with no automatic recovery path. Round 9 found `#262`/`#263`, both introduced by
-round 8's own fix, both instances of the "blind write committed regardless of CAS outcome" defect
-class `REQUIREMENTS.md`'s `RISK-16` tracks as this project's most recurring bug pattern. Round 10
-confirmed round 9's fixes clean but found the exact `RISK-16` pattern a THIRD time (`#266`) via a
-systematic sweep of every other CAS call site, plus a genuinely new angle — event-level
-authorization — immediately found `#267` (HIGH, the only path to unblock a `BLOCKED` task used the
-same flat secret as routine automated traffic). **Round 11 confirmed all five of round 10's fixes are
-genuinely closed — the second consecutive round with none reopened — but a genuinely new angle, real
-concurrent HTTP-level event delivery (never tried before, though approval-racing was tested in round
-10 and came back clean), found this project's most severe concurrency bug yet: `#271` (CRITICAL).
-Genuinely concurrent redelivery of the SAME `landing:completed` event — an expected, documented
-traffic pattern, since macro-agent runtimes retry on timeout — runs the real verification subprocess
-MULTIPLE TIMES (10 of 12 concurrent requests actually executed it in one live reproduction) and
-afterward DELETES the `#240` dedup marker entirely, so even a later legitimate sequential redelivery
-of the same event is no longer deduplicated either. Three compounding bugs: `EventBridge.handle()`'s
-CAS guard is skipped once the task has already reached the target state; the dedup marker's insert
-result is never checked (`ON CONFLICT DO NOTHING` silently no-ops); and the failure path's
-"did a transition happen" check reads a stale identity-mapped `Task` via `db.get()` instead of the
-true committed state, so losing racers wrongly delete the winner's marker. Round 11 also found `#272`
-(MEDIUM, the `#267` fix's new required secret is undocumented anywhere in the repo, silently breaking
-`BLOCKED`-recovery on in-place upgrade) and `#273` (LOW, a misleadingly-named OPA test). Separately,
-this round diagnosed and fixed a real CI bug unrelated to any filed issue: the
-`governance-controller-postgres` job had failed on all 13 runs since the workflow was added, because
-two tests' engine-redirection technique didn't account for `get_engine()`'s per-event-loop caching;
-CI is now green for the first time in this project's history.** Concurrency testing has found a live
-bug in every round it's been pointed at a genuinely new target — any endpoint not yet raced with real
-concurrent HTTP load should be treated as unverified, not assumed safe by analogy. This project's own
-history — three separate premature "gate-clean" declarations, each wrong on independent
-re-verification — means this status line should never be trusted without re-running
-`gh issue list --label phase-2 --state open` first.
+validator. Round 8 found `#253`/`#254`, a Controller process crash at either of two specific points
+in the approval/verification pipeline leaving a task permanently stuck with no automatic recovery
+path. Round 9 found `#262`/`#263`, both introduced by round 8's own fix, both instances of the
+"blind write committed regardless of CAS outcome" defect class `REQUIREMENTS.md`'s `RISK-16` tracks
+as this project's most recurring bug pattern. Round 10 confirmed round 9's fixes clean but found the
+exact `RISK-16` pattern a THIRD time (`#266`), plus `#267` (HIGH, event-level authorization). Round
+11 confirmed round 10's fixes clean but found this project's most severe concurrency bug via real
+concurrent HTTP-level event delivery: `#271` (CRITICAL), genuinely concurrent `landing:completed`
+redelivery ran real verification multiple times and destroyed the `#240` dedup marker, via a
+"stale identity-mapped re-read instead of the true committed state" defect distinct from but related
+to `RISK-16`. **Round 12 confirmed all three of round 11's fixes are genuinely closed — the third
+consecutive round with none reopened, this time verified with a direct side-by-side reproduction on
+the exact pre-fix and post-fix commits (15 concurrent duplicates: 15 verification runs and a
+destroyed marker before the fix; exactly 1 run and a surviving marker after). The recommended sweep
+of every OTHER dedup/idempotency mechanism paid off exactly as predicted: `#274` (HIGH), the intake
+adapters' duplicate-submission guard has the same TOCTOU shape `#271` had — a DB unique constraint
+prevents actual duplication, but the resulting `IntegrityError` isn't caught, so concurrent
+duplicates get a raw 500 instead of the documented clean 409 (8 of 15 in one live reproduction). The
+Plane webhook receiver, checked by the same sweep, came back CLEAN — its dedup check is also
+TOCTOU-shaped but the actual state write is protected by a genuine atomic CAS. Separately, `#271`'s
+"stale re-read" root-cause pattern recurred in a FOURTH unrelated subsystem: `#275` (MEDIUM),
+`ReconciliationService._task_still_in_state`'s staleness guard is provably dead code for the identical
+reason — live-reproduced reporting a task as "still RUNNING" after a concurrent session had already
+moved it to `HUMAN_REVIEW` — capped at MEDIUM since reconciliation only ever writes to Plane's
+non-authoritative projection, never Controller state. A dedicated connection-pool-exhaustion
+resilience check (genuinely new angle) found the Controller resilient overall — no leaked
+tracebacks, no half-committed state, a real DB ping in `GET /health` — with one MEDIUM polish gap,
+`#276` (pool-timeout falls through to a generic 500 instead of a purpose-built 503).** The
+identity-map-staleness defect class has now been found in two unrelated subsystems in as many
+rounds and should be treated as a standing sweep target going forward, the same way `RISK-16`'s CAS
+pattern was after round 10. Concurrency testing has found a live bug in every round it's been
+pointed at a genuinely new target — any endpoint not yet raced with real concurrent HTTP load should
+be treated as unverified, not assumed safe by analogy. This project's own history — three separate
+premature "gate-clean" declarations, each wrong on independent re-verification — means this status
+line should never be trusted without re-running `gh issue list --label phase-2 --state open` first.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired
