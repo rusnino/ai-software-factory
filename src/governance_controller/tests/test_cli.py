@@ -5,6 +5,8 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -209,6 +211,52 @@ class TestCliApprove:
 
 
 class TestCliReconcile:
+    def test_reconcile_passes_plane_issue_id_to_service(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#282: the CLI must preserve Plane's id for reconciliation matching."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        row = SimpleNamespace(
+            id="controller-task-1",
+            state=TaskState.RUNNING,
+            project_id="project-a",
+            plane_issue_id="plane-issue-uuid-1",
+        )
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = [row]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=query_result)
+
+        @asynccontextmanager
+        async def fake_db_session():
+            yield db
+
+        report = SimpleNamespace(checked=1, divergences=[])
+        reconciliation = MagicMock()
+        reconciliation.reconcile = AsyncMock(return_value=report)
+        with (
+            patch("governance_controller.cli.get_db_session", fake_db_session),
+            patch(
+                "governance_controller.cli.ReconciliationService",
+                return_value=reconciliation,
+            ),
+        ):
+            result = runner.invoke(app, ["reconcile", "project-a"])
+
+        assert result.exit_code == 0, result.output
+        assert reconciliation.reconcile.await_args.kwargs["controller_tasks"] == [
+            (
+                "controller-task-1",
+                TaskState.RUNNING,
+                "project-a",
+                "plane-issue-uuid-1",
+            )
+        ]
+
     async def test_reconcile_filters_tasks_by_project_id(
         self,
         db_session,
@@ -250,9 +298,16 @@ class TestCliReconcile:
             )
             rows = result.all()
             controller_tasks = [
-                (str(row.id), row.state, row.project_id or "project-a")
+                (
+                    str(row.id),
+                    row.state,
+                    row.project_id or "project-a",
+                    row.plane_issue_id,
+                )
                 for row in rows
             ]
 
-        assert controller_tasks == [("task-a", TaskState.PROPOSED, "project-a")]
+        assert controller_tasks == [
+            ("task-a", TaskState.PROPOSED, "project-a", None)
+        ]
         assert all(t[2] == "project-a" for t in controller_tasks)

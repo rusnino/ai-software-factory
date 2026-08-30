@@ -112,7 +112,12 @@ def reconcile(
             )
             rows = result.scalars().all()
             controller_tasks = [
-                (str(row.id), row.state, row.project_id or project_id)
+                (
+                    str(row.id),
+                    row.state,
+                    row.project_id or project_id,
+                    row.plane_issue_id,
+                )
                 for row in rows
             ]
 

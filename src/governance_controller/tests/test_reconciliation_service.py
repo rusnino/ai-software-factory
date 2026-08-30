@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from governance_controller.constants import TaskState
+from governance_controller.models.task import Task
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
 )
@@ -68,25 +69,25 @@ def fake_client() -> _FakePlaneClient:
     return _FakePlaneClient(
         issues=[
             {
-                "id": "P-1",
+                "id": "plane-issue-1",
                 "name": "Approved task",
                 "state": {"name": "In Progress"},
             },
             {
-                "id": "P-2",
+                "id": "plane-issue-2",
                 "name": "Human review task",
                 "state": {"name": "Done"},
             },
             {
-                "id": "P-3",
+                "id": "plane-issue-3",
                 "name": "Leaf task",
                 "state": {"name": "Approved"},
             },
         ],
         dependencies={
-            "P-1": ["P-3"],
-            "P-2": [],
-            "P-3": [],
+            "plane-issue-1": ["plane-issue-3"],
+            "plane-issue-2": [],
+            "plane-issue-3": [],
         },
     )
 
@@ -97,8 +98,13 @@ async def test_no_divergence_when_states_match(
     service = ReconciliationService(plane_client=fake_client)
     report = await service.reconcile(
         controller_tasks=[
-            ("P-1", TaskState.RUNNING, "proj-1"),
-            ("P-3", TaskState.EXEC_APPROVED, "proj-1"),
+            ("controller-task-1", TaskState.RUNNING, "proj-1", "plane-issue-1"),
+            (
+                "controller-task-3",
+                TaskState.EXEC_APPROVED,
+                "proj-1",
+                "plane-issue-3",
+            ),
         ],
         project_id="proj-1",
     )
@@ -113,7 +119,7 @@ async def test_missing_plane_issue_reported(
     service = ReconciliationService(plane_client=fake_client)
     report = await service.reconcile(
         controller_tasks=[
-            ("P-missing", TaskState.RUNNING, "proj-1"),
+            ("controller-missing", TaskState.RUNNING, "proj-1", "plane-missing"),
         ],
         project_id="proj-1",
     )
@@ -129,7 +135,12 @@ async def test_state_mismatch_reported(
     service = ReconciliationService(plane_client=fake_client)
     report = await service.reconcile(
         controller_tasks=[
-            ("P-2", TaskState.HUMAN_REVIEW, "proj-1"),
+            (
+                "controller-task-2",
+                TaskState.HUMAN_REVIEW,
+                "proj-1",
+                "plane-issue-2",
+            ),
         ],
         project_id="proj-1",
     )
@@ -147,14 +158,21 @@ async def test_state_uuid_resolved_to_name(
     # Plane sometimes returns a state UUID instead of a state name dict.
     fake_client.issues = [
         {
-            "id": "P-uuid-state",
+            "id": "plane-issue-uuid",
             "name": "Task with UUID state",
             "state": "state-in-progress",
         }
     ]
     service = ReconciliationService(plane_client=fake_client)
     report = await service.reconcile(
-        controller_tasks=[("P-uuid-state", TaskState.RUNNING, "proj-1")],
+        controller_tasks=[
+            (
+                "controller-uuid-state",
+                TaskState.RUNNING,
+                "proj-1",
+                "plane-issue-uuid",
+            )
+        ],
         project_id="proj-1",
     )
 
@@ -165,11 +183,11 @@ async def test_state_uuid_resolved_to_name(
 async def test_dag_validation_failure_reported(
     fake_client: _FakePlaneClient,
 ) -> None:
-    fake_client.dependencies["P-1"] = ["P-missing"]
+    fake_client.dependencies["plane-issue-1"] = ["plane-missing"]
     service = ReconciliationService(plane_client=fake_client)
     report = await service.reconcile(
         controller_tasks=[
-            ("P-1", TaskState.RUNNING, "proj-1"),
+            ("controller-task-1", TaskState.RUNNING, "proj-1", "plane-issue-1"),
         ],
         project_id="proj-1",
     )
@@ -187,12 +205,44 @@ async def test_without_plane_config_returns_empty_report(
     monkeypatch.setattr(config.settings, "plane_base_url", "")
     service = ReconciliationService()
     report = await service.reconcile(
-        controller_tasks=[("P-1", TaskState.RUNNING, "proj-1")],
+        controller_tasks=[
+            ("controller-task-1", TaskState.RUNNING, "proj-1", "plane-issue-1")
+        ],
         project_id="proj-1",
     )
 
     assert report.checked == 0
     assert not report.divergences
+
+
+async def test_matches_plane_issue_id_not_controller_task_id(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """#282: reconcile uses Plane's issue id when it differs from Task.id."""
+    fake_client.issues = [
+        {
+            "id": "plane-issue-uuid-1",
+            "name": "Controller task",
+            "state": {"name": "In Progress"},
+        }
+    ]
+    service = ReconciliationService(plane_client=fake_client)
+
+    report = await service.reconcile(
+        controller_tasks=[
+            (
+                "controller-task-1",
+                TaskState.RUNNING,
+                "proj-1",
+                "plane-issue-uuid-1",
+            )
+        ],
+        project_id="proj-1",
+    )
+
+    assert report.checked == 1
+    assert not any(d.field == "presence" for d in report.divergences)
+    assert not any(d.field == "state" for d in report.divergences)
 
 
 async def test_task_still_in_state_detects_concurrent_change(
@@ -209,8 +259,6 @@ async def test_task_still_in_state_detects_concurrent_change(
     concurrent session moved it to ``HUMAN_REVIEW`` and committed.
     """
     from sqlalchemy import select
-
-    from governance_controller.models.task import Task
 
     engine, local_session = isolated_db
 

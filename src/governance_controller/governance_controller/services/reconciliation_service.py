@@ -92,16 +92,18 @@ class ReconciliationService:
 
     async def reconcile(
         self,
-        controller_tasks: list[tuple[str, TaskState, str]],
+        controller_tasks: list[tuple[str, TaskState, str, str | None]],
         project_id: str | None = None,
         dry_run: bool = False,
         fix: bool = False,
     ) -> ReconciliationReport:
         """Reconcile a list of Controller tasks against Plane.
 
-        ``controller_tasks`` is a list of ``(task_id, state, project_id)``
-        tuples. When ``project_id`` is not provided, the project ID from the
-        first task is used.
+        ``controller_tasks`` is a list of
+        ``(task_id, state, project_id, plane_issue_id)`` tuples. When
+        ``project_id`` is not provided, the project ID from the first task is
+        used. ``plane_issue_id`` is Plane's server-generated issue identifier;
+        it falls back to ``task_id`` for records that predate the mapping.
 
         When ``fix`` is True, the service attempts to correct Plane state for
         ``project``-severity divergences and writes an explanatory comment. It
@@ -141,8 +143,9 @@ class ReconciliationService:
             if isinstance(issue, dict)
         }
 
-        for task_id, state, _proj in controller_tasks:
-            plane_issue = plane_issues.get(task_id)
+        for task_id, state, _proj, plane_issue_id in controller_tasks:
+            plane_issue_key = plane_issue_id or task_id
+            plane_issue = plane_issues.get(plane_issue_key)
             if plane_issue is None:
                 report.divergences.append(
                     Divergence(
@@ -204,14 +207,15 @@ class ReconciliationService:
         # Validate runtime DAG for tasks in EXEC_APPROVED+ states that do
         # exist in Plane. Missing tasks are already reported above.
         opentasks_ids: dict[str, str] = {}
-        for task_id, state, _proj in controller_tasks:
+        for task_id, state, _proj, plane_issue_id in controller_tasks:
+            plane_issue_key = plane_issue_id or task_id
             if state.value in {"PROPOSED", "PLAN_APPROVED"}:
                 continue
-            if task_id not in plane_issues:
+            if plane_issue_key not in plane_issues:
                 continue
             try:
                 dag = await self._materializer_or_default().materialize(
-                    root_plane_task_id=task_id,
+                    root_plane_task_id=plane_issue_key,
                     project_id=effective_project_id,
                 )
                 if dag.tasks:
@@ -219,7 +223,7 @@ class ReconciliationService:
             except MaterializerError as exc:
                 report.divergences.append(
                     Divergence(
-                        plane_task_id=task_id,
+                        plane_task_id=plane_issue_key,
                         controller_task_id=task_id,
                         field="dag",
                         plane_value=None,

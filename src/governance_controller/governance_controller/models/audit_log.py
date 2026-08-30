@@ -4,7 +4,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from sqlalchemy import DDL, Column, DateTime, Index, event
+from sqlalchemy import DDL, Column, DateTime, Index, event, text
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Mapper
@@ -15,6 +15,19 @@ from sqlmodel import Field, SQLModel
 def utc_now() -> datetime:
     """Return the current UTC datetime."""
     return datetime.now(UTC)
+
+
+_HASH_FIELDS: tuple[str, ...] = (
+    "event_id",
+    "event_type",
+    "task_id",
+    "execution_id",
+    "actor",
+    "source",
+    "timestamp",
+    "payload",
+    "previous_hash",
+)
 
 
 class AuditLog(SQLModel, table=True):
@@ -49,18 +62,6 @@ class AuditLog(SQLModel, table=True):
     previous_hash: str = ""
     row_hash: str | None = None
 
-    _hash_fields: tuple[str, ...] = (
-        "event_id",
-        "event_type",
-        "task_id",
-        "execution_id",
-        "actor",
-        "source",
-        "timestamp",
-        "payload",
-        "previous_hash",
-    )
-
     @staticmethod
     def _canonical_value(value: Any) -> str:
         """Return a deterministic string representation of *value* for hashing.
@@ -82,11 +83,18 @@ class AuditLog(SQLModel, table=True):
     def compute_hash(self) -> str:
         """Compute an integrity hash over this entry's content."""
         digest = hashlib.sha256()
-        for field in self._hash_fields:
+        for field in _HASH_FIELDS:
             value = getattr(self, field)
             encoded = self._canonical_value(value)
             digest.update(f"{field}={encoded}\n".encode())
         return digest.hexdigest()
+
+
+# Advisory lock key used to serialize hash-chain tip advancement. The value is
+# arbitrary but must be stable; it reserves a single Postgres advisory lock
+# namespace for audit-log writes. ponytail: global lock; split by chain only
+# when audit throughput makes serialization measurable.
+_AUDITLOG_TIP_LOCK_KEY: int = 0xA471_100_0_0001
 
 
 @event.listens_for(AuditLog, "before_insert")
@@ -95,21 +103,26 @@ def _audit_log_before_insert(
 ) -> None:
     """Hash-chain new audit rows before they are inserted.
 
-    On PostgreSQL the tip lookup uses ``FOR UPDATE`` so concurrent transactions
-    serialize on the previous row rather than reading the same tip and forking
-    the chain.
+    Concurrent inserters serialize via ``pg_advisory_xact_lock`` on Postgres
+    before reading the current chain tip. A bare ``SELECT ... ORDER BY id DESC
+    LIMIT 1 FOR UPDATE`` is not sufficient under READ COMMITTED: all blocked
+    transactions can re-lock the same stale tip after the blocker commits,
+    silently forking the chain (#280).
     """
     from sqlalchemy import select
 
     if target.row_hash is None:
         if target.previous_hash == "":
+            if connection.dialect.name == "postgresql":
+                connection.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": _AUDITLOG_TIP_LOCK_KEY},
+                )
             stmt = (
                 select(cast(ColumnElement[str], AuditLog.row_hash))
                 .order_by(cast(ColumnElement[int], AuditLog.id).desc())
                 .limit(1)
             )
-            if connection.dialect.name == "postgresql":
-                stmt = stmt.with_for_update()
             result = connection.execute(stmt)
             previous = result.scalar()
             target.previous_hash = previous or ""

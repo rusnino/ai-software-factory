@@ -145,6 +145,29 @@ class TestAuditLogModel:
         ).scalar_one()
         assert reloaded.row_hash == reloaded.compute_hash()
 
+    async def test_compute_hash_works_on_orm_loaded_row(
+        self, db_session: AsyncSession
+    ) -> None:
+        """#281: hash verification must work after a plain ORM SELECT."""
+        entry = await AuditService.log(
+            db=db_session,
+            event_type="state_change",
+            task_id="task-loaded-hash",
+            actor="human-1",
+            source="plane",
+            payload={"x": 1},
+        )
+        entry_id = entry.id
+        db_session.expunge(entry)
+
+        reloaded = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.id == entry_id)
+            )
+        ).scalar_one()
+
+        assert reloaded.row_hash == reloaded.compute_hash()
+
     async def test_audit_row_update_is_blocked(self, db_session: AsyncSession) -> None:
         entry = await AuditService.log(
             db=db_session,
@@ -558,6 +581,55 @@ class TestAuditLogPostgresDDL:
                     delete(AuditLog).where(AuditLog.task_id == "task-pg-trigger-del")
                 )
                 await session.commit()
+
+    async def test_concurrent_writes_form_one_hash_chain(
+        self, isolated_db: tuple[AsyncEngine, sessionmaker]
+    ) -> None:
+        """#280: genuine concurrent Postgres writers must not fork the chain."""
+        import asyncio
+
+        _engine, session_local = isolated_db
+        async with session_local() as session:
+            await AuditService.log(
+                db=session,
+                event_type="seed",
+                task_id="task-concurrent-hash",
+                actor="system",
+                source="test",
+            )
+            await session.commit()
+
+        writers = 12
+        barrier = asyncio.Barrier(writers)
+
+        async def write(index: int) -> None:
+            async with session_local() as session:
+                await barrier.wait()
+                await AuditService.log(
+                    db=session,
+                    event_type="concurrent",
+                    task_id="task-concurrent-hash",
+                    actor=f"writer-{index}",
+                    source="test",
+                    payload={"index": index},
+                )
+                await session.commit()
+
+        await asyncio.gather(*(write(index) for index in range(writers)))
+
+        async with session_local() as session:
+            rows = (
+                await session.execute(
+                    select(AuditLog)
+                    .where(AuditLog.task_id == "task-concurrent-hash")
+                    .order_by(AuditLog.id)
+                )
+            ).scalars().all()
+
+        assert len(rows) == writers + 1
+        assert len({row.previous_hash for row in rows[1:]}) == writers
+        for previous, current in zip(rows, rows[1:], strict=False):
+            assert current.previous_hash == previous.row_hash
 
 
 class TestAuditServiceSideEffects:

@@ -167,7 +167,12 @@ class EventBridge:
                         )
                     # Re-load the task so the in-memory object reflects the
                     # latest DB state after our own successful update.
-                    task = await db.get(Task, task_id)
+                    refreshed = await db.execute(
+                        select(Task)
+                        .where(Task.id == task_id)
+                        .execution_options(populate_existing=True)
+                    )
+                    task = refreshed.scalar_one_or_none()
                     if task is None:
                         return
                 else:
