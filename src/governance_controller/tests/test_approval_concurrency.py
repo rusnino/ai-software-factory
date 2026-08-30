@@ -514,10 +514,11 @@ class TestApprovalConcurrency:
     ) -> None:
         """Losing the RUNNING CAS inside ``_trigger_execution`` persists audit.
 
-        ``approve()`` reaches ``_trigger_execution``, the executor starts, the
-        Execution row is persisted, but the ``READY -> RUNNING`` CAS loses.
-        The commit-before-raise must leave the task at ``READY`` and preserve
-        the ``concurrent_modification`` audit row.
+        ``approve()`` reaches ``_trigger_execution``, the executor starts, but
+        the ``READY -> RUNNING`` CAS loses. The commit-before-raise must leave
+        both the task and the Execution row at ``READY`` (so a real macro-agent
+        run is not orphaned as RUNNING for a FAILED/READY task) and preserve
+        the ``concurrent_modification`` audit row (#262).
         """
         engine, local_session = isolated_db
 
@@ -580,4 +581,5 @@ class TestApprovalConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            assert rows[0].state == TaskState.RUNNING
+            assert rows[0].state == TaskState.READY
+            assert rows[0].macro_agent_run_id is None

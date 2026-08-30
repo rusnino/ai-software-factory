@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime
+from sqlalchemy import Column, DateTime, String
 from sqlmodel import Field, SQLModel
 
 from governance_controller.constants import TaskState
@@ -27,4 +27,8 @@ class Execution(SQLModel, table=True):
     ended_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    status_error: str | None = Field(
+        default=None,
+        sa_column=Column(String, nullable=True),
     )

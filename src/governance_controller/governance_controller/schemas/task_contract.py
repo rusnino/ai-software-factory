@@ -17,7 +17,7 @@ class ExecutionConfig(BaseModel):
     team: str = "default"
     harness: str = "opencode"
     role: str = "worker"
-    timeout_minutes: int = Field(default=60, ge=0)
+    timeout_minutes: int = Field(default=60, ge=1)
     max_retries: int = Field(default=2, ge=0)
     uses_docker_socket: bool = False
     destructive_shell: bool = False
@@ -27,7 +27,7 @@ class ExecutionConfig(BaseModel):
     signed_commits: bool = False
 
 
-_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_TASK_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class TaskContract(BaseModel):

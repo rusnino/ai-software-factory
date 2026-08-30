@@ -533,11 +533,11 @@ class ApprovalService:
             await self.db.commit()
             raise RuntimeError(f"macro-agent start failed: {exc}") from exc
 
-        execution.macro_agent_run_id = result["run_id"]
-        execution.state = TaskState.RUNNING
-        task.latest_macro_agent_run_id = execution.macro_agent_run_id
-        await self.db.flush()
-
+        # Do NOT set the Execution success fields until the Task-level CAS to
+        # RUNNING wins. If the CAS loses (e.g. the poller already moved the task
+        # to FAILED), flushing early would commit a RUNNING Execution row for a
+        # FAILED task and orphan the real macro-agent run (#262).
+        macro_agent_run_id = result["run_id"]
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
             await AuditService.log(
                 db=self.db,
@@ -556,6 +556,11 @@ class ApprovalService:
             raise ValueError(
                 "Concurrent modification detected: task state changed before RUNNING"
             )
+
+        execution.macro_agent_run_id = macro_agent_run_id
+        execution.state = TaskState.RUNNING
+        task.latest_macro_agent_run_id = macro_agent_run_id
+        await self.db.flush()
 
         await AuditService.log(
             db=self.db,

@@ -62,6 +62,15 @@ class StuckExecutionPoller:
         """Multiplier for crash-recovery windows (#253/#254)."""
         return 2
 
+    def _verification_crash_timeout_minutes(self) -> int:
+        """Separate budget for detecting a crashed verification (#264).
+
+        Verification runs multiple sequential subprocess checks; its wall-clock
+        budget is independent of the macro-agent execution timeout configured
+        on the task.
+        """
+        return 15
+
     async def poll(self) -> list[dict[str, Any]]:
         """Run one polling pass and return a list of actions taken."""
         actions: list[dict[str, Any]] = []
@@ -196,8 +205,10 @@ class StuckExecutionPoller:
         prevents duplicate verification runs, but after a Controller crash the
         marker remains forever and blocks legitimate redelivery (#254). If the
         marker is older than the verification timeout window and the task is
-        still at AGENT_REVIEW, we delete the marker and move the task to BLOCKED
-        so a human is alerted and a fresh event can recover it.
+        still at AGENT_REVIEW, we move the task to BLOCKED with a human alert
+        and delete the marker only when our CAS wins. A human must then send a
+        ``conflict:resolved`` event (GAP-099) or manually intervene to unblock
+        the task (#259).
         """
         result = await self.db.execute(
             select(Task, ProcessedEvent)
@@ -213,9 +224,10 @@ class StuckExecutionPoller:
         now = datetime.now(UTC)
         actions: list[dict[str, Any]] = []
         for task, marker in result.tuples().all():
-            timeout = await self._task_timeout_minutes(task)
+            # Use a separate, independent budget for verification crash
+            # detection rather than the task's execution timeout (#264).
             deadline = marker.processed_at + timedelta(
-                minutes=timeout * self._crash_timeout_factor()
+                minutes=self._verification_crash_timeout_minutes()
             )
             if now < deadline:
                 continue
@@ -231,12 +243,14 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            # Delete the stale marker so a redelivery can resume verification.
-            await self.db.delete(marker)
             success = await StateMachine.atomic_transition(
                 self.db, task, TaskState.BLOCKED
             )
             if success:
+                # Only delete the dedup marker when our own CAS won; otherwise a
+                # concurrent successful verification would lose its idempotency
+                # key (#263).
+                await self.db.delete(marker)
                 await AuditService.log(
                     db=self.db,
                     event_type="execution_blocked_timeout",
@@ -313,6 +327,8 @@ class StuckExecutionPoller:
         if not run_id:
             return False
 
+        status: dict[str, Any] | None = None
+        status_error: str | None = None
         try:
             client = self._client
             if client is None:
@@ -323,14 +339,54 @@ class StuckExecutionPoller:
                     status = await MacroAgentClient().status(run_id)
             else:
                 status = await client.status(run_id)
-        except Exception:
-            return False
+        except Exception as exc:
+            status_error = type(exc).__name__
 
         # The macro-agent service returns status under the key "status".
         run_status = status.get("status") if isinstance(status, dict) else None
-        return run_status in {"running", "allocated", "active", "queued"}
+        if run_status in {"running", "allocated", "active", "queued"}:
+            return True
+        # A genuine exception from the macro-agent service (timeout,
+        # connection refused, 404 after a restart) is recorded so the audit
+        # trail can distinguish a lost run from a merely slow one (#261).
+        if status_error is not None:
+            execution.status_error = status_error
+        return False
 
-    async def _mark_blocked(self, task: Task, execution: Execution) -> None:
+
+    async def _mark_blocked(
+        self,
+        task: Task,
+        execution: Execution,
+        reason_code: str = "execution_timed_out",
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        """Transition task to BLOCKED and record a human-alert audit entry."""
+        success = await StateMachine.atomic_transition(self.db, task, TaskState.BLOCKED)
+        if not success:
+            return
+
+        execution.state = TaskState.BLOCKED
+        execution.ended_at = datetime.now(UTC)
+        await self.db.flush()
+
+        payload: dict[str, Any] = {
+            "reason": "execution timed out without successful event delivery",
+            "reason_code": reason_code,
+            "macro_agent_run_id": execution.macro_agent_run_id,
+        }
+        if detail:
+            payload.update(detail)
+
+        await AuditService.log(
+            db=self.db,
+            event_type="execution_blocked_timeout",
+            task_id=task.id,
+            actor="system:poller",
+            source="stuck_execution_poller",
+            execution_id=execution.id,
+            payload=payload,
+        )
         """Transition task to BLOCKED and record a human-alert audit entry."""
         success = await StateMachine.atomic_transition(self.db, task, TaskState.BLOCKED)
         if not success:

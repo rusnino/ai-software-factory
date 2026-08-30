@@ -35,6 +35,8 @@ services:
       GC_MACRO_AGENT_API_SECRET: dev-macro-agent-secret-change-me
     ports:
       - "127.0.0.1:8000:8000"
+    cap_drop:
+      - ALL
     depends_on:
       db:
         condition: service_healthy
