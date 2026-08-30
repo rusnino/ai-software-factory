@@ -47,6 +47,32 @@ Do not start Phase 2 work (Plane UI, Meta Orchestrator, Intake) until Phase 1 ac
 - Write tests for every significant change.
 - Keep the Controller authoritative. Plane is a projection.
 
+## Regression Coverage Policy
+
+This exists because "write tests for every significant change" above was not enough on its own:
+across review rounds 8-12, fix commits for `severity:critical`/`severity:high` issues repeatedly
+shipped with **zero new regression tests** (rounds 10-12 specifically: `#266`/`#267`/`#268`, `#271`,
+`#274` — all landed without a single new test file). A green test suite was treated as sufficient
+evidence of correctness. It wasn't: the exact same defect class recurred multiple times, undetected,
+in unrelated code — see `RISK-16` and `RISK-19` in `requirements/REQUIREMENTS.md`. Do not repeat this.
+
+- **Every fix for a `severity:high` or `severity:critical` issue must land a regression test in the
+  same commit** — a test that fails against the pre-fix code and passes against the post-fix code.
+  A green suite alone is not evidence the fix is real or that a closed issue stays closed.
+- **Concurrency/CAS/race-condition bugs need a live test against real Postgres with genuine
+  concurrent sessions or requests, not a mock.** Mocks are exactly what let 5 separate instances of
+  the same "stale identity-map read" pattern (`RISK-19`) go undetected across 3 review rounds, and 3
+  separate instances of "write before CAS, commit regardless of outcome" (`RISK-16`) go undetected
+  across 2 rounds — nothing in the suite exercised genuine concurrency.
+- **If a fix is one instance of a known recurring defect class** (`RISK-16`: a write staged before a
+  CAS check that gets committed even when the CAS loses; `RISK-19`: a "did this change?" re-read that
+  uses `Session.get()` or a bare `select()` and silently returns a stale, already-loaded object
+  instead of querying the database) — **sweep every other call site with the same shape as part of
+  the same fix**, not just the one reported. This has found more live bugs than the original report
+  alone every time it's been done as a dedicated pass.
+- If a fix genuinely cannot be covered by an automated test (rare — e.g. a pure documentation/config
+  change), say so explicitly in the commit message instead of silently omitting one.
+
 ## When You Finish a Task
 
 1. Run tests.
