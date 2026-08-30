@@ -204,10 +204,22 @@ def poll_stuck_executions(
             if not actions:
                 typer.echo("No stuck executions detected")
 
+    import structlog
+
+    logger = structlog.get_logger("governance_controller.cli")
+
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(_run())
+    except Exception as exc:
+        logger.error(
+            "poll_stuck_executions_failed",
+            error=str(exc),
+            error_type=type(exc).__name__,
+            dry_run=dry_run,
+        )
+        raise typer.Exit(code=1) from exc
     finally:
         # Dispose the engine while the loop is still alive so pooled
         # connections close cleanly, then tear down the loop.
