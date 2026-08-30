@@ -56,7 +56,7 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-30): implemented, NOT gate-clean — 8 open issues (2 CRITICAL, 1 HIGH).** Nine
+**Status (2026-08-30): implemented, NOT gate-clean — 5 open issues (1 CRITICAL, 2 HIGH).** Ten
 review rounds have run. Rounds 1-4 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13
 more, including two in Phase 1 core code that five rounds of `policy_engine.py`-focused hardening
 never surfaced: a hardcoded admin skeleton key and a casing-based self-approval bypass. Round 6
@@ -67,20 +67,32 @@ validator. Round 8 found two issues more severe still: `#253` and `#254`, a Cont
 crash at either of two specific points in the approval/verification pipeline leaves a task
 permanently stuck with no automatic recovery path — and for `#254`, the crash also disables the
 event-redelivery mechanism that would otherwise have recovered it, since the in-progress dedup
-marker `#240` added can't distinguish a crashed writer from a completed one. **Round 9 found two
+marker `#240` added can't distinguish a crashed writer from a completed one. Round 9 found two
 issues more severe still — and more concerning in kind: `#262` and `#263`, both introduced by round
 8's own fix for `#253`/`#254`, both instances of the exact "blind write committed regardless of
 whether the CAS it depends on succeeded" defect class `REQUIREMENTS.md`'s `RISK-16` already tracks
 as this project's most recurring bug pattern. Round 9 also reopened `#255` (HIGH path traversal via
-`task_id=".."`, which the prior fix's charset regex and `basename()` defense-in-depth both fail to
-catch) and found 5 more MEDIUM gaps via fresh angles (Docker image hardening, macro-agent-side
-restart signaling, poller deadline sizing, CLI error handling).** No prior round had tested
-process-level crash resilience before round 8, and no prior round had adversarially re-reviewed a
-crash-recovery fix's own new code for new races before round 9 — a pattern worth generalizing: any
-fix that adds CAS-adjacent write logic to this codebase needs its own dedicated race review, not
-just a passing test suite. This project's own history — three separate premature "gate-clean"
-declarations, each wrong on independent re-verification — means this status line should never be
-trusted without re-running `gh issue list --label phase-2 --state open` first.
+`task_id=".."`) and found 5 more MEDIUM gaps via fresh angles (Docker image hardening, macro-agent-
+side restart signaling, poller deadline sizing, CLI error handling). **Round 10 confirmed all seven
+of round 9's fixes are genuinely closed — the first round since round 6 with none of the prior
+round's findings reopened — but a systematic sweep of every OTHER `StateMachine.atomic_transition`
+call site in the codebase (a check no prior round had done systematically, only opportunistically)
+found the exact `RISK-16` pattern a THIRD time: `#266`, in
+`VerificationService._start_retry_execution`'s failure handler, live-reproduced with two real
+concurrent Postgres sessions leaving `Task.state == BLOCKED` while `Execution.state == FAILED`
+permanently disagreeing. A genuinely new angle — event-level authorization, never tried before —
+also paid off immediately: `#267` (HIGH), the only documented path to unblock a `BLOCKED` task
+(`conflict:resolved`) uses the identical flat shared secret as routine automated macro-agent
+traffic, with zero human/actor/role/project scoping, live-reproduced unblocking an arbitrary task
+via a bare `curl` call. Plus `#268` (HIGH, a missing schema migration that breaks execution-trigger
+INSERTs on any already-deployed Postgres instance upon upgrade), `#269` (MEDIUM, one CAS-failure
+branch with zero audit trail), and `#270` (LOW, dead code left by round 9's own fix commit).** Two
+consecutive rounds have now each found a fresh `RISK-16` instance in code the immediately preceding
+round's own fix touched or introduced — any fix that adds CAS-adjacent write logic to this codebase
+needs its own dedicated race review AND a systematic sweep of sibling call sites, not just a passing
+test suite. This project's own history — three separate premature "gate-clean" declarations, each
+wrong on independent re-verification — means this status line should never be trusted without
+re-running `gh issue list --label phase-2 --state open` first.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired
