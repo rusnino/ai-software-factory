@@ -61,6 +61,7 @@ class EventBridge:
         db: AsyncSession,
         event: dict[str, Any],
         verification_service: VerificationService | None = None,
+        actor: str = "macro-agent",
     ) -> None:
         """Process a single macro-agent workspace event.
 
@@ -70,6 +71,9 @@ class EventBridge:
                 ``metadata.controller_task_id``.
             verification_service: Optional service used to verify the task when
                 a ``landing:completed`` event moves it to ``AGENT_REVIEW``.
+            actor: The authenticated caller identity to record in the audit log.
+                ``conflict:resolved`` events supply a ``human:<email>`` actor
+                because they require a separate human-scoped credential.
         """
         event_type = event.get("type", "")
         metadata = event.get("metadata") or {}
@@ -98,7 +102,7 @@ class EventBridge:
                 db=db,
                 event_type="macro_agent_other",
                 task_id="unknown",
-                actor="macro-agent",
+                actor=actor,
                 source="macro-agent",
                 payload=event,
             )
@@ -117,7 +121,7 @@ class EventBridge:
                 db=db,
                 event_type=audit_event_type,
                 task_id=task_id,
-                actor="macro-agent",
+                actor=actor,
                 source="macro-agent",
                 payload=event,
             )
@@ -143,6 +147,20 @@ class EventBridge:
 
                 if valid_transition:
                     if not await StateMachine.atomic_transition(db, task, target_state):
+                        await AuditService.log(
+                            db=db,
+                            event_type="concurrent_modification",
+                            task_id=task_id,
+                            actor=actor,
+                            source="macro-agent",
+                            payload={
+                                "expected_state": task.state.value,
+                                "target_state": target_state.value,
+                                "context": f"event_bridge:{event_type}",
+                                "event": event,
+                            },
+                        )
+                        await db.commit()
                         raise ValueError(
                             "Concurrent modification detected: "
                             "task state changed during event handling"
@@ -263,7 +281,7 @@ class EventBridge:
             db=db,
             event_type=audit_event_type,
             task_id=task_id,
-            actor="macro-agent",
+            actor=actor,
             source="macro-agent",
             payload=payload,
         )

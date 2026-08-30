@@ -198,6 +198,16 @@ async def run_migrations() -> None:
                 )
             )
 
+        # Add any missing columns to the execution table (#268).
+        execution_columns = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).get_columns("execution")
+        )
+        execution_column_names = {c["name"] for c in execution_columns}
+        if "status_error" not in execution_column_names:
+            await conn.execute(
+                text("ALTER TABLE execution ADD COLUMN status_error VARCHAR")
+            )
+
         # Backfill any legacy rows that were inserted before the migration.
         # Hash values cannot be reconstructed deterministically for old rows,
         # but empty-string placeholders let the chain continue from this point.

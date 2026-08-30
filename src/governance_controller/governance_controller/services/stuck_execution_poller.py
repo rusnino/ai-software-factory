@@ -387,27 +387,6 @@ class StuckExecutionPoller:
             execution_id=execution.id,
             payload=payload,
         )
-        """Transition task to BLOCKED and record a human-alert audit entry."""
-        success = await StateMachine.atomic_transition(self.db, task, TaskState.BLOCKED)
-        if not success:
-            return
-
-        execution.state = TaskState.BLOCKED
-        execution.ended_at = datetime.now(UTC)
-        await self.db.flush()
-
-        await AuditService.log(
-            db=self.db,
-            event_type="execution_blocked_timeout",
-            task_id=task.id,
-            actor="system:poller",
-            source="stuck_execution_poller",
-            execution_id=execution.id,
-            payload={
-                "reason": "execution timed out without successful event delivery",
-                "macro_agent_run_id": execution.macro_agent_run_id,
-            },
-        )
 
     async def _mark_failed(
         self, task: Task, execution: Execution, reason_code: str

@@ -72,11 +72,20 @@ class Settings(BaseSettings):
     # reached via a trusted sidecar/network path.
     opa_api_token: str = ""
 
-    # Shared secret for authenticating macro-agent Event Bridge callbacks to the
-    # Controller's POST /events endpoint. The caller must send the secret in the
-    # X-Event-Bridge-Secret header. Leave empty ONLY in local dev where the
-    # endpoint is not exposed.
+    # Shared secret for authenticating routine macro-agent Event Bridge
+    # callbacks to the Controller's POST /events endpoint. The caller must send
+    # the secret in the X-Event-Bridge-Secret header. Leave empty ONLY in local
+    # dev where the endpoint is not exposed. This credential is NOT sufficient
+    # for conflict:resolved events that unblock a BLOCKED task; those also
+    # require X-Human-Admin-Secret.
     event_bridge_secret: str = ""
+
+    # Separate human-scoped secret required for conflict:resolved events that
+    # unblock a BLOCKED task. This event type deliberately overrides the
+    # "human intervention required" rule; it must therefore prove that a human
+    # actor initiated the call. Leave empty ONLY in local dev where the endpoint
+    # is not exposed. If unset in production, conflict:resolved is rejected.
+    event_bridge_human_secret: str = ""
 
     # Intake rate limiting: maximum draft-creating submissions per sender per
     # minute. Set to 0 to disable rate limiting.
