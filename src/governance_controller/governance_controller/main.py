@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from governance_controller.api import approvals as approvals_api
 from governance_controller.api import audit as audit_api
@@ -95,6 +96,24 @@ async def _controller_auth_exception_handler(
     return JSONResponse(
         status_code=status.HTTP_401_UNAUTHORIZED,
         content={"detail": str(exc)},
+    )
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def _pool_timeout_exception_handler(
+    _request: Request,
+    _exc: SQLAlchemyTimeoutError,
+) -> JSONResponse:
+    """Return 503 when the Postgres connection pool is exhausted.
+
+    A pool timeout occurs before any statement executes, so there is no
+    partial state to clean up. 503 signals transient backpressure; callers may
+    retry with backoff.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content={"detail": "Database pool exhausted, retry later"},
+        headers={"Retry-After": "2"},
     )
 
 

@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.plane_client import PlaneClient
@@ -102,7 +103,10 @@ class IdeaIngestionService:
             )
             # Persist the submission unconditionally. The row must exist for
             # duplicate/rate-limit enforcement even if Plane is disabled or its
-            # call fails.
+            # call fails. The unique index on (source, source_id) is the final
+            # backstop against races that pass the SELECT-based pre-check; a
+            # duplicate-key failure is translated to the same DuplicateIntakeError
+            # so callers get a clean 409 instead of a 500 (#274).
             db.add(
                 IntakeSubmission(
                     source=classified.idea.source,
@@ -110,7 +114,13 @@ class IdeaIngestionService:
                     sender=classified.idea.sender,
                 )
             )
-            await db.flush()
+            try:
+                await db.flush()
+            except IntegrityError as exc:
+                raise DuplicateIntakeError(
+                    f"Duplicate intake submission: "
+                    f"{classified.idea.source}/{classified.idea.source_id}"
+                ) from exc
 
         client = self._client
         if client is None:

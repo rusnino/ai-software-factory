@@ -303,13 +303,19 @@ class ReconciliationService:
     async def _task_still_in_state(
         self, task_id: str, state: TaskState
     ) -> bool:
-        """Return True if the Controller task still has ``state``."""
+        """Return True if the Controller task still has ``state``.
+
+        Uses ``populate_existing`` so the identity map cannot hide a concurrent
+        state change committed after the task was first loaded (#275).
+        """
         if self._db is None:
             return True
         from governance_controller.models import Task
 
         result = await self._db.execute(
-            select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
+            select(Task)
+            .where(Task.id == task_id)  # type: ignore[arg-type]
+            .execution_options(populate_existing=True)
         )
         task_obj = result.scalar_one_or_none()
         return task_obj is not None and task_obj.state == state.value
