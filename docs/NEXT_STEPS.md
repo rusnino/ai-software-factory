@@ -4,46 +4,51 @@
 
 **Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
 it has been declared prematurely at least three separate times, each later found wrong by
-independent live verification.** As of 2026-08-30, thirteen review rounds have run. Rounds 1-8
+independent live verification.** As of 2026-08-30, fourteen review rounds have run. Rounds 1-8
 (`#154`-`#258`) landed and hold up on re-verification. Round 9 found opencode's `#253`/`#254` fix
 reused this project's single most recurring defect class — "blind write committed before a CAS
 check, regardless of the CAS outcome" (`REQUIREMENTS.md` `RISK-16`) — introducing `#262`/`#263`
-(both CRITICAL). Round 10 found the same pattern a third time (`#266`) via a systematic CAS sweep,
-plus `#267` (HIGH, event-level authorization). Round 11 found `#271` (CRITICAL) — genuinely
-concurrent `landing:completed` redelivery ran real verification multiple times and destroyed the
-`#240` dedup marker — via a DIFFERENT recurring defect class: `db.get()`/non-`populate_existing`
-re-reads silently returning a session's stale, already-loaded object instead of the true committed
-state. Round 12 verified round 11's fixes clean, found the identical staleness bug a second time in
-`ReconciliationService` (`#275`), and found an intake-adapter TOCTOU (`#274`, HIGH) plus a
-pool-exhaustion polish gap (`#276`, MEDIUM). **Round 13 verified ALL THREE of Round 12's fixes
-(`#274`-`#276`) are genuinely closed — the fourth consecutive round with zero reopens. The standing
-sweep for the identity-map-staleness pattern (committed to after round 11) found it a FIFTH time,
-and this instance is the most consequential yet: `#278` (HIGH) — `ApprovalService.approve()`'s
-duplicate-delivery re-fetch, added specifically to fix `#242` back in round 6 ("return the true
-post-approval state, not a stale copy"), uses `db.get()` and has therefore silently never worked
-since the day it shipped. A legitimate client retrying a timed-out `POST /approvals` call gets back
-the WRONG task state in the response body, and the resulting audit log entry's `previous_state`/
-`new_state` fields are both wrong too. Separately, racing the CLI against live HTTP traffic — a
-genuinely new angle — found something no round had checked directly in this project's history:
-whether the documented `approve` CLI command actually works against a real server at all. It
-doesn't, in any configuration: `#277` (HIGH) — `cli.py`'s `approve` command never sends
-`X-Controller-Secret`, so `POST /approvals`'s fail-closed auth rejects it with a 401 every time,
-whether the secret is configured or not. This has evidently been broken since whenever that auth
-dependency was added, invisible because the CLI's own tests only mock `httpx.post` and never hit a
-real server. A LOW finding rounds out the sweep: `#279` — an event correctly rejected by the
-GAP-099 BLOCKED guard still returns a plain `204`, indistinguishable from being processed.** **Every
-round that tried a genuinely new angle has found something no prior round's angles could have
-found, without exception across all thirteen rounds so far. The identity-map-staleness defect class
-has now been found in FIVE unrelated subsystems across three rounds (`EventBridge` round 11,
-`ReconciliationService` round 12, `ApprovalService` round 13) and is a standing sweep target for
-every future round — the fifth hit, inside `ApprovalService` itself, is a direct reminder that a
-prior round's own "fix" for a different-looking bug can be this exact pattern in disguise and go
-undetected for many rounds. Equally, `#277` is a reminder that a documented, core feature can be
-completely non-functional in every real configuration for many rounds running, invisible to a test
-suite that only ever mocks the boundary it's supposed to be testing — any future round should
-periodically ask "does this documented workflow actually work against a real, unmocked server," not
-just "is this code correct in isolation."** Query the live issue list before trusting anything else
-in this file:
+(both CRITICAL). Round 10 found the same pattern a third time (`#266`), plus `#267` (HIGH,
+event-level authorization). Round 11 found `#271` (CRITICAL) via a different recurring defect
+class: `db.get()`/non-`populate_existing` re-reads silently returning a session's stale,
+already-loaded object instead of the true committed state (`RISK-19`). Rounds 12-13 found this
+same staleness pattern twice more (`#275`, `#278` — the latter revealing round 6's own `#242` fix had
+silently never worked), plus `#274` (HIGH, intake TOCTOU) and `#277` (HIGH — the documented `approve`
+CLI command had never once been able to authenticate against any real deployment, invisible because
+its own tests only mocked `httpx.post`). **Round 14 confirmed all three of Round 13's fixes
+(`#277`-`#279`) are genuinely closed. This round's explicit brief — audit regression-test QUALITY,
+not just presence, per the new Regression Coverage Policy — immediately found a real gap: opencode's
+own `#277` fix commit only strengthened the existing MOCKED `httpx.post` test (asserting a headers
+dict gets built) rather than adding a live-server check, which would have missed a future regression
+exactly the way the original bug went undetected. Fixed directly this round with a genuine
+subprocess-driven live-server test. Two genuinely new angles then found this project's worst finding
+yet and a second high-severity architectural recurrence: `#280` (CRITICAL) — the `AuditLog` hash
+chain, this project's core tamper-evidence guarantee, SILENTLY FORKS under real concurrent
+`AuditService.log()` calls (a realistic scenario — multiple approval/event/poller code paths writing
+audit entries for the same task around the same time). 20 genuinely concurrent calls produced a
+3-way-forked chain with ZERO exceptions raised, live-reproduced and independently confirmed. The
+`SELECT ... ORDER BY id DESC LIMIT 1 FOR UPDATE` tip-lookup — the exact mechanism whose code comment
+claims "concurrent transactions serialize on the previous row rather than forking the chain" — is a
+known Postgres anti-pattern (no `WHERE` clause) that doesn't actually serialize anything: 20
+concurrent calls took barely longer than 1. A related `#281` (MEDIUM) found `compute_hash()` can't
+even be called on a row loaded via `SELECT` (only on freshly-constructed instances), so this project
+currently has no working tool to verify the chain's integrity after the fact either. Separately,
+`#282` (HIGH) found `gc reconcile` — a command whose entire job is comparing Controller state against
+Plane — has NEVER actually matched tasks against Plane issues correctly for realistic deployments: it
+looks up Plane issues by `Task.id`, never `Task.plane_issue_id`, an EXACT recurrence of `#201`'s
+defect class (fixed on the write path in `8739a0b`, a fix that never touched `reconciliation_service.py`
+or `cli.py`) — live-reproduced with a real, unmocked HTTP fake-Plane server showing a genuinely
+diverging, genuinely existing Plane issue misreported as "not found in Plane" and never fixed.**
+**Every round that tried a genuinely new angle has found something no prior round's angles could
+have found, without exception across all fourteen rounds so far. Two lessons now firmly established:
+(1) the identity-map-staleness (`RISK-19`) and write-before-CAS (`RISK-16`) patterns are standing
+sweep targets — five and three confirmed instances respectively, across unrelated subsystems; (2) a
+documented feature or guarantee (a CLI command, a tamper-evidence chain, a reconciliation tool) can
+be completely non-functional for many rounds while every existing test passes, because the tests
+only ever exercised the mocked/identical-key/no-real-concurrency case — any future round should
+specifically hunt for tests that assert a property using a fixture shape that happens to sidestep the
+realistic case (e.g. Controller `task_id` == Plane issue `id` in test fixtures, which is never true
+in production).** Query the live issue list before trusting anything else in this file:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -51,12 +56,12 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **3 open issues (0 CRITICAL, 2 HIGH, 0 MEDIUM, 1 LOW)** — `#277` (HIGH — the
-`approve` CLI command never authenticates, cannot succeed against any real deployment), `#278`
-(HIGH — `ApprovalService.approve()`'s duplicate-delivery re-fetch is stale, so round 6's `#242` fix
-never actually worked), `#279` (LOW — a GAP-099-rejected event returns 204 instead of signaling the
-drop). Every prior round's findings (`#151`-`#276`) are closed and independently re-verified — the
-fourth consecutive round with none reopened.
+As of this writing: **3 open issues (1 CRITICAL, 1 HIGH, 1 MEDIUM, 0 LOW)** — `#280` (CRITICAL — the
+audit log's hash chain silently forks under real concurrent writes, defeating its own tamper-evidence
+purpose), `#282` (HIGH — `gc reconcile` never matches tasks against Plane correctly for realistic
+deployments, a recurrence of `#201`'s defect class), `#281` (MEDIUM — `compute_hash()` can't verify
+an already-persisted row, so there's no working integrity-check tool for `#280`'s own chain either).
+Every prior round's findings (`#151`-`#279`) are closed and independently re-verified.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -77,21 +82,21 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status (2026-08-30): **414 passed / 5 skipped** on SQLite, **417 passed / 2 skipped** on
+Test status (2026-08-30): **429 passed / 8 skipped** on SQLite, **435 passed / 2 skipped** on
 PostgreSQL, `ruff` clean, `mypy governance_controller` clean (68 source files); `macro_agent_service`
 tests still pass, `ruff`/`mypy` clean. **CI is green** (`.github/workflows/ci.yml`, added by `#223`,
-had failed on all 13 runs since 2026-08-26 until Round 11's CI-infra fix). Round 13 made no
-production-code changes of its own beyond what opencode's `7b765ed` fix commit already covered, so
-these numbers are unchanged. Green tests are still not evidence of correctness in this project beyond
-"nothing crashes" — none of round 8's through round 13's findings (`#253`-`#279`), including all five
-CRITICALs found across those rounds, were caught by this suite; they required killing a live process,
-adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely concurrent
-real HTTP load at a live server backed by real Postgres, or — for `#277` — simply trying to actually
-use a documented CLI command against a real, unmocked server for the first time. `#271`, `#274`,
-`#275`, and `#278` specifically are cases where the suite's own tests would not have caught them even
-in principle — the bugs only manifest under genuinely overlapping requests or a genuinely fresh
-session identity map, neither of which the existing test suite exercises for these code paths; `#277`
-is a case where the suite's own mocking of the HTTP boundary is precisely what hid the bug.
+had failed on all 13 runs since 2026-08-26 until Round 11's CI-infra fix). The test counts jumped
+because Round 13 also included a one-time regression-test backfill (12 tests for previously-untested
+severity:high/critical fixes, commit `fd8ce39`) and Round 14 added one more (a live-server test for
+`#277`, replacing a weak mocked one, commit `72be021`) — see CLAUDE.md's Regression Coverage Policy.
+Green tests are still not evidence of correctness in this project beyond "nothing crashes" — none of
+round 8's through round 14's findings (`#253`-`#282`), including all six CRITICALs found across those
+rounds, were caught by this suite before their respective fixes landed; they required killing a live
+process, adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely
+concurrent real HTTP/DB load at a live server or real Postgres, or — for `#277`/`#280`/`#282` —
+simply trying to actually exercise a documented workflow (a CLI command, a concurrent-writer scenario,
+a realistic non-identical task-id-vs-Plane-issue-id pairing) that every existing test's fixture shape
+happened to sidestep.
 
 Implemented components:
 
@@ -134,7 +139,7 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Thirteen review
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Fourteen review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -155,50 +160,66 @@ this round also diagnosed and fixed a real CI infrastructure bug unrelated to an
 OTHER dedup/idempotency mechanism in the codebase, a dedicated connection-pool-exhaustion resilience
 check, and a reconciliation-service concurrent-drift review, `#274`-`#276`), Round 13 (verification
 of round 12's fixes, a systematic sweep for the identity-map-staleness pattern across the rest of the
-codebase, and racing the CLI against live HTTP API traffic for the first time, `#277`-`#279`). **3
-issues remain open, 0 CRITICAL, 2 HIGH.** Round 13 verified all three of round 12's fixes are
-genuinely closed — the fourth consecutive round with none reopened. The standing sweep for the
-identity-map-staleness pattern (committed to after round 11, exercised once already in round 12)
-found it a FIFTH time, in the most consequential place yet: `#278` (HIGH),
-`ApprovalService.approve()`'s duplicate-delivery re-fetch — added specifically to fix `#242` back in
-round 6 — uses `db.get()` and has therefore silently never worked since the day it shipped; a
-legitimate client retrying a timed-out approval gets back the wrong task state in both the HTTP
-response and the audit log. **This defect class has now been found in FIVE unrelated subsystems
-across three rounds (`EventBridge` round 11, `ReconciliationService` round 12, `ApprovalService`
-round 13) — the `ApprovalService` hit is a direct reminder that a prior round's own fix for a
-different-looking bug can be this exact pattern wearing a disguise.** Racing the CLI against live
-HTTP traffic — a genuinely new angle nobody had tried in this project's history — found something
-just as consequential from a completely different direction: `#277` (HIGH), the documented `approve`
-CLI command has never once been able to authenticate against a real server, in any configuration,
-because it never sends `X-Controller-Secret` and the endpoint fails closed. This was invisible
-because the CLI's own tests only mock `httpx.post`. `#279` (LOW) rounds out the sweep — a
-GAP-099-rejected event returns 204 instead of signaling the drop. **Do not treat "Phase 2 review" as
-bounded to Phase 2 code, to any fixed set of angles, or to code the current round didn't itself
-touch** — every round that tried a genuinely new angle found something the previous rounds' angles
-couldn't have found, without exception across all thirteen rounds so far. The next round should keep
-trying new angles.
+codebase, and racing the CLI against live HTTP API traffic for the first time, `#277`-`#279`; this
+round also did a one-time regression-test backfill for 12 previously-untested severity:high/critical
+fixes from rounds 8-13), Round 14 (verification of round 13's fixes, a regression-TEST-QUALITY audit
+per the new Regression Coverage Policy, a live end-to-end check of the `reconcile` CLI command, a
+`macro_agent_service`-specific `RISK-16`/`RISK-19` sweep, and a real-concurrency stress test of the
+audit log's own hash chain, `#280`-`#282`). **3 issues remain open, 1 CRITICAL, 1 HIGH.** Round 14
+confirmed all three of round 13's fixes are genuinely closed. The test-quality audit immediately
+found opencode's own `#277` fix commit had only strengthened a MOCKED test, not added a live-server
+check — fixed directly this round with a genuine subprocess-driven test. Two genuinely new angles
+then found this project's most severe finding yet: `#280` (CRITICAL) — the `AuditLog` hash chain,
+this project's core tamper-evidence guarantee, SILENTLY FORKS under real concurrent
+`AuditService.log()` calls, a realistic scenario this project's own approval/event/poller code paths
+produce constantly. 20 genuinely concurrent calls forked into 3 branches with zero exceptions raised;
+the `FOR UPDATE` tip-lookup that's supposed to prevent this is a known Postgres `ORDER BY`/`LIMIT`
+anti-pattern that doesn't actually serialize anything (20 concurrent calls took barely longer than
+1). A related `#281` (MEDIUM) found there is currently no working tool to verify the chain's
+integrity after the fact either — `compute_hash()` can't be called on a row loaded via `SELECT`.
+Separately, `#282` (HIGH) found `gc reconcile` has never correctly matched Controller tasks against
+Plane issues for realistic deployments — an EXACT recurrence of `#201`'s defect class (`Task.id`
+assumed equal to Plane's issue UUID), in a code path `#201`'s own fix (`8739a0b`) never touched,
+live-reproduced with a real, unmocked fake-Plane HTTP server. **Two lessons are now firmly
+established across fourteen rounds: (1) `RISK-16` (write before CAS, committed regardless) and
+`RISK-19` (identity-map staleness) are standing sweep targets — three and five confirmed instances
+respectively, across unrelated subsystems; (2) a documented feature or guarantee can be completely
+broken for many rounds while every existing test passes, because the tests' fixture shape happens to
+sidestep the realistic case — `#277`'s mocked HTTP boundary, `#280`'s lack of any concurrent-writer
+test, and `#282`'s test fixtures using an identical Controller-task-id/Plane-issue-id pairing that
+never occurs in production are three separate instances of this SAME meta-pattern in one round alone.
+Do not treat "Phase 2 review" as bounded to Phase 2 code, to any fixed set of angles, or to code the
+current round didn't itself touch** — every round that tried a genuinely new angle found something
+the previous rounds' angles couldn't have found, without exception across all fourteen rounds so far.
 
-## Immediate Next Step: Fix the Two HIGHs, Then Verify Gate-Clean
+## Immediate Next Step: Fix the Audit-Chain CRITICAL, Then the Reconcile HIGH
 
-Prioritize `#278` and `#277` (both HIGH, the only open issues besides one LOW). `#278`: replace
-`ApprovalService.approve()`'s `await self.db.get(Task, task.id)` on the idempotent-duplicate path
-with a `populate_existing=True` re-read, matching the fix already applied for `#271`/`#275` — and
-because this is now the fifth confirmed instance of this exact pattern, do a fresh, EXPLICIT sweep
-of the entire codebase for `db.get(`/bare `select()` staleness checks as part of this fix, not just
-a fix at this one call site; treat any remaining instance as equally urgent. `#277`: give the CLI a
-way to supply `X-Controller-Secret` (an option/env var), and add a live-server integration test for
-at least the `approve` command so this class of regression — a documented feature silently broken in
-every real configuration — can't recur invisibly again. Then `#279` (LOW — surface the GAP-099
-rejection as a non-204 status). Before declaring Phase 2 gate-clean, run a fresh live-reproduction
+Prioritize `#280` first (the audit log's own tamper-evidence guarantee silently breaks under
+realistic concurrent load — this is the worst finding of any round so far precisely because it's
+silent: no exception, no log line, just a forked chain nobody would notice without an explicit
+integrity walk). Fix needs an actual mutex for tip advancement (e.g. `pg_advisory_xact_lock` on a
+fixed key, or a dedicated single-row locked-by-primary-key tip table), not the current
+`ORDER BY/LIMIT + FOR UPDATE` pattern, and a live 15-20-genuinely-concurrent-session regression test
+verifying the resulting chain has zero forks — a monkeypatched/mocked version of this test would not
+catch a regression, per this round's own lesson. Fix `#281` alongside it (give `compute_hash()` a way
+to verify an already-persisted row) so `#280`'s own fix can be self-verified going forward. Then
+`#282` (HIGH — thread `Task.plane_issue_id` through `cli.py reconcile`'s `controller_tasks` tuple and
+`ReconciliationService.reconcile()`'s matching step, matching the `plane_issue_id or task_id` fallback
+`#201` already established for the write path; also fix `tests/test_reconciliation_service.py`'s
+fixtures to use non-identical Controller-task-id/Plane-issue-id pairs so this exact bug shape can't
+hide behind the tests again). Before declaring Phase 2 gate-clean, run a fresh live-reproduction
 review and confirm the live issue list has no open `severity:critical` or `severity:high` issues —
 and try an angle no prior round has tried yet, given the track record above. Two concrete leads for
-the next round: (1) now that `#277` showed a documented CLI command can be silently broken for many
-rounds because its tests only mock the HTTP boundary, do the same live-server sanity check for the
-`reconcile` and `poll-stuck-executions` CLI commands specifically (round 13 exercised
-`poll-stuck-executions` against live traffic already and found it clean, but `reconcile` has not yet
-been driven through a real, unmocked HTTP-adjacent path end to end); (2) the identity-map-staleness
-sweep in round 13 was thorough but scoped to `governance_controller/` — `macro_agent_service`'s own
-codebase has never been checked for the same pattern.
+the next round: (1) the `macro_agent_service` sweep in round 14 came back genuinely clean (no
+`await` points inside the store's async methods means no interleaving windows exist structurally) —
+but nobody has yet applied the SAME "does every documented workflow actually work against a real,
+unmocked path" lens used on `#277`/`#282` to the macro-agent-service HTTP boundary itself (e.g. does
+the Controller's `MacroAgentClient` genuinely handle every real HTTP failure mode
+macro-agent-service can produce, tested against the REAL service process rather than a fake); (2) no
+round has yet checked whether OTHER hash-chain-or-similar "was this the tip/latest" patterns exist
+elsewhere in the codebase beyond `AuditLog` — a systematic grep for `ORDER BY.*DESC.*LIMIT 1` combined
+with `FOR UPDATE` or any "get the latest X" query used as a serialization point would be the RISK-16/
+RISK-19-style systematic sweep this specific defect shape deserves.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
