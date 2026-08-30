@@ -184,8 +184,13 @@ class ApprovalService:
         if existing is not None:
             # Re-fetch the task's current state so a duplicate delivery returns
             # the true post-approval state, not the caller's stale in-memory copy
-            # (#242).
-            fresh_task = await self.db.get(Task, task.id)
+            # (#242 / #278). Use populate_existing to bypass the identity map.
+            fresh_result = await self.db.execute(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            fresh_task: Task | None = fresh_result.scalar_one_or_none()
             if fresh_task is None:
                 fresh_task = task
             await AuditService.log(

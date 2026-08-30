@@ -349,7 +349,8 @@ class TestEventBridgeTransitions:
         await db_session.flush()
 
         event = _make_event("landing:completed", task.id)
-        await EventBridge.handle(db_session, event)
+        with pytest.raises(ValueError, match="Event rejected"):
+            await EventBridge.handle(db_session, event)
 
         assert task.state == TaskState.PROPOSED
 
@@ -598,7 +599,8 @@ class TestEventBridgeTransitions:
         await db_session.flush()
 
         event = _make_event("stream:committed", task.id)
-        await EventBridge.handle(db_session, event)
+        with pytest.raises(ValueError, match="Event rejected"):
+            await EventBridge.handle(db_session, event)
 
         assert task.state == TaskState.BLOCKED
         rows = await db_session.execute(
@@ -626,7 +628,8 @@ class TestEventBridgeTransitions:
         await db_session.flush()
 
         event = _make_event("stream:committed", task.id)
-        await EventBridge.handle(db_session, event)
+        with pytest.raises(ValueError, match="Event rejected"):
+            await EventBridge.handle(db_session, event)
 
         assert task.state == TaskState.FAILED
         rows = await db_session.execute(

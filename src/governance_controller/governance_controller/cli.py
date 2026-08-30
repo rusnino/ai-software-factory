@@ -40,6 +40,12 @@ def approve(
         None,
         help="Optional comment attached to the approval.",
     ),
+    secret: str = typer.Option(
+        settings.controller_api_secret,
+        "--secret",
+        envvar="GC_CONTROLLER_API_SECRET",
+        help="X-Controller-Secret value for authenticated endpoints.",
+    ),
 ) -> None:
     """Approve a task via the Controller's authoritative approvals endpoint."""
     payload = ApprovalRequest(
@@ -51,10 +57,12 @@ def approve(
         comment=comment,
     )
 
+    headers = {"X-Controller-Secret": secret}
     try:
         response = httpx.post(
             f"{base_url}/approvals",
             json=payload.model_dump(mode="json"),
+            headers=headers,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:

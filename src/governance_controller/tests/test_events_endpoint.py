@@ -228,7 +228,7 @@ async def test_post_event_rejects_oversized_body_without_content_length(
     assert response.status_code == 413
 
 
-async def test_post_event_invalid_transition_returns_204_and_logs_error(
+async def test_post_event_invalid_transition_returns_409_and_logs_error(
     async_client: AsyncClient,
     client_db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
@@ -252,5 +252,6 @@ async def test_post_event_invalid_transition_returns_204_and_logs_error(
         headers={"X-Event-Bridge-Secret": "secret"},
     )
 
-    assert response.status_code == 204
+    assert response.status_code == 409
+    assert "Event rejected" in response.json()["detail"]
     assert task.state == TaskState.PROPOSED

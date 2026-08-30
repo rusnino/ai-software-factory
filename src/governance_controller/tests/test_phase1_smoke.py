@@ -168,8 +168,12 @@ class TestPhase1Smoke:
             client_db_session, task_id, TaskState.HUMAN_REVIEW
         )
 
-        # Duplicate landing:completed from HUMAN_REVIEW is ignored.
-        await EventBridge.handle(client_db_session, make_event("landing:completed"))
+        # Duplicate landing:completed from HUMAN_REVIEW is rejected but state
+        # stays unchanged.
+        with pytest.raises(ValueError, match="Event rejected"):
+            await EventBridge.handle(
+                client_db_session, make_event("landing:completed")
+            )
         await self._assert_task_state(
             client_db_session, task_id, TaskState.HUMAN_REVIEW
         )

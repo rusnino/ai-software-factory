@@ -58,6 +58,7 @@ class TestCliApprove:
                 "timestamp": mock_post.call_args.kwargs["json"]["timestamp"],
                 "comment": "LGTM",
             },
+            headers={"X-Controller-Secret": ""},
         )
         assert "Approved TASK-1: EXEC_APPROVED" in result.output
 

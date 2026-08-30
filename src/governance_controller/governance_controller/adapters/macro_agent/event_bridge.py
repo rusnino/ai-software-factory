@@ -293,6 +293,19 @@ class EventBridge:
         payload: dict[str, Any] = {"event": event}
         if transition_error is not None:
             payload["transition_error"] = transition_error
+            await AuditService.log(
+                db=db,
+                event_type=audit_event_type,
+                task_id=task_id,
+                actor=actor,
+                source="macro-agent",
+                payload=payload,
+            )
+            await db.commit()
+            # Surface the guard rejection as a non-204 signal so callers can
+            # tell their event did not take effect, instead of returning the
+            # same success status as a processed event (#279).
+            raise ValueError(f"Event rejected: {transition_error}")
 
         await AuditService.log(
             db=db,
