@@ -193,3 +193,68 @@ async def test_without_plane_config_returns_empty_report(
 
     assert report.checked == 0
     assert not report.divergences
+
+
+async def test_task_still_in_state_detects_concurrent_change(
+    isolated_db: tuple,
+) -> None:
+    """#275: the staleness guard must see a genuinely concurrent state change.
+
+    Mirrors the CLI's real usage shape: the same session that already loaded
+    a task (e.g. via the ``reconcile`` command's initial project-wide read)
+    is reused for the staleness check. Without ``populate_existing=True``,
+    SQLAlchemy's identity map would silently return the session's
+    already-loaded, stale object instead of querying the database, and the
+    guard would wrongly report the task as "still RUNNING" after a genuinely
+    concurrent session moved it to ``HUMAN_REVIEW`` and committed.
+    """
+    from sqlalchemy import select
+
+    from governance_controller.models.task import Task
+
+    engine, local_session = isolated_db
+
+    async with local_session() as seed:
+        task = Task(
+            id="task-reconcile-staleness-275",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            state=TaskState.RUNNING,
+        )
+        seed.add(task)
+        await seed.commit()
+
+    session_a = local_session()
+    try:
+        # Session A loads the task once, identity-mapping it — exactly like
+        # the CLI's initial project-wide `select(Task)` before reconciliation.
+        loaded = await session_a.scalar(
+            select(Task).where(Task.id == "task-reconcile-staleness-275")
+        )
+        assert loaded is not None
+        assert loaded.state == TaskState.RUNNING
+
+        # A genuinely separate session commits a real concurrent transition.
+        async with local_session() as session_b:
+            task_b = await session_b.scalar(
+                select(Task).where(Task.id == "task-reconcile-staleness-275")
+            )
+            assert task_b is not None
+            task_b.state = TaskState.HUMAN_REVIEW
+            await session_b.commit()
+
+        service = ReconciliationService(db=session_a)
+        still_running = await service._task_still_in_state(
+            "task-reconcile-staleness-275", TaskState.RUNNING
+        )
+        assert still_running is False, (
+            "the guard must detect the concurrent change to HUMAN_REVIEW, "
+            "not report the session's stale in-memory RUNNING copy"
+        )
+
+        still_human_review = await service._task_still_in_state(
+            "task-reconcile-staleness-275", TaskState.HUMAN_REVIEW
+        )
+        assert still_human_review is True
+    finally:
+        await session_a.close()

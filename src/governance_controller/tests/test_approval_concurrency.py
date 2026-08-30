@@ -139,6 +139,109 @@ class TestApprovalConcurrency:
             # READY -> RUNNING.
             assert task.version == 3
 
+    async def test_duplicate_delivery_returns_true_current_state_not_stale(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#278: a duplicate-delivery re-fetch must bypass the identity map.
+
+        Session A makes a real PLAN approval and stays open (identity-mapping
+        the task at PLAN_APPROVED). A genuinely separate session B then
+        drives the task all the way to RUNNING via a real EXECUTION approval
+        and commits. Session A then redelivers its ORIGINAL PLAN approval
+        request (same idempotency_key/approval_type/actor) — this must hit
+        the idempotent-duplicate branch and return the TRUE current state
+        (RUNNING), not session A's stale in-memory PLAN_APPROVED copy. This
+        re-fetch was added specifically to fix #242 in an earlier round; using
+        ``db.get()`` meant it silently never worked, since the task was
+        already identity-mapped in the same session from the first call.
+        """
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task = Task(
+                id="task-duplicate-278",
+                project_id="proj-1",
+                state=TaskState.PROPOSED,
+                proposed_by="agent-1",
+            )
+            seed.add(task)
+            await seed.commit()
+
+        contract = _make_contract("task-duplicate-278")
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-duplicate-278"}
+
+        # Session A makes the first, real PLAN approval and stays open.
+        session_a = local_session()
+        task_a = await session_a.scalar(
+            select(Task).where(Task.id == "task-duplicate-278")
+        )
+        assert task_a is not None
+        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        first_result = await service_a.approve(
+            task=task_a,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="test",
+            actor="admin",
+            idempotency_key="key-plan-278",
+        )
+        assert first_result.state == TaskState.PLAN_APPROVED
+        await session_a.commit()
+
+        # A genuinely separate session drives the task all the way to
+        # RUNNING via a real EXECUTION approval and commits.
+        async with local_session() as session_b:
+            task_b = await session_b.scalar(
+                select(Task).where(Task.id == "task-duplicate-278")
+            )
+            assert task_b is not None
+            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            exec_result = await service_b.approve(
+                task=task_b,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="test",
+                actor="admin",
+                idempotency_key="key-exec-278",
+            )
+            assert exec_result.state == TaskState.RUNNING
+            await session_b.commit()
+
+        # Session A redelivers its ORIGINAL PLAN approval request.
+        duplicate_result = await service_a.approve(
+            task=task_a,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.PLAN,
+            source="test",
+            actor="admin",
+            idempotency_key="key-plan-278",
+        )
+
+        assert duplicate_result.state == TaskState.RUNNING, (
+            "duplicate delivery must return the TRUE current state, not "
+            "session A's stale in-memory PLAN_APPROVED copy"
+        )
+
+        audits = await session_a.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == "task-duplicate-278",
+                AuditLog.event_type == "approval_idempotent",
+            )
+        )
+        idempotent_entries = audits.scalars().all()
+        assert len(idempotent_entries) == 1
+        payload = idempotent_entries[0].payload
+        assert payload["previous_state"] == TaskState.RUNNING.value
+        assert payload["new_state"] == TaskState.RUNNING.value
+
+        await session_a.close()
+
     async def test_executor_failure_advances_to_failed_with_version_3(
         self,
         isolated_db: tuple,

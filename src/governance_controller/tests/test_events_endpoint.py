@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from governance_controller.constants import TaskState
 from governance_controller.db import get_db
 from governance_controller.main import app
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 
@@ -85,6 +86,119 @@ async def test_post_event_transitions_task(
     )
 
     assert response.status_code == 204
+    assert task.state == TaskState.AGENT_REVIEW
+
+
+async def test_post_conflict_resolved_requires_human_admin_secret(
+    async_client: AsyncClient,
+    client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#267: the routine event-bridge secret alone must not unblock a task."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_human_secret",
+        "human-secret",
+    )
+    task = Task(
+        id="event-task-blocked-1",
+        project_id="proj-1",
+        state=TaskState.BLOCKED,
+        proposed_by="agent-1",
+    )
+    client_db_session.add(task)
+    await client_db_session.flush()
+
+    response = await async_client.post(
+        "/events",
+        json=_make_event("conflict:resolved", task.id),
+        headers={"X-Event-Bridge-Secret": "secret"},
+    )
+
+    assert response.status_code == 401
+    await client_db_session.refresh(task)
+    assert task.state == TaskState.BLOCKED
+
+
+async def test_post_conflict_resolved_succeeds_with_human_admin_secret(
+    async_client: AsyncClient,
+    client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#267: both secrets together unblock the task and the audit actor
+    reflects a human, not the generic macro-agent identity."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_human_secret",
+        "human-secret",
+    )
+    task = Task(
+        id="event-task-blocked-2",
+        project_id="proj-1",
+        state=TaskState.BLOCKED,
+        proposed_by="agent-1",
+    )
+    client_db_session.add(task)
+    await client_db_session.flush()
+
+    response = await async_client.post(
+        "/events",
+        json=_make_event("conflict:resolved", task.id),
+        headers={
+            "X-Event-Bridge-Secret": "secret",
+            "X-Human-Admin-Secret": "human-secret",
+        },
+    )
+
+    assert response.status_code == 204
+    await client_db_session.refresh(task)
+    assert task.state == TaskState.RUNNING
+
+    audits = await client_db_session.execute(
+        select(AuditLog).where(AuditLog.task_id == task.id)
+    )
+    actors = {a.actor for a in audits.scalars().all()}
+    assert "human:event-bridge" in actors
+    assert "macro-agent" not in actors
+
+
+async def test_post_routine_event_does_not_require_human_admin_secret(
+    async_client: AsyncClient,
+    client_db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#267: the human-secret requirement is scoped to conflict:resolved only."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_secret",
+        "secret",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.event_bridge_human_secret",
+        "human-secret",
+    )
+    task = Task(
+        id="event-task-routine-1",
+        project_id="proj-1",
+        state=TaskState.RUNNING,
+        proposed_by="agent-1",
+    )
+    client_db_session.add(task)
+    await client_db_session.flush()
+
+    response = await async_client.post(
+        "/events",
+        json=_make_event("landing:completed", task.id),
+        headers={"X-Event-Bridge-Secret": "secret"},
+    )
+
+    assert response.status_code == 204
+    await client_db_session.refresh(task)
     assert task.state == TaskState.AGENT_REVIEW
 
 

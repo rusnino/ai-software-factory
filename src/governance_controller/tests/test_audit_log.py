@@ -430,6 +430,93 @@ class TestAuditLogPostgresDDL:
         finally:
             await check_engine.dispose()
 
+    async def test_postgres_run_migrations_backfills_missing_execution_status_error(
+        self,
+    ) -> None:
+        """#268: run_migrations() must add execution.status_error if missing.
+
+        Simulates an already-deployed Postgres instance whose ``execution``
+        table predates the ``status_error`` column: create the full schema via
+        ``create_all()`` (which includes the column), then drop it to recreate
+        the pre-existing-deployment shape, run the real ``run_migrations()``,
+        and confirm the column reappears and a subsequent ``Execution`` INSERT
+        (the core execution-trigger path, not just status_error writes) no
+        longer raises ``UndefinedColumnError``.
+        """
+        import asyncio
+
+        from sqlalchemy import text
+
+        from governance_controller.db import _engines_by_loop, run_migrations
+        from governance_controller.db import engine as db_engine
+        from governance_controller.models.execution import Execution
+        from governance_controller.models.task import Task
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        setup_engine = create_async_engine(url, echo=False, future=True)
+        try:
+            async with setup_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.drop_all)
+                await conn.run_sync(SQLModel.metadata.create_all)
+                # Simulate a pre-existing deployment: the column existed in
+                # today's model but not in this (older) database.
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN status_error")
+                )
+        finally:
+            await setup_engine.dispose()
+
+        original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
+        migration_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        try:
+            db_module = __import__("governance_controller.db", fromlist=["engine"])
+            db_module.engine = migration_engine
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
+            await run_migrations()
+
+            # Idempotency: running it again with the column already present
+            # must not error either.
+            await run_migrations()
+        finally:
+            db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
+            await migration_engine.dispose()
+
+        # The real regression check: a fresh Execution insert (the actual
+        # production code path #268 was breaking) must succeed.
+        verify_engine = create_async_engine(url, echo=False, future=True)
+        try:
+            async with AsyncSession(verify_engine) as session:
+                task = Task(
+                    id="task-status-error-migration",
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                )
+                session.add(task)
+                await session.flush()
+                execution = Execution(
+                    id="exec-status-error-migration",
+                    task_id=task.id,
+                    state=TaskState.READY,
+                    status_error="ConnectionRefusedError",
+                )
+                session.add(execution)
+                await session.commit()
+
+                result = await session.execute(
+                    text(
+                        "SELECT status_error FROM execution WHERE id = "
+                        "'exec-status-error-migration'"
+                    )
+                )
+                assert result.scalar_one() == "ConnectionRefusedError"
+        finally:
+            await verify_engine.dispose()
+
     async def test_postgres_trigger_blocks_update_and_delete(
         self, isolated_db: tuple[AsyncEngine, sessionmaker]
     ) -> None:

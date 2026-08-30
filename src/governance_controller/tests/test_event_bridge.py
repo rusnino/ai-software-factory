@@ -932,3 +932,204 @@ class TestEventBridgeTransitions:
             select(ProcessedEvent).where(ProcessedEvent.task_id == task.id)
         )
         assert processed.scalar_one_or_none() is None
+
+
+class TestEventBridgeCASFailureAudit:
+    """#269: a lost outer CAS in handle() must leave a durable audit trail."""
+
+    async def test_lost_cas_writes_concurrent_modification_audit(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A genuinely concurrent transition that lands first must not leave
+        the loser's rejected attempt with zero audit trace.
+
+        Session B commits RUNNING -> BLOCKED for real via a distinct event
+        (``conflict:created``) first. Session A, which loaded the task before
+        B's commit, then attempts ``stream:abandoned`` (RUNNING -> FAILED):
+        its CAS genuinely fails against the now-BLOCKED/bumped-version row.
+        """
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task = Task(
+                id="task-cas-audit-269",
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+            )
+            seed.add(task)
+            await seed.commit()
+
+        session_a = local_session()
+        task_a = await session_a.scalar(
+            select(Task).where(Task.id == "task-cas-audit-269")
+        )
+        assert task_a is not None
+
+        async with local_session() as session_b:
+            task_b = await session_b.scalar(
+                select(Task).where(Task.id == "task-cas-audit-269")
+            )
+            assert task_b is not None
+            await EventBridge.handle(
+                session_b,
+                _make_event("conflict:created", task_b.id, event_id="evt-b-269"),
+            )
+            await session_b.commit()
+
+        try:
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await EventBridge.handle(
+                    session_a,
+                    _make_event(
+                        "stream:abandoned", task_a.id, event_id="evt-a-269"
+                    ),
+                )
+        finally:
+            await session_a.close()
+
+        async with local_session() as check:
+            task_row = await check.scalar(
+                select(Task).where(Task.id == "task-cas-audit-269")
+            )
+            assert task_row is not None
+            assert task_row.state == TaskState.BLOCKED  # the real winner
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == "task-cas-audit-269")
+            )
+            events = [a.event_type for a in audits.scalars().all()]
+            assert "concurrent_modification" in events
+
+
+class TestEventBridgeConcurrentRedelivery:
+    """#271: genuinely concurrent redelivery of the same event."""
+
+    async def test_racing_delivery_does_not_rerun_verification_or_delete_marker(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A racer that wins the in-progress marker insert first must make
+        the other delivery short-circuit, not re-run verification.
+
+        Racer B's full ``EventBridge.handle()`` call (a separate session) is
+        injected to run BEFORE racer A's own marker-insert attempt — i.e.
+        exactly the window the original #271 bug exploited: two deliveries
+        both reach the marker-insert step for the identical event before
+        either one has committed it. Whichever inserts first (B, by
+        construction here) must run verification once; the other (A) must
+        see ``won_marker=False`` and return without re-verifying or deleting
+        B's marker.
+        """
+        from unittest.mock import patch
+
+        from governance_controller.models.processed_event import ProcessedEvent
+        from governance_controller.services.verification_service import (
+            VerificationService,
+        )
+
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task = Task(
+                id="task-redelivery-271",
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+                task_contract_json=TaskContract(
+                    task_id="task-redelivery-271",
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    objective="race redelivery",
+                    acceptance=["ok"],
+                    completion_contract=CompletionContract(
+                        task_id="task-redelivery-271",
+                        required=[Check(type="true", command="true")],
+                        forbidden_path_check=ForbiddenPathCheck(paths=[]),
+                        scope_check=ScopeCheck(
+                            description="no constraints",
+                            allowed_paths=[],
+                            forbidden_paths=[],
+                        ),
+                    ),
+                ).model_dump(mode="json"),
+            )
+            seed.add(task)
+            await seed.commit()
+
+        verify_call_count = 0
+        original_verify_and_advance = VerificationService.verify_and_advance
+        original_record_processed_event = EventBridge._record_processed_event
+        racer_injected = False
+
+        async def _counting_verify_and_advance(cls, db, task, contract, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal verify_call_count
+            verify_call_count += 1
+            return await original_verify_and_advance(db, task, contract, **kwargs)
+
+        async def _inject_racer_before_first_insert(db, **kwargs):  # type: ignore[no-untyped-def]
+            nonlocal racer_injected
+            if not racer_injected:
+                racer_injected = True
+                # Racer B's request arrives and reaches (and wins) the exact
+                # same marker-insert step before A's own attempt below runs.
+                async with local_session() as racer_session:
+                    await EventBridge.handle(
+                        racer_session,
+                        _make_event(
+                            "landing:completed",
+                            "task-redelivery-271",
+                            event_id="evt-race-271",
+                        ),
+                    )
+                    await racer_session.commit()
+            return await original_record_processed_event(db, **kwargs)
+
+        with (
+            patch.object(
+                VerificationService,
+                "verify_and_advance",
+                classmethod(_counting_verify_and_advance),
+            ),
+            patch.object(
+                EventBridge,
+                "_record_processed_event",
+                staticmethod(_inject_racer_before_first_insert),
+            ),
+        ):
+            async with local_session() as session_a:
+                task_a = await session_a.scalar(
+                    select(Task).where(Task.id == "task-redelivery-271")
+                )
+                assert task_a is not None
+                await EventBridge.handle(
+                    session_a,
+                    _make_event(
+                        "landing:completed",
+                        task_a.id,
+                        event_id="evt-race-271",
+                    ),
+                )
+                await session_a.commit()
+
+        assert verify_call_count == 1, (
+            "verification must run exactly once despite the racing redelivery"
+        )
+
+        async with local_session() as check:
+            task_row = await check.scalar(
+                select(Task).where(Task.id == "task-redelivery-271")
+            )
+            assert task_row is not None
+            assert task_row.state == TaskState.HUMAN_REVIEW
+
+            markers = await check.execute(
+                select(ProcessedEvent).where(
+                    ProcessedEvent.task_id == "task-redelivery-271"
+                )
+            )
+            marker_rows = markers.scalars().all()
+            assert len(marker_rows) == 1, (
+                "the losing delivery must not have deleted the winner's marker"
+            )

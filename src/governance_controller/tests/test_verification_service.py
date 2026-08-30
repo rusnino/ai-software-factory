@@ -818,3 +818,104 @@ class TestVerificationConcurrency:
             )
             events = {a.event_type for a in audits.scalars().all()}
             assert "concurrent_modification" in events
+
+    async def test_start_retry_execution_failed_cas_loss_does_not_stomp_execution(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#266: a lost retry-failure CAS must not leave a stale Execution write.
+
+        ``_start_retry_execution`` commits the new RUNNING ``Execution`` row and
+        releases the task row lock before the outbound ``executor.start()``
+        call. If that call raises, the exception handler used to set
+        ``execution.state = FAILED`` and commit it *before* attempting its own
+        CAS to FAILED — so a lost CAS (because a concurrent session, e.g. the
+        stuck-execution poller, already moved the task elsewhere) still left a
+        stale FAILED write on the Execution row. The fix reorders this so the
+        Execution write only happens after the CAS wins. Here the concurrent
+        winner is a real, separate session that commits BLOCKED first.
+        """
+        from unittest.mock import AsyncMock
+
+        from governance_controller.adapters.macro_agent.executor import (
+            MacroAgentExecutor,
+        )
+        from governance_controller.constants import TaskState
+        from governance_controller.models.execution import Execution
+        from governance_controller.services.state_machine import StateMachine
+
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task = Task(
+                id="task-retry-race-266",
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+                execution_attempts=1,
+            )
+            seed.add(task)
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id="task-retry-race-266",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="race retry start",
+            acceptance=["ok"],
+        )
+
+        async def _race_then_fail(*args, **kwargs):  # type: ignore[no-untyped-def]
+            # A genuinely separate session/transaction wins a real CAS to
+            # BLOCKED while the macro-agent /runs call is "in flight" — only
+            # possible because _start_retry_execution already committed and
+            # released the task row lock before this call.
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == "task-retry-race-266")
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.BLOCKED
+                )
+                assert won is True, "setup error: racer CAS should win"
+                await racer.commit()
+            raise RuntimeError("macro-agent unreachable")
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(side_effect=_race_then_fail)  # type: ignore[method-assign]
+
+        async with local_session() as db:
+            task = await db.scalar(
+                select(Task).where(Task.id == "task-retry-race-266")
+            )
+            assert task is not None
+            service = VerificationService(executor=fake_executor)
+
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await service._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        async with local_session() as check:
+            refreshed_task = await check.scalar(
+                select(Task).where(Task.id == "task-retry-race-266")
+            )
+            assert refreshed_task is not None
+            # The racer's CAS is the one that genuinely won.
+            assert refreshed_task.state == TaskState.BLOCKED
+
+            executions = await check.execute(
+                select(Execution).where(
+                    Execution.task_id == "task-retry-race-266"
+                )
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            # Must NOT be stomped to FAILED by the loser's stale pre-CAS write.
+            assert rows[0].state == TaskState.RUNNING
+            assert rows[0].ended_at is None
