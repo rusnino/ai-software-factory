@@ -4,36 +4,53 @@
 
 **Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
 it has been declared prematurely at least three separate times, each later found wrong by
-independent live verification.** As of 2026-08-30, ten review rounds have run. Rounds 1-7
-(`#154`-`#249`) landed and hold up on re-verification. Round 8 found two issues that were, at the
-time, the most severe of any round: a Controller crash at either of two specific points in the
-approval/verification pipeline permanently strands a task with NO automatic recovery path
-(`#253`/`#254`). Round 9 verified opencode's `#253`/`#254` fix and found the fix code itself reused
-this project's single most recurring defect class — "blind write committed before a CAS check,
-regardless of the CAS outcome" (`REQUIREMENTS.md` `RISK-16`) — introducing two MORE CRITICALs
-(`#262`, `#263`), plus reopened `#255` (HIGH) and five MEDIUM gaps (`#259`-`#261`, `#264`-`#265`).
-**Round 10 verified ALL SEVEN of Round 9's fixes are genuinely closed via live races and a real
-Docker build — but found the exact same `RISK-16` pattern a THIRD time, in code no prior round had
-looked at: `#266` (CRITICAL — `VerificationService._start_retry_execution` flushes
-`Execution.state = FAILED` before its own `Task`-level CAS to `FAILED`, and commits regardless of
-whether that CAS wins, live-reproduced with two real concurrent Postgres sessions leaving
-`Task.state == BLOCKED` while `Execution.state == FAILED`). Round 10 also found `#267` (HIGH — the
-ONLY documented path to unblock a `BLOCKED` task, the `conflict:resolved` event, uses the exact same
-flat, unscoped shared secret as every routine automated macro-agent event, with no human/actor/role/
-project check at all — live-reproduced unblocking an arbitrary task via a bare `curl` call), `#268`
-(HIGH — `run_migrations()` never `ALTER`s the existing `execution` table for the new `status_error`
-column `#261`'s fix added, so every execution-trigger INSERT breaks with `UndefinedColumnError` on
-any already-deployed Postgres instance until manually migrated), plus `#269` (MEDIUM — the one CAS
-call site in `EventBridge.handle()` writes zero audit entries on a lost race, unlike every sibling
-CAS-failure branch elsewhere) and `#270` (LOW — dead, currently-harmless duplicated code left inside
-`_mark_blocked` by Round 9's own fix commit).** **Every round that tried a genuinely new angle —
-Phase 1 core in round 5, the read side in round 6, cross-tenancy in round 7, process-crash resilience
-in round 8, adversarial review of round 8's OWN fix code in round 9, a systematic sweep of every
-OTHER CAS call site in round 10 — found something no prior round's angles could have found. Two
-consecutive rounds now have found a fresh instance of the exact same `RISK-16` defect class in code
-the immediately preceding round's own fix touched or introduced — this is now this project's most
-reliable predictor of where the next bug will be.** Query the live issue list before trusting
-anything else in this file:
+independent live verification.** As of 2026-08-30, eleven review rounds have run. Rounds 1-8
+(`#154`-`#258`) landed and hold up on re-verification. Round 9 found opencode's `#253`/`#254` fix
+reused this project's single most recurring defect class — "blind write committed before a CAS
+check, regardless of the CAS outcome" (`REQUIREMENTS.md` `RISK-16`) — introducing `#262`/`#263`
+(both CRITICAL). Round 10 verified those genuinely closed but found the exact same `RISK-16` pattern
+a THIRD time (`#266`, in code no prior round had looked at) via a systematic sweep of every other CAS
+call site, plus a genuinely new angle — event-level authorization — immediately found `#267` (HIGH,
+the only path to unblock a `BLOCKED` task used the same flat secret as routine automated traffic).
+**Round 11 verified ALL FIVE of Round 10's fixes (`#266`-`#270`) are genuinely closed via live races,
+a real migration-simulation, and a real HTTP/two-secret test — the second consecutive round with zero
+reopens. But a genuinely new angle — real concurrent HTTP-level event delivery, never tested before
+this round despite `POST /approvals` having been raced this way in round 10 — found this project's
+most severe concurrency bug yet: `#271` (CRITICAL). Genuinely concurrent redelivery of the SAME
+`landing:completed` event (an expected, documented traffic pattern — macro-agent runtimes retry on
+timeout) runs the real verification subprocess MULTIPLE TIMES (10 of 12 concurrent requests actually
+executed it in one live reproduction) instead of the intended once, and afterward the `#240` dedup
+marker that was supposed to prevent exactly this is left DELETED entirely — not just skipped, gone —
+so even a later legitimate sequential redelivery of the same event is no longer deduplicated either.
+Three compounding bugs cause this: `EventBridge.handle()`'s CAS guard is skipped entirely once the
+task has already reached the target state (so late-arriving racers never even attempt a CAS), the
+dedup marker's insert result is never checked (an `ON CONFLICT DO NOTHING` silently no-ops instead of
+signalling "you lost"), and the failure-path's "did a transition happen" check reads a stale
+identity-mapped `Task` object via `db.get()` instead of the true committed state, so every losing
+racer wrongly concludes no transition happened and deletes the winner's legitimately-committed
+marker.** Round 11 also found `#272` (MEDIUM — the `#267` fix's new required
+`GC_EVENT_BRIDGE_HUMAN_SECRET` is undocumented anywhere in the repo, including the project's own
+`docker-compose.yml`, so an existing deployment upgrading in place silently loses its only documented
+`BLOCKED`-recovery path with zero warning) and `#273` (LOW — a misleadingly-named OPA test that
+actually asserts fail-closed behavior while its name claims fail-open). **Separately, this round also
+diagnosed and fixed a real CI infrastructure bug: the `governance-controller-postgres` CI job had
+failed on EVERY SINGLE RUN since the workflow was added (13 consecutive failures, 2026-08-26 through
+2026-08-30) — `run_migrations()`'s `get_engine()` is keyed by the current event loop, not by the
+`db.engine` attribute two tests were monkeypatching, so those tests silently fell back to
+`settings.database_url`'s hardcoded default credentials instead of `GC_TEST_DATABASE_URL`; this only
+worked locally because local dev Postgres conventionally uses the same default credentials, while
+CI's ephemeral Postgres service (`controller`/`controller`/`controller`) does not. Fixed by seeding
+the per-loop engine cache directly, matching a pattern a third test in the same file already used
+correctly; verified against a container replicating CI's exact image/credentials. CI is now green for
+the first time in this project's history.** **Every round that tried a genuinely new angle — Phase 1
+core in round 5, the read side in round 6, cross-tenancy in round 7, process-crash resilience in
+round 8, adversarial review of round 8's own fix in round 9, a systematic CAS sweep in round 10, real
+concurrent event-delivery racing in round 11 — found something no prior round's angles could have
+found. Concurrency testing specifically has now found a live bug in EVERY round it's been tried with
+a genuinely new target (approval racing in round 10 was clean, but event racing in round 11 was not)
+— any endpoint that hasn't yet been raced with real concurrent HTTP load should be treated as
+unverified, not assumed safe by analogy.** Query the live issue list before trusting anything else in
+this file:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -41,15 +58,13 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **5 open issues (1 CRITICAL, 2 HIGH, 1 MEDIUM, 1 LOW)** — `#266` (CRITICAL — the
-third live instance of the `RISK-16` blind-write-before-CAS class, this time in
-`_start_retry_execution`'s failure handler), `#267` (HIGH — `conflict:resolved` unblock path has no
-human-scoped auth), `#268` (HIGH — missing `execution.status_error` migration breaks execution
-INSERTs on upgrade), `#269` (MEDIUM — `EventBridge.handle()`'s CAS-failure branch has zero audit
-trail), `#270` (LOW — dead trailing code in `_mark_blocked`). Every prior round's findings
-(`#151`-`#265`) are closed and independently re-verified — this is the first round since round 6
-where every finding from the immediately preceding round was confirmed genuinely fixed with none
-reopened.
+As of this writing: **3 open issues (1 CRITICAL, 0 HIGH, 1 MEDIUM, 1 LOW)** — `#271` (CRITICAL —
+genuinely concurrent `landing:completed` redelivery runs verification multiple times and destroys the
+`#240` dedup marker), `#272` (MEDIUM — the new `#267` secret is undocumented, silently breaking
+`BLOCKED`-recovery on upgrade), `#273` (LOW — misleadingly-named OPA fail-closed test). This is the
+first round in this project's history with zero open HIGH-severity issues. Every prior round's
+findings (`#151`-`#270`) are closed and independently re-verified — the second consecutive round with
+none reopened.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -72,16 +87,16 @@ passes and receives a minimized, optionally bearer-token-authenticated input doc
 
 Test status (2026-08-30): **414 passed / 5 skipped** on SQLite, **417 passed / 2 skipped** on
 PostgreSQL, `ruff` clean, `mypy governance_controller` clean (68 source files); `macro_agent_service`
-tests still pass, `ruff`/`mypy` clean. Round 10 made no production-code changes (pure review round),
-so these numbers are unchanged from Round 9. Green tests are not evidence of correctness in this
-project — re-read the "Current State" section above before trusting this number to mean anything
-beyond "nothing crashes." None of round 8's, 9's, or 10's findings (`#253`-`#270`) — including all
-five CRITICALs found across the three rounds — were caught by this suite; round 8's were found by
-killing a live process and inspecting real Postgres state afterward, round 9's and round 10's by
-adversarial code review of the immediately preceding round's own fix followed by live reproduction
-of the resulting race with real concurrent Postgres sessions. A real CI workflow exists
-(`.github/workflows/ci.yml`, added by `#223`), but it runs this same suite, so it would not have
-caught any of these either.
+tests still pass, `ruff`/`mypy` clean. **CI is green for the first time in this project's history**
+(`.github/workflows/ci.yml`, added by `#223`, had failed on all 13 runs since 2026-08-26 until this
+round's CI-infra fix — see "Current State" above). Green tests are still not evidence of correctness
+in this project beyond "nothing crashes" — none of round 8's, 9's, 10's, or 11's findings
+(`#253`-`#273`), including all five CRITICALs found across the four rounds, were caught by this
+suite; they required killing a live process, adversarially re-reviewing the immediately preceding
+round's own fix, or throwing genuinely concurrent real HTTP load at a live server backed by real
+Postgres. `#271` specifically (Round 11's CRITICAL) is a case where the suite's own concurrency tests
+would not have caught it even in principle — the bug only manifests under genuinely overlapping
+requests, which the existing test suite does not exercise for this endpoint.
 
 Implemented components:
 
@@ -124,7 +139,7 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Ten review
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Eleven review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -137,39 +152,43 @@ schema fields, `#250`-`#258`), Round 9 (verification of round 8's fixes, adversa
 failure resilience, `#259`-`#265`), Round 10 (verification of round 9's fixes, a systematic sweep of
 every OTHER `StateMachine.atomic_transition` call site for the `RISK-16` pattern, a dedicated audit-
 log integrity/completeness review, an event-authorization/BLOCKED-unblock-spoofing review, and real
-concurrent-approval racing against a live server, `#266`-`#270`). **5 issues remain open, including
-1 CRITICAL.** Round 10 verified all seven of round 9's fixes are genuinely closed — the first time
-since round 6 that an entire round's findings held up with none reopened — but the systematic
-`atomic_transition` sweep found a THIRD live instance of the exact `RISK-16` "blind write committed
-regardless of CAS outcome" pattern, this time in `VerificationService._start_retry_execution`
-(`#266`), in code no prior round had examined. **Two consecutive rounds have now each found a fresh
-instance of this same defect class in code the immediately preceding round's own fix touched or
-introduced (`#262`/`#263` in round 9's review of round 8's fix; `#266` in round 10's systematic
-sweep, itself prompted by round 9's own findings) — this pattern is now this project's most reliable
-predictor of where the next bug will be, and the systematic sweep approach round 10 used (checking
-every OTHER call site of a helper once a bug is found at one call site) is now the recommended
-default for any future `RISK-16`-shaped finding, not just spot-checking the fix.** Round 10 also
-found a genuinely new angle no prior round had tried — event-level authorization — and it paid off
-immediately: `#267` (HIGH), the only documented path to unblock a `BLOCKED` task uses the same flat
-credential as routine automated traffic, with no human-scoping at all. **Do not treat "Phase 2
-review" as bounded to Phase 2 code, to any fixed set of angles, or to code the current round didn't
-itself touch** — every round that tried a genuinely new angle found something the previous rounds'
-angles couldn't have found. The next round should keep trying new angles.
+concurrent-approval racing against a live server, `#266`-`#270`), Round 11 (verification of round
+10's fixes, a sweep of every OTHER event type's authorization boundary, real concurrent event-
+delivery racing against a live server, and an OPA fail-behavior/secret-hygiene sweep, `#271`-`#273`;
+this round also diagnosed and fixed a real CI infrastructure bug unrelated to any filed issue — see
+"Current State" above). **3 issues remain open, 1 CRITICAL, 0 HIGH — the first round in this
+project's history with no open HIGH-severity issue.** Round 11 verified all five of round 10's fixes
+are genuinely closed — the second consecutive round with none reopened — but a genuinely new angle,
+real concurrent HTTP-level event delivery (approval racing was tested in round 10 and came back
+clean; event racing had never been tried), found this project's most severe concurrency bug to date:
+`#271` (CRITICAL), where genuinely concurrent redelivery of the same `landing:completed` event runs
+real verification multiple times and destroys the `#240` dedup marker outright. **Concurrency testing
+has now found a live bug in every round it's been pointed at a genuinely new target** (event
+delivery in round 11; the specific `_trigger_execution`/CAS races in rounds 9-10) — any endpoint that
+hasn't yet been raced with real concurrent HTTP load should be treated as unverified. `#272` (MEDIUM)
+extends round 10's own `#267` fix with a documentation-completeness gap: the new required secret is
+undocumented anywhere in the repo, silently breaking the one BLOCKED-recovery path on upgrade. **Do
+not treat "Phase 2 review" as bounded to Phase 2 code, to any fixed set of angles, or to code the
+current round didn't itself touch** — every round that tried a genuinely new angle found something
+the previous rounds' angles couldn't have found. The next round should keep trying new angles.
 
-## Immediate Next Step: Fix the New CRITICAL, Then the Two New HIGHs, Then Verify Gate-Clean
+## Immediate Next Step: Fix the Concurrent-Event-Delivery CRITICAL, Then Verify Gate-Clean
 
-Prioritize `#266` first (the third live instance of the `RISK-16` defect class — `_start_retry_execution`
-flushes `Execution.state = FAILED` before its own CAS, commits regardless of the CAS outcome; fix
-needs independent adversarial/live-race verification before being trusted, not just a green test
-suite — this is now the established pattern for this defect class). Then the 2 HIGH issues (`#267`
-conflict:resolved has no human-scoped auth; `#268` missing execution.status_error migration breaks
-execution INSERTs on upgrade) and the MEDIUM/LOW (`#269` EventBridge CAS-failure branch has zero
-audit trail; `#270` dead trailing code in `_mark_blocked`). Before declaring Phase 2 gate-clean, run
-a fresh live-reproduction review and confirm the live issue list has no open `severity:critical` or
+Prioritize `#271` first (genuinely concurrent `landing:completed` redelivery runs real verification
+multiple times and destroys the `#240` dedup marker — a live, reproducible bug under a documented,
+expected traffic pattern, not a theoretical one; the three compounding root causes are laid out in
+the issue, and any fix here needs independent adversarial/live-concurrency verification before being
+trusted, not just a green test suite, matching the pattern established for every CRITICAL found in
+rounds 9-11). Then `#272` (MEDIUM — document `GC_EVENT_BRIDGE_HUMAN_SECRET`, and ideally do a full
+pass documenting all 9 `GC_*` secret config fields, most of which are undocumented) and `#273` (LOW —
+rename the misleadingly-named OPA test). Before declaring Phase 2 gate-clean, run a fresh
+live-reproduction review and confirm the live issue list has no open `severity:critical` or
 `severity:high` issues — and try an angle no prior round has tried yet, given the track record
-above. Specifically worth trying next: `#267`'s finding (event-level authorization) suggests a
-broader angle — a dedicated review of every OTHER event type's authorization/actor-trust boundary in
-`EventBridge`, not just `conflict:resolved`, has not yet been done systematically.
+above. Specifically worth trying next: `#271`'s finding suggests systematically checking every OTHER
+endpoint that has a dedup/idempotency mechanism (approvals' `Idempotency-Key` handling was raced in
+round 10 and held; the intake adapters' duplicate-submission guards, per `#256`, have not yet been
+raced with genuinely concurrent HTTP load) for the same "CAS-guard skipped once already at target
+state" or "unchecked upsert result" shape.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
