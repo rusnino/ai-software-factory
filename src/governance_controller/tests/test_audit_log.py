@@ -280,17 +280,30 @@ class TestAuditLogPostgresDDL:
         await engine.dispose()
 
         # #129: run_migrations() must also complete without error.
+        import asyncio
+
+        from governance_controller.db import _engines_by_loop, run_migrations
         from governance_controller.db import engine as db_engine
-        from governance_controller.db import run_migrations
 
         original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
         test_engine = create_async_engine(url, echo=False, future=True)
         try:
             db_module = __import__("governance_controller.db", fromlist=["engine"])
             db_module.engine = test_engine
+            # run_migrations() resolves its connection via get_engine(), which
+            # is keyed by the running event loop, not the db.engine attribute
+            # set above. Without seeding the per-loop cache too, get_engine()
+            # falls back to settings.database_url (the module's default
+            # postgres/postgres/governance credentials) instead of this
+            # test's GC_TEST_DATABASE_URL, which breaks in any environment
+            # (e.g. CI) where those two URLs use different credentials.
+            _engines_by_loop[asyncio.get_running_loop()] = test_engine
             await run_migrations()
         finally:
             db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
             await test_engine.dispose()
 
     async def test_postgres_run_migrations_backfills_legacy_auditlog(
@@ -346,10 +359,13 @@ class TestAuditLogPostgresDDL:
             await legacy_engine.dispose()
 
         # Now run the async migration path against the legacy table.
+        import asyncio
+
+        from governance_controller.db import _engines_by_loop, run_migrations
         from governance_controller.db import engine as db_engine
-        from governance_controller.db import run_migrations
 
         original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
         migration_engine = create_async_engine(
             url,
             echo=False,
@@ -359,9 +375,16 @@ class TestAuditLogPostgresDDL:
         try:
             db_module = __import__("governance_controller.db", fromlist=["engine"])
             db_module.engine = migration_engine
+            # See the sibling test above: get_engine() is keyed by the
+            # running event loop, not db.engine, so the per-loop cache must
+            # be seeded too or run_migrations() silently falls back to
+            # settings.database_url's default credentials.
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
             await run_migrations()
         finally:
             db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
             await migration_engine.dispose()
 
         # Verify columns were added, legacy row backfilled, and the trigger
