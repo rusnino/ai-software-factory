@@ -470,7 +470,7 @@ class ApprovalService:
         if settings.plane_base_url:
             try:
                 dag = await OpentasksMaterializer().materialize(
-                    root_plane_task_id=task.id,
+                    root_plane_task_id=task.plane_issue_id or task.id,
                     project_id=task.project_id,
                 )
                 opentasks_dag = dag.model_dump(mode="json")

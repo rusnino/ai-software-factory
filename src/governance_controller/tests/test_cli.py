@@ -257,6 +257,63 @@ class TestCliReconcile:
             )
         ]
 
+    def test_reconcile_refreshes_plane_id_after_issue_retry(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#282: retry-created Plane IDs must reach the same reconcile pass."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        row = SimpleNamespace(
+            id="controller-task-1",
+            state=TaskState.RUNNING,
+            project_id="project-a",
+            plane_issue_id=None,
+            task_contract_json={},
+        )
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = [row]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=query_result)
+        db.get = AsyncMock(return_value=row)
+        db.flush = AsyncMock()
+
+        @asynccontextmanager
+        async def fake_db_session():
+            yield db
+
+        projection = MagicMock()
+        projection.ensure_plane_issue = AsyncMock(
+            return_value={"id": "plane-created-uuid"}
+        )
+        report = SimpleNamespace(checked=1, divergences=[])
+        reconciliation = MagicMock()
+        reconciliation.reconcile = AsyncMock(return_value=report)
+        with (
+            patch("governance_controller.cli.get_db_session", fake_db_session),
+            patch(
+                "governance_controller.services.plane_projection.PlaneProjectionService",
+                return_value=projection,
+            ),
+            patch(
+                "governance_controller.cli.ReconciliationService",
+                return_value=reconciliation,
+            ),
+        ):
+            result = runner.invoke(app, ["reconcile", "project-a"])
+
+        assert result.exit_code == 0, result.output
+        assert reconciliation.reconcile.await_args.kwargs["controller_tasks"] == [
+            (
+                "controller-task-1",
+                TaskState.RUNNING,
+                "project-a",
+                "plane-created-uuid",
+            )
+        ]
+
     async def test_reconcile_filters_tasks_by_project_id(
         self,
         db_session,

@@ -111,16 +111,6 @@ def reconcile(
                 select(Task).where(Task.project_id == project_id)  # type: ignore[arg-type]
             )
             rows = result.scalars().all()
-            controller_tasks = [
-                (
-                    str(row.id),
-                    row.state,
-                    row.project_id or project_id,
-                    row.plane_issue_id,
-                )
-                for row in rows
-            ]
-
             # Retry Plane issue creation for tasks that missed it at creation
             # time (#215). This keeps plane_issue_id in sync without blocking
             # the original task creation.
@@ -162,6 +152,18 @@ def reconcile(
                         f"[retry] plane issue creation failed for {task.id}: {exc}",
                         err=True,
                     )
+
+            # Build the snapshot after retries so newly captured Plane issue IDs
+            # are used by this reconciliation pass (#282).
+            controller_tasks = [
+                (
+                    str(row.id),
+                    row.state,
+                    row.project_id or project_id,
+                    row.plane_issue_id,
+                )
+                for row in rows
+            ]
 
             service = ReconciliationService(db=db)
             report = await service.reconcile(

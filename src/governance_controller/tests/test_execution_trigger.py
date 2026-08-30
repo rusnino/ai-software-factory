@@ -10,6 +10,7 @@ from governance_controller.adapters.macro_agent.executor import MacroAgentExecut
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
+from governance_controller.schemas.opentasks import OpentasksDAG
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
@@ -57,6 +58,51 @@ def _make_profile() -> ProjectProfile:
 
 
 class TestExecutionTrigger:
+    async def test_execution_materialization_uses_plane_issue_id(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#282: approved execution materializes from Plane's issue UUID."""
+        from governance_controller import config
+        from governance_controller.services import approval_service as module
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        materializer = AsyncMock()
+        materializer.materialize.return_value = OpentasksDAG(project_id="proj-1")
+        monkeypatch.setattr(
+            module,
+            "OpentasksMaterializer",
+            lambda: materializer,
+        )
+        projection = AsyncMock()
+        projection.update_state.return_value = {}
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-plane-id"}
+
+        service = ApprovalService(
+            db=db_session,
+            executor=executor,
+            plane_projection=projection,
+        )
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED, "controller-task")
+        task.plane_issue_id = "plane-issue-uuid"
+
+        await service.approve(
+            task=task,
+            contract=_make_contract(),
+            profile=_make_profile(),
+            approval_type=ApprovalType.EXECUTION,
+            source="cli",
+            actor="admin",
+            idempotency_key="key-plane-id",
+        )
+
+        materializer.materialize.assert_awaited_once_with(
+            root_plane_task_id="plane-issue-uuid",
+            project_id="proj-1",
+        )
+
     async def test_execution_approval_starts_macro_agent_and_creates_execution(
         self,
         db_session: AsyncSession,
