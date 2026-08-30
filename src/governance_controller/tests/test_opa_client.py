@@ -209,7 +209,7 @@ async def test_backend_runs_embedded_before_opa(
     assert any("sed" in v.lower() for v in result.violations)
 
 
-async def test_backend_falls_back_to_embedded_when_opa_unreachable(
+async def test_backend_fails_closed_when_opa_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from governance_controller import config

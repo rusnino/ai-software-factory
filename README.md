@@ -53,6 +53,36 @@ Start with:
 4. `decisions/ADR-001-governance-controller-implementation.md`
 5. `requirements/REQUIREMENTS.md`
 
+## Configuration
+
+The Governance Controller is configured through environment variables prefixed
+with `GC_`. A reference `src/governance_controller/docker-compose.yml` sets
+local dev placeholders for the required secrets.
+
+Required in any production-like deployment:
+
+| Variable | Purpose | Fails closed if empty |
+|---|---|---|
+| `GC_DATABASE_URL` | PostgreSQL DSN | Yes |
+| `GC_CONTROLLER_API_SECRET` | Shared secret for sensitive Controller mutations (`X-Controller-Secret`) | Yes |
+| `GC_EVENT_BRIDGE_SECRET` | Shared secret for macro-agent event callbacks (`X-Event-Bridge-Secret`) | Yes |
+| `GC_EVENT_BRIDGE_HUMAN_SECRET` | Separate secret for `conflict:resolved` events that unblock a `BLOCKED` task (`X-Human-Admin-Secret`) | Yes |
+
+Optional or context-dependent:
+
+| Variable | Purpose |
+|---|---|
+| `GC_MACRO_AGENT_API_SECRET` | Secret sent from Controller to macro-agent service |
+| `GC_PLANE_WEBHOOK_SECRET` | Shared secret for Plane webhook callbacks |
+| `GC_PLANE_API_TOKEN` | Plane CE API token |
+| `GC_INTAKE_SECRET` | Shared secret for generic/email intake endpoints |
+| `GC_TELEGRAM_WEBHOOK_SECRET_TOKEN` | Telegram bot webhook secret |
+| `GC_OPA_API_TOKEN` | Bearer token for OPA (when OPA is used) |
+| `GC_ADMINS` | Comma-separated list of emails allowed to grant `EXECUTION`/`MERGE` approvals |
+
+See `src/governance_controller/governance_controller/config.py` for the full
+settings definition and defaults.
+
 ## Development Approach
 
 This project is designed to be implemented incrementally by AI agents under human supervision. See `AGENTS.md` for agent behavior rules, context order, and current implementation priority.

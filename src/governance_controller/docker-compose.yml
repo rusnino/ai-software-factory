@@ -32,7 +32,15 @@ services:
       GC_PLANE_WEBHOOK_SECRET: dev-plane-webhook-secret-change-me
       GC_INTAKE_SECRET: dev-intake-secret-change-me
       GC_EVENT_BRIDGE_SECRET: dev-event-bridge-secret-change-me
+      # Required for conflict:resolved events that unblock a BLOCKED task;
+      # without it, the only documented recovery path returns 401.
+      GC_EVENT_BRIDGE_HUMAN_SECRET: dev-event-bridge-human-secret-change-me
       GC_MACRO_AGENT_API_SECRET: dev-macro-agent-secret-change-me
+      # Optional service-to-service tokens. Leave empty when services are
+      # reached via trusted paths or local sidecars.
+      GC_OPA_API_TOKEN: ""
+      GC_TELEGRAM_WEBHOOK_SECRET_TOKEN: ""
+      GC_PLANE_API_TOKEN: ""
     ports:
       - "127.0.0.1:8000:8000"
     cap_drop:

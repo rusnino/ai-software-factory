@@ -192,11 +192,13 @@ class EventBridge:
             await db.commit()
 
             # Write a durable "verification in progress" marker *before* the
-            # slow verification runs. A duplicate delivery inside the window now
-            # fails the uniqueness check (HTTP 409 from the caller) instead of
-            # running verification twice. We roll the marker back only if no
-            # state transition occurred, preserving the #118 retry semantics.
+            # slow verification runs. A duplicate delivery that fails the
+            # uniqueness check is short-circuited here so verification runs
+            # exactly once. We roll the marker back only if this call lost the
+            # race and no state transition occurred, preserving the #118 retry
+            # semantics.
             in_progress_key: dict[str, Any] | None = None
+            won_marker = False
             if event_id and event_timestamp:
                 in_progress_key = {
                     "task_id": task_id,
@@ -204,8 +206,14 @@ class EventBridge:
                     "event_timestamp": event_timestamp,
                     "event_id": event_id,
                 }
-                await EventBridge._record_processed_event(db, **in_progress_key)
+                won_marker = await EventBridge._record_processed_event(
+                    db, **in_progress_key
+                )
                 await db.commit()
+                if not won_marker:
+                    # Another call is processing this event right now. Return
+                    # silently and let the first call complete/audit.
+                    return
 
             verifier = verification_service or VerificationService()
             contract = TaskContract(**cast(dict[str, Any], task.task_contract_json))
@@ -232,15 +240,24 @@ class EventBridge:
                     db, task, contract, profile=profile, executor=verifier.executor
                 )
             except Exception:
-                # Re-load the task to see whether a transition occurred before
-                # the exception. If it did, this delivery is "spent" and should
-                # remain deduplicated; if not, delete the marker so the caller
-                # can retry without needing a fresh event_id.
-                fresh_task = await db.get(Task, task_id)
+                # Re-load the task with populate_existing so the identity map
+                # cannot hide a transition committed by another session. If this
+                # call did not actually win the state change, delete the marker
+                # so a legitimate sequential redelivery can retry.
+                fresh_result = await db.execute(
+                    select(Task)
+                    .where(Task.id == task_id)
+                    .execution_options(populate_existing=True)
+                )
+                fresh_task: Task | None = fresh_result.scalar_one_or_none()
                 transition_happened = (
                     fresh_task is not None and fresh_task.state != state_before_verify
                 )
-                if not transition_happened and in_progress_key is not None:
+                if (
+                    not transition_happened
+                    and won_marker
+                    and in_progress_key is not None
+                ):
                     await db.execute(
                         delete(ProcessedEvent).where(
                             ProcessedEvent.task_id == task_id,
@@ -294,12 +311,13 @@ class EventBridge:
         event_type: str,
         event_timestamp: datetime,
         event_id: str,
-    ) -> None:
+    ) -> bool:
         """Persist the processed-event key so replays are ignored.
 
-        Because callers run inside an existing transaction, an integrity error
-        would abort the entire session. We therefore use an upsert that is a
-        no-op when the key already exists. This works for PostgreSQL; SQLite
+        Returns True if a row was actually inserted, False if the key already
+        existed. Because callers run inside an existing transaction, an
+        integrity error would abort the entire session. We therefore use an
+        upsert that is a no-op when the key already exists on Postgres. SQLite
         tests use one transaction and cannot concurrently duplicate the insert
         anyway.
         """
@@ -326,7 +344,8 @@ class EventBridge:
                     ]
                 )
             )
-            await db.execute(stmt)
+            result = await db.execute(stmt)
+            return bool(getattr(result, "rowcount", None))
         else:
             # SQLite fallback: check-then-add to keep the test transaction
             # alive after a duplicate is handled by the caller.
@@ -347,3 +366,5 @@ class EventBridge:
                         event_id=event_id,
                     )
                 )
+                return True
+            return False
