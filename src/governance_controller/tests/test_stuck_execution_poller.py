@@ -6,9 +6,11 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+import pytest_httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.constants import TaskState
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
@@ -136,6 +138,41 @@ class TestStuckExecutionPoller:
         assert actions[0]["action"] == "blocked"
         state = await _fetch_task_state(db_session, task.id)
         assert state == TaskState.BLOCKED
+
+        refreshed = await db_session.scalar(
+            select(Execution).where(Execution.id == _execution.id)
+        )
+        assert refreshed is not None
+        assert refreshed.status_error == "RuntimeError"
+
+    @pytest.mark.parametrize("status_code", [404, 500])
+    async def test_status_http_error_persists_status_code(
+        self,
+        db_session: AsyncSession,
+        httpx_mock: pytest_httpx.HTTPXMock,
+        status_code: int,
+    ) -> None:
+        """#286: 404 and 500 status failures remain distinguishable."""
+        task, execution = await _running_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=300),
+            macro_agent_run_id=f"run-http-{status_code}",
+        )
+        httpx_mock.add_response(status_code=status_code)
+
+        poller = StuckExecutionPoller(
+            db_session,
+            client=MacroAgentClient(base_url="https://example.com"),
+        )
+        actions = await poller.poll()
+
+        assert len(actions) == 1
+        assert actions[0]["action"] == "blocked"
+        refreshed = await db_session.scalar(
+            select(Execution).where(Execution.id == execution.id)
+        )
+        assert refreshed is not None
+        assert refreshed.status_error == f"HTTPStatusError:{status_code}"
 
     async def test_poller_ignores_stale_latest_run_id_during_retry_window(
         self,

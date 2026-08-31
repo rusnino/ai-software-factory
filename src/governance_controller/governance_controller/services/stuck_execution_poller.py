@@ -14,6 +14,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -340,7 +341,10 @@ class StuckExecutionPoller:
             else:
                 status = await client.status(run_id)
         except Exception as exc:
-            status_error = type(exc).__name__
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_error = f"HTTPStatusError:{exc.response.status_code}"
+            else:
+                status_error = type(exc).__name__
 
         # The macro-agent service returns status under the key "status".
         run_status = status.get("status") if isinstance(status, dict) else None
