@@ -432,6 +432,67 @@ async def test_reconcile_plane_id_survives_later_rollback(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
 )
+async def test_reconcile_reports_plane_retry_failure_after_rollback(
+    runner: CliRunner,
+    isolated_db: tuple,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed retry is reported without dereferencing expired ORM state."""
+    from governance_controller import config
+
+    task_id = "cli-plane-failure-295"
+    project_id = "cli-project-failure-295"
+    _engine, local_session = isolated_db
+
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                proposed_by="test",
+                task_contract_json={},
+            )
+        )
+        await seed.commit()
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+    projection = MagicMock()
+    projection.ensure_plane_issue = AsyncMock(
+        side_effect=RuntimeError("plane transient failure")
+    )
+    reconciliation = MagicMock()
+    reconciliation.reconcile = AsyncMock(
+        return_value=SimpleNamespace(checked=1, divergences=[])
+    )
+    monkeypatch.setattr(
+        "governance_controller.services.plane_projection.PlaneProjectionService",
+        MagicMock(return_value=projection),
+    )
+    monkeypatch.setattr(
+        "governance_controller.cli.ReconciliationService",
+        MagicMock(return_value=reconciliation),
+    )
+
+    result = await asyncio.to_thread(
+        runner.invoke, app, ["reconcile", project_id]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[retry] plane issue creation failed" in result.output
+    assert "plane transient failure" in result.output
+    assert "MissingGreenlet" not in result.output
+    reconciliation.reconcile.assert_awaited_once()
+
+    async with local_session() as check:
+        task = await check.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
 async def test_reconcile_retries_plane_issue_under_task_lock(
     isolated_db: tuple,
     patched_db,

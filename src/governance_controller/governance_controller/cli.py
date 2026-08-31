@@ -159,7 +159,7 @@ def reconcile(
                 except Exception as exc:
                     await db.rollback()
                     typer.echo(
-                        f"[retry] plane issue creation failed for {task.id}: {exc}",
+                        f"[retry] plane issue creation failed for {task_id}: {exc}",
                         err=True,
                     )
 
