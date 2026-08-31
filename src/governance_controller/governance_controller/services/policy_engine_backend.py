@@ -12,9 +12,13 @@ container-escape checks, etc.) cannot be silently bypassed by enabling OPA.
 from governance_controller.adapters.opa_client import OPAClient, OPAClientError
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
+from governance_controller.harness import registry
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.policy_engine import (
+    _extract_command_paths,
+    _forbidden_path_conflicts,
+    _parse_command_to_argv,
     PolicyEngine,
     PolicyResult,
 )
@@ -126,6 +130,29 @@ class PolicyEngineBackend:
         execution = contract.execution
         security = profile.security
         git = profile.git
+        harness_roles = {
+            name: list(registry.get(name).allowed_roles) for name in registry.list()
+        }
+        parsed_commands: list[dict[str, object]] = []
+        for command in commands:
+            argv, error = _parse_command_to_argv(command)
+            parsed_commands.append(
+                {
+                    "raw": command,
+                    "argv": argv or [],
+                    "error": error or "",
+                }
+            )
+
+        touched_paths = set(contract.inputs) | set(contract.deliverables)
+        for command in commands:
+            touched_paths |= _extract_command_paths(command)
+        forbidden_paths = set(contract.forbidden_paths) | set(
+            security.forbidden_paths
+        )
+        forbidden_path_conflicts = sorted(
+            _forbidden_path_conflicts(touched_paths, list(forbidden_paths))
+        )
 
         return {
             "task_id": contract.task_id,
@@ -145,8 +172,17 @@ class PolicyEngineBackend:
                 "spawn_subagents": execution.spawn_subagents,
                 "force_push": execution.force_push,
                 "signed_commits": execution.signed_commits,
+                "timeout_minutes": execution.timeout_minutes,
+                "max_retries": execution.max_retries,
             },
             "commands": commands,
+            "parsed_commands": parsed_commands,
+            "forbidden_path_conflicts": forbidden_path_conflicts,
+            "harness_roles": harness_roles,
+            "profile_execution": {
+                "timeout_minutes": profile.execution.timeout_minutes,
+                "max_retries": profile.execution.max_retries,
+            },
             "forbidden_paths": list(contract.forbidden_paths),
             "allowed_harnesses": allowed_harnesses,
             "security": {
@@ -162,4 +198,3 @@ class PolicyEngineBackend:
                 "signed_commits": git.signed_commits,
             },
         }
-

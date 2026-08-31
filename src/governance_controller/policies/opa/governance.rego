@@ -34,6 +34,15 @@ _violation contains _forbidden_path_violation[_]
 _violation contains _network_tool_violation[_]
 _violation contains _approval_chain_violation[_]
 _violation contains _approval_type_violation[_]
+_violation contains _command_allowlist_violation[_]
+_violation contains _privilege_violation[_]
+_violation contains _control_character_violation[_]
+_violation contains _command_execution_violation[_]
+_violation contains _docker_socket_violation[_]
+_violation contains _harness_role_violation[_]
+_violation contains _resource_cap_violation[_]
+_violation contains _command_parse_violation[_]
+_violation contains _path_conflict_violation[_]
 
 # ---------------------------------------------------------------------------
 # Input accessors (defensive defaults for missing keys)
@@ -43,6 +52,8 @@ _execution := object.get(input, "execution", {})
 _security := object.get(input, "security", {})
 _git := object.get(input, "git", {})
 _approval := object.get(input, "approval", {})
+_profile_execution := object.get(input, "profile_execution", {})
+_harness_roles := object.get(input, "harness_roles", {})
 
 # ---------------------------------------------------------------------------
 # Harness allowlist
@@ -65,14 +76,35 @@ _harness_violation contains msg if {
 # Wrapper / interpreter commands
 # ---------------------------------------------------------------------------
 
-_forbidden_wrappers := {"bash", "sh", "dash", "zsh", "python", "python3", "node", "ruby", "perl", "php", "env", "xargs", "nice", "nohup", "ssh", "timeout", "script"}
+_forbidden_wrappers := {"bash", "sh", "dash", "zsh", "python", "python3", "node", "ruby", "perl", "php", "lua", "env", "xargs", "nice", "nohup", "ssh", "timeout", "script", "command", "exec", "eval", "busybox", "install"}
 
 _wrapper_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
+    argv := _command_argv(cmd)
     count(argv) > 0
-    argv[0] in _forbidden_wrappers
-    msg := sprintf("Forbidden wrapper/interpreter command: %s", [argv[0]])
+    _base_command(argv[0]) in _forbidden_wrappers
+    msg := sprintf("Forbidden wrapper/interpreter command: %s", [_base_command(argv[0])])
+}
+
+_allowed_commands := {
+    "brew", "cargo", "cmake", "composer", "conan", "dotnet", "gem",
+    "gradle", "make", "meson", "mix", "mvn", "npm", "npx", "nuget",
+    "pip", "pip3", "pnpm", "poetry", "raco", "rake", "sbt", "stack",
+    "uv", "yarn", "git", "hg", "svn", "pytest", "tox", "nox", "jest",
+    "mocha", "go", "gotestsum", "prove", "rspec", "unittest", "vitest",
+    "bandit", "black", "flake8", "mypy", "pylint", "pyright", "ruff",
+    "cat", "cp", "cut", "date", "diff", "echo", "find", "grep", "head",
+    "id", "ls", "mkdir", "mv", "pwd", "rm", "sed", "sort", "tail", "tar",
+    "tee", "test", "touch", "tr", "uniq", "unzip", "wc", "which", "whoami",
+    "zip",
+}
+
+_command_allowlist_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    not _base_command(argv[0]) in _allowed_commands
+    msg := sprintf("Command argv[0] is not in the verification allowlist: %s", [cmd])
 }
 
 # ---------------------------------------------------------------------------
@@ -88,14 +120,28 @@ _metachar_violation contains msg if {
     msg := sprintf("Command contains forbidden shell metacharacter: %q", [char])
 }
 
+_control_character_violation contains msg if {
+    some cmd in _commands
+    contains(cmd, "\u0000")
+    msg := sprintf("Command contains forbidden control character: %q", ["NUL"])
+}
+
+_privilege_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
+    _base_command(arg) in {"sudo", "su", "doas"}
+    msg := sprintf("Command contains privilege escalation: %s", [cmd])
+}
+
 _forbidden_network_tools := {"curl", "wget"}
 
 _network_tool_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
+    argv := _command_argv(cmd)
     count(argv) > 0
-    argv[0] in _forbidden_network_tools
-    msg := sprintf("Forbidden network fetch tool: %s", [argv[0]])
+    _base_command(argv[0]) in _forbidden_network_tools
+    msg := sprintf("Forbidden network fetch tool: %s", [_base_command(argv[0])])
 }
 
 # ---------------------------------------------------------------------------
@@ -104,51 +150,108 @@ _network_tool_violation contains msg if {
 
 _destructive_violation contains msg if {
     some cmd in _commands
-    lower_cmd := lower(cmd)
-    contains(lower_cmd, "rm")
-    regex.match(`.*rm\s+.*(-rf|-fr|--no-preserve-root).*`, lower_cmd)
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "rm"
+    _short_flag_present(argv, "r")
+    _short_flag_present(argv, "f")
     msg := sprintf("Destructive rm flags in command: %s", [cmd])
 }
 
 _destructive_violation contains msg if {
     some cmd in _commands
-    lower_cmd := lower(cmd)
-    contains(lower_cmd, "dd")
-    contains(lower_cmd, "of=/dev")
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "rm"
+    some arg in argv
+    arg in {"--recursive", "--force", "--no-preserve-root"}
+    msg := sprintf("Destructive rm flags in command: %s", [cmd])
+}
+
+_destructive_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
+    startswith(_base_command(arg), "mkfs")
+    msg := sprintf("Destructive filesystem command: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    regex.match(`(?i).*([^[:alnum:]]|^)([0-9]+|\$|%)?e[[:space:]].*`, cmd)
+    msg := sprintf("Sed command-execution primitive: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    regex.match(`(?i).*(^|[[:space:]])s[^[:space:]]*e([[:space:]]|$).*`, cmd)
+    msg := sprintf("Sed command-execution primitive: %s", [cmd])
+}
+
+_destructive_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "dd"
+    some input_arg in argv
+    startswith(lower(input_arg), "if=")
+    some output_arg in argv
+    startswith(lower(output_arg), "of=/")
     msg := sprintf("Dangerous dd target in command: %s", [cmd])
 }
 
 _destructive_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
-    argv[0] == "find"
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "find"
     some arg in argv
-    arg in {"-delete", "-exec", "-ok"}
+    arg in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0"}
     msg := sprintf("Dangerous find action in command: %s", [cmd])
 }
 
 _destructive_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
-    argv[0] == "tar"
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "tar"
     some arg in argv
-    arg in {"--to-command", "--remove-files"}
+    some flag in {"--to-command", "--remove-files", "--remove-file"}
+    arg == flag
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
 _destructive_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
-    argv[0] == "git"
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "tar"
     some arg in argv
-    arg in {"clean", "-f", "-x", "-d"}
-    contains(lower(cmd), "git clean")
+    some flag in {"--to-command", "--remove-files", "--remove-file"}
+    startswith(arg, sprintf("%s=", [flag]))
+    msg := sprintf("Dangerous tar option in command: %s", [cmd])
+}
+
+_destructive_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some arg in argv
+    arg == "clean"
+    _short_flag_present(argv, "f")
     msg := sprintf("Dangerous git clean flags in command: %s", [cmd])
 }
 
 _git_config_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
+    argv := _command_argv(cmd)
     argv[0] == "git"
     some arg in argv
     startswith(arg, "-c")
@@ -167,10 +270,74 @@ _container_escape_flags := {"--privileged", "--network=host", "--volume", "--mou
 
 _container_escape_violation contains msg if {
     some cmd in _commands
-    argv := _shlex_split(cmd)
+    argv := _command_argv(cmd)
     some arg in argv
-    arg in _container_escape_flags
+    some flag in _container_escape_flags
+    arg == flag
     msg := sprintf("Container escape flag in command: %s", [arg])
+}
+
+_container_escape_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
+    some flag in _container_escape_flags
+    startswith(arg, sprintf("%s=", [flag]))
+    msg := sprintf("Container escape flag in command: %s", [arg])
+}
+
+_docker_socket_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
+    contains(lower(arg), "docker.sock")
+    object.get(_security, "docker_socket", "deny") == "deny"
+    msg := sprintf("Command references docker socket: %s", [cmd])
+}
+
+_docker_socket_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
+    contains(lower(arg), "/var/run/docker.sock")
+    object.get(_security, "docker_socket", "deny") == "deny"
+    msg := sprintf("Command references docker socket: %s", [cmd])
+}
+
+# ---------------------------------------------------------------------------
+# Registered harness roles and execution resource caps
+# ---------------------------------------------------------------------------
+
+_harness_role_violation contains msg if {
+    count(_harness_roles) > 0
+    harness := object.get(_execution, "harness", "")
+    not harness in object.keys(_harness_roles)
+    msg := sprintf("Harness '%s' is not registered", [harness])
+}
+
+_harness_role_violation contains msg if {
+    count(_harness_roles) > 0
+    harness := object.get(_execution, "harness", "")
+    role := object.get(_execution, "role", "")
+    roles := object.get(_harness_roles, harness, [])
+    not role in roles
+    msg := sprintf("Role '%s' is not allowed by harness '%s'", [role, harness])
+}
+
+_resource_cap_violation contains msg if {
+    count(_profile_execution) > 0
+    requested := object.get(_execution, "timeout_minutes", 0)
+    cap := object.get(_profile_execution, "timeout_minutes", requested)
+    requested > cap
+    msg := sprintf("Task timeout_minutes (%d) exceeds project cap (%d)", [requested, cap])
+}
+
+_resource_cap_violation contains msg if {
+    count(_profile_execution) > 0
+    requested := object.get(_execution, "max_retries", 0)
+    cap := object.get(_profile_execution, "max_retries", requested)
+    requested > cap
+    msg := sprintf("Task max_retries (%d) exceeds project cap (%d)", [requested, cap])
 }
 
 # ---------------------------------------------------------------------------
@@ -215,6 +382,11 @@ _forbidden_path_violation contains msg if {
     some path in _all_forbidden_paths
     contains(cmd, path)
     msg := sprintf("Command references forbidden path: %s", [path])
+}
+
+_path_conflict_violation contains msg if {
+    some path in object.get(input, "forbidden_path_conflicts", [])
+    msg := sprintf("Task touches forbidden path: %s", [path])
 }
 
 # ---------------------------------------------------------------------------
@@ -268,6 +440,39 @@ _approval_type_violation contains msg if {
 # ---------------------------------------------------------------------------
 
 _commands := object.get(input, "commands", [])
+_parsed_commands := object.get(input, "parsed_commands", [])
+
+_base_command(token) := base if {
+    parts := split(lower(token), "/")
+    base := parts[count(parts) - 1]
+}
+
+_command_argv(cmd) := argv if {
+    some record in _parsed_commands
+    object.get(record, "raw", "") == cmd
+    argv := object.get(record, "argv", [])
+} else := _shlex_split(cmd)
+
+_command_parse_violation contains msg if {
+    some record in _parsed_commands
+    error := object.get(record, "error", "")
+    error != ""
+    msg := sprintf("Command cannot be parsed: %s", [error])
+}
+
+_command_parse_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) == 0
+    msg := sprintf("Command is empty after parsing: %s", [cmd])
+}
+
+_short_flag_present(argv, flag) if {
+    some arg in argv
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(arg, flag)
+}
 
 _shlex_split(cmd) := argv if {
     # Rego has no shlex.  This simple split is intentionally conservative:
