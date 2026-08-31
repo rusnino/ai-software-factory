@@ -10,7 +10,7 @@ import hashlib
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from governance_controller.adapters.plane_client import PlaneClient
+from governance_controller.adapters.plane_client import PlaneClient, PlaneClientError
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
 
@@ -74,6 +74,76 @@ class PlaneProjectionService:
             return None
         return PlaneClient()
 
+    async def _write_property_value(
+        self,
+        client: PlaneClient,
+        issue_id: str,
+        field_name: str,
+        property_id: str,
+        value: str | bool | None,
+        project_id: str | None,
+    ) -> None:
+        if not property_id or value is None:
+            return
+        try:
+            await client.upsert_work_item_property_value(
+                issue_id,
+                property_id,
+                value,
+                project_id=project_id,
+            )
+        except PlaneClientError as exc:
+            raise PlaneClientError(
+                f"Plane property projection failed for {field_name} "
+                f"on issue {issue_id}: {exc}"
+            ) from exc
+
+    async def _write_configured_properties(
+        self,
+        client: PlaneClient,
+        issue: dict[str, object],
+        controller_task_id: str,
+        source: str,
+        approval_required: bool,
+        opentasks_id: str | None,
+        project_id: str | None,
+    ) -> None:
+        configured = (
+            (
+                "controller_task_id",
+                settings.plane_controller_task_id_property_id,
+                controller_task_id,
+            ),
+            ("opentasks_id", settings.plane_opentasks_id_property_id, opentasks_id),
+            ("source", settings.plane_source_property_id, source),
+            (
+                "approval_required",
+                settings.plane_approval_required_property_id,
+                approval_required,
+            ),
+        )
+        if not any(
+            property_id and value is not None
+            for _, property_id, value in configured
+        ):
+            return
+
+        issue_id = issue.get("id")
+        if not isinstance(issue_id, str) or not issue_id:
+            raise PlaneClientError(
+                "Plane issue response is missing a usable id for property projection"
+            )
+
+        for field_name, property_id, value in configured:
+            await self._write_property_value(
+                client,
+                issue_id,
+                field_name,
+                property_id,
+                value,
+                project_id,
+            )
+
     async def ensure_plane_issue(
         self,
         controller_task_id: str,
@@ -98,11 +168,20 @@ class PlaneProjectionService:
             controller_task_id, project_id=project_id
         )
         if existing is not None:
+            await self._write_configured_properties(
+                client,
+                existing,
+                controller_task_id,
+                source,
+                approval_required,
+                opentasks_id,
+                project_id,
+            )
             return existing
 
         state_id = await self._resolve_state_id(state, project_id=project_id)
 
-        return await client.create_issue(
+        issue = await client.create_issue(
             name=title,
             description=description,
             state=state_id,
@@ -110,6 +189,16 @@ class PlaneProjectionService:
             external_id=controller_task_id,
             external_source="governance-controller",
         )
+        await self._write_configured_properties(
+            client,
+            issue,
+            controller_task_id,
+            source,
+            approval_required,
+            opentasks_id,
+            project_id,
+        )
+        return issue
 
     async def update_state(
         self,
@@ -131,9 +220,18 @@ class PlaneProjectionService:
         if state_id is None:
             return None
 
-        return await client.update_issue_state(
+        result = await client.update_issue_state(
             plane_issue_id, state_id, project_id=project_id
         )
+        await self._write_property_value(
+            client,
+            plane_issue_id,
+            "opentasks_id",
+            settings.plane_opentasks_id_property_id,
+            opentasks_id,
+            project_id,
+        )
+        return result
 
     async def add_comment(
         self,

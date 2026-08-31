@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     plane_api_token: str = ""
     plane_workspace_slug: str = ""
     plane_project_id: str = ""
+    # Optional Plane work-item property UUIDs. Leave empty unless the deployed
+    # Plane instance supports the documented work-item property API.
+    plane_controller_task_id_property_id: str = ""
+    plane_opentasks_id_property_id: str = ""
+    plane_source_property_id: str = ""
+    plane_approval_required_property_id: str = ""
 
     log_level: str = "info"
 

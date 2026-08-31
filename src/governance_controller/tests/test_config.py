@@ -18,6 +18,35 @@ def test_default_macro_agent_timeout_seconds() -> None:
     assert settings.macro_agent_timeout_seconds == 30.0
 
 
+def test_plane_property_ids_default_to_empty() -> None:
+    settings = Settings()
+
+    assert settings.plane_controller_task_id_property_id == ""
+    assert settings.plane_opentasks_id_property_id == ""
+    assert settings.plane_source_property_id == ""
+    assert settings.plane_approval_required_property_id == ""
+
+
+def test_plane_property_ids_read_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = {
+        "GC_PLANE_CONTROLLER_TASK_ID_PROPERTY_ID": "prop-controller-task",
+        "GC_PLANE_OPENTASKS_ID_PROPERTY_ID": "prop-opentasks",
+        "GC_PLANE_SOURCE_PROPERTY_ID": "prop-source",
+        "GC_PLANE_APPROVAL_REQUIRED_PROPERTY_ID": "prop-approval",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    settings = Settings()
+
+    assert settings.plane_controller_task_id_property_id == "prop-controller-task"
+    assert settings.plane_opentasks_id_property_id == "prop-opentasks"
+    assert settings.plane_source_property_id == "prop-source"
+    assert settings.plane_approval_required_property_id == "prop-approval"
+
+
 def test_macro_agent_timeout_seconds_can_be_overridden() -> None:
     settings = Settings(macro_agent_timeout_seconds=7.5)
     assert settings.macro_agent_timeout_seconds == 7.5

@@ -181,6 +181,31 @@ async def test_create_issue_includes_external_traceability(
     assert body["external_source"] == "governance-controller"
 
 
+async def test_upsert_work_item_property_value_request(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """Property values use Plane's documented work-item endpoint."""
+    httpx_mock.add_response(status_code=200, json={"id": "property-value-1"})
+    client = PlaneClient()
+
+    result = await client.upsert_work_item_property_value(
+        issue_id="issue-1",
+        property_id="property-1",
+        value=False,
+    )
+
+    assert result["id"] == "property-value-1"
+    request = httpx_mock.get_request()
+    assert (
+        str(request.url)
+        == "http://plane.test/api/v1/workspaces/ws/projects/proj-1/"
+        "work-items/issue-1/work-item-properties/property-1/values/"
+    )
+    import json
+
+    assert json.loads(request.content) == {"value": False}
+
+
 async def test_update_issue_state_request(
     httpx_mock, settings_override: Settings
 ) -> None:

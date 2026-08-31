@@ -236,6 +236,24 @@ class PlaneClient:
             issue_id, {"state": state_id}, project_id=project_id
         )
 
+    async def upsert_work_item_property_value(
+        self,
+        issue_id: str,
+        property_id: str,
+        value: str | bool,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a value for a documented Plane work-item property."""
+        project_id = project_id or self.project_id
+        return await self._request(
+            "POST",
+            f"/projects/{self._path_segment(project_id)}/"
+            f"work-items/{self._path_segment(issue_id)}/"
+            f"work-item-properties/{self._path_segment(property_id)}/values/",
+            project_id=project_id,
+            json={"value": value},
+        )
+
     async def list_comments(
         self,
         issue_id: str,
