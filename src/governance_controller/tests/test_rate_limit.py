@@ -133,3 +133,41 @@ async def test_rate_limit_evicts_least_recently_used_ip(
     assert response.status_code == 404
     assert len(_requests_by_ip) <= 2
     assert "ip-1" not in _requests_by_ip
+
+
+async def test_duplicate_intake_does_not_consume_global_ip_budget(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#300: duplicate intake retries must not starve a new submission."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_minute", 10)
+    monkeypatch.setattr(settings, "intake_secret", "intake-secret")
+    monkeypatch.setattr(settings, "plane_base_url", "")
+    reset_rate_limits()
+
+    def payload(source_id: str) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": source_id,
+            "sender": "alice@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    headers = {"X-Intake-Secret": "intake-secret"}
+    first = await async_client.post("/intake/idea", json=payload("idea-1"), headers=headers)
+    duplicate_one = await async_client.post(
+        "/intake/idea", json=payload("idea-1"), headers=headers
+    )
+    duplicate_two = await async_client.post(
+        "/intake/idea", json=payload("idea-1"), headers=headers
+    )
+    new_submission = await async_client.post(
+        "/intake/idea", json=payload("idea-2"), headers=headers
+    )
+
+    assert first.status_code == 200
+    assert duplicate_one.status_code == 409
+    assert duplicate_two.status_code == 409
+    assert new_submission.status_code == 200

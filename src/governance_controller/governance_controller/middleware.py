@@ -109,7 +109,25 @@ class InMemoryRateLimitMiddleware:
             return
 
         window.append(now)
-        await self.app(scope, receive, send)
+
+        async def send_response(message: dict[str, Any]) -> None:
+            """Release the admission token for duplicate intake responses."""
+            await send(message)
+            if (
+                message.get("type") == "http.response.start"
+                and message.get("status") == status.HTTP_409_CONFLICT
+                and path.startswith("/intake/")
+                and scope.get("method") == "POST"
+            ):
+                try:
+                    window.remove(now)
+                except ValueError:
+                    return
+                if not window:
+                    _requests_by_ip.pop(ip, None)
+                    _requests_last_access.pop(ip, None)
+
+        await self.app(scope, receive, send_response)
 
 
 # Re-export class name for backward compatibility with tests that may import it.
