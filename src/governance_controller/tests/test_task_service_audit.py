@@ -209,6 +209,62 @@ async def test_task_creation_persists_plane_projection_source(
     assert task.task_contract_json["approval_required"] is False
 
 
+async def test_plane_creation_crash_leaves_durable_pending_marker(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#298: a crash during Plane issue creation leaves an audit marker."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+    _engine, session_local = isolated_db
+    creator = session_local()
+
+    class _CrashedProjection:
+        async def ensure_plane_issue(self, **_kwargs: object) -> dict[str, object]:
+            raise asyncio.CancelledError
+
+    contract = TaskContract(
+        task_id="task-create-pending-298",
+        project_id="project-create-pending-298",
+        proposed_by="agent-1",
+        objective="Test the pending Plane marker",
+        acceptance=["the marker survives a crash"],
+    )
+    profile = ProjectProfile(
+        project_id="project-create-pending-298",
+        project_name="Pending marker project",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+
+    try:
+        with patch(
+            "governance_controller.services.task_service.PlaneProjectionService",
+            return_value=_CrashedProjection(),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await TaskService(creator).create(contract, profile)
+        await creator.rollback()
+
+        async with session_local() as observer:
+            rows = await observer.execute(
+                select(AuditLog).where(
+                    AuditLog.task_id == "task-create-pending-298"
+                )
+            )
+            entries = list(rows.scalars().all())
+
+        pending = [
+            entry
+            for entry in entries
+            if entry.event_type == "plane_issue_creation_pending"
+        ]
+        assert len(pending) == 1
+        assert pending[0].payload["project_id"] == "project-create-pending-298"
+    finally:
+        await creator.close()
+
+
 @pytest.mark.skipif(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",

@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from governance_controller.cli import app, reconcile
 from governance_controller.constants import TaskState
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
 
 
@@ -536,6 +537,56 @@ async def test_reconcile_plane_id_survives_later_rollback(
         task = await check.scalar(select(Task).where(Task.id == task_id))
         assert task is not None
         assert task.plane_issue_id == "plane-recovered-288"
+
+
+async def test_reconcile_crash_leaves_durable_pending_marker(
+    isolated_db: tuple,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#298: a crash during CLI Plane retry leaves an audit marker."""
+    from governance_controller import config
+
+    task_id = "cli-plane-pending-298"
+    project_id = "cli-project-pending-298"
+    _engine, local_session = isolated_db
+
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                proposed_by="test",
+                task_contract_json={"objective": "Recover this issue"},
+            )
+        )
+        await seed.commit()
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+
+    class _CrashedProjection:
+        async def ensure_plane_issue(self, **_kwargs: object) -> dict[str, object]:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "governance_controller.services.plane_projection.PlaneProjectionService",
+        lambda: _CrashedProjection(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.to_thread(reconcile, project_id)
+
+    async with local_session() as check:
+        rows = await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+        entries = list(rows.scalars().all())
+
+    pending = [
+        entry
+        for entry in entries
+        if entry.event_type == "plane_issue_creation_pending"
+    ]
+    assert len(pending) == 1
+    assert pending[0].payload["operation"] == "create_issue"
 
 
 @pytest.mark.skipif(

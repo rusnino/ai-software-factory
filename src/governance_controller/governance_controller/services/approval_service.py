@@ -333,6 +333,19 @@ class ApprovalService:
         if projection is None:
             return
 
+        pending = await AuditService.log(
+            db=self.db,
+            event_type="plane_projection_pending",
+            task_id=task.id,
+            actor="system",
+            source="approval_service",
+            payload={
+                "operation": "update_state",
+                "state": state.value,
+                "approval_type": approval_type.value,
+                "plane_issue_id": task.plane_issue_id or task.id,
+            },
+        )
         # The Postgres audit-tip lock is transaction-scoped. Commit the
         # authoritative Controller state before non-authoritative Plane I/O so
         # a slow projection cannot hold the global lock for another task.
@@ -370,12 +383,25 @@ class ApprovalService:
                     "state": state.value,
                     "approval_type": approval_type.value,
                     "plane_issue_id": task.plane_issue_id,
+                    "pending_event_id": pending.event_id,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
                 },
             )
             await self.db.commit()
         else:
+            await AuditService.log(
+                db=self.db,
+                event_type="plane_projection_completed",
+                task_id=task.id,
+                actor="system",
+                source="approval_service",
+                payload={
+                    "operation": "update_state",
+                    "pending_event_id": pending.event_id,
+                    "plane_issue_id": task.plane_issue_id or task.id,
+                },
+            )
             # Release the task-scoped advisory lock after the external call.
             await self.db.commit()
 

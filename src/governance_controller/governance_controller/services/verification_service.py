@@ -447,14 +447,53 @@ class VerificationService:
                     )
                     # Release the transaction-scoped audit-tip lock before
                     # sending the non-authoritative Plane alert.
-                    await db.commit()
-                    await AlertService().notify_terminal_failure(
-                        task=task,
-                        contract=contract,
-                        report=report,
-                        reason="max_retries_exhausted",
+                    pending = await AuditService.log(
                         db=db,
+                        event_type="plane_projection_pending",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "operation": "terminal_failure_alert",
+                            "reason": "max_retries_exhausted",
+                        },
                     )
+                    await db.commit()
+                    try:
+                        await AlertService().notify_terminal_failure(
+                            task=task,
+                            contract=contract,
+                            report=report,
+                            reason="max_retries_exhausted",
+                            db=db,
+                        )
+                    except Exception as exc:
+                        await AuditService.log(
+                            db=db,
+                            event_type="plane_projection_failed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            payload={
+                                "operation": "terminal_failure_alert",
+                                "pending_event_id": pending.event_id,
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                            },
+                        )
+                    else:
+                        await AuditService.log(
+                            db=db,
+                            event_type="plane_projection_completed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            payload={
+                                "operation": "terminal_failure_alert",
+                                "pending_event_id": pending.event_id,
+                            },
+                        )
+                    await db.commit()
                 except Exception as exc:
                     await AuditService.log(
                         db=db,
@@ -471,6 +510,17 @@ class VerificationService:
                 return report
             # The failed state and its audit entry are authoritative; commit
             # them before the potentially slow Plane feedback call.
+            pending = await AuditService.log(
+                db=db,
+                event_type="plane_projection_pending",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "operation": "verification_failure_alert",
+                    "attempt": task.execution_attempts,
+                },
+            )
             await db.commit()
             try:
                 await AlertService().notify_verification_failure(
@@ -489,10 +539,24 @@ class VerificationService:
                     source="verification_service",
                     payload={
                         "reason": "verification_failure",
+                        "pending_event_id": pending.event_id,
                         "error": str(exc),
                         "error_type": type(exc).__name__,
                     },
                 )
+            else:
+                await AuditService.log(
+                    db=db,
+                    event_type="plane_projection_completed",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    payload={
+                        "operation": "verification_failure_alert",
+                        "pending_event_id": pending.event_id,
+                    },
+                )
+            await db.commit()
             if await StateMachine.atomic_transition_from_failed_to_running(
                 db,
                 task,

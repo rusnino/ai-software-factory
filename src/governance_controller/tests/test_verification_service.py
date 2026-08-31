@@ -815,10 +815,19 @@ async def test_verify_commits_before_slow_plane_alert(
                         AuditLog.event_type == "verification_failed",
                     )
                 )
+                pending_audits = await observer.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "plane_projection_pending",
+                    )
+                )
 
             assert task_row is not None
             assert task_row.state == TaskState.FAILED
             assert failed_audits.scalars().first() is not None
+            pending = pending_audits.scalars().first()
+            assert pending is not None
+            assert pending.payload["operation"] == "verification_failure_alert"
         finally:
             slow_alert.release.set()
             assert verification_task is not None

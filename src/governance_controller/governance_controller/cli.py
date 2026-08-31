@@ -15,6 +15,7 @@ from governance_controller.schemas.approval import ApprovalRequest
 from governance_controller.services.plane_projection import (
     acquire_plane_projection_lock,
 )
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
 )
@@ -152,6 +153,17 @@ def reconcile(
                 try:
                     # Keep the task-scoped lock out of the read transaction and
                     # release it immediately after the non-authoritative write.
+                    pending = await AuditService.log(
+                        db=db,
+                        event_type="plane_issue_creation_pending",
+                        task_id=task.id,
+                        actor="system",
+                        source="cli",
+                        payload={
+                            "operation": "create_issue",
+                            "project_id": task.project_id,
+                        },
+                    )
                     await db.commit()
                     await acquire_plane_projection_lock(db, task.id)
                     issue = await projection.ensure_plane_issue(
@@ -168,9 +180,34 @@ def reconcile(
                         if isinstance(plane_issue_id, str):
                             task.plane_issue_id = plane_issue_id
                             await db.flush()
+                    await AuditService.log(
+                        db=db,
+                        event_type="plane_issue_creation_completed",
+                        task_id=task.id,
+                        actor="system",
+                        source="cli",
+                        payload={
+                            "operation": "create_issue",
+                            "pending_event_id": pending.event_id,
+                            "plane_issue_id": task.plane_issue_id,
+                        },
+                    )
                     await db.commit()
                 except Exception as exc:
                     await db.rollback()
+                    await AuditService.log(
+                        db=db,
+                        event_type="plane_issue_creation_failed",
+                        task_id=task.id,
+                        actor="system",
+                        source="cli",
+                        payload={
+                            "operation": "create_issue",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await db.commit()
                     typer.echo(
                         f"[retry] plane issue creation failed for {task_id}: {exc}",
                         err=True,

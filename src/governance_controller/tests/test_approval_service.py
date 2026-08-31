@@ -1,5 +1,6 @@
 """Tests for the ApprovalService."""
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -245,6 +246,66 @@ class TestApprovalServiceStateTransitions:
 
         assert len(fake_projection.calls) == 1
         assert fake_projection.calls[0]["state"] == TaskState.PLAN_APPROVED
+
+
+async def test_plane_projection_crash_leaves_durable_pending_marker(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#298: a crash during Plane I/O leaves an auditable pending marker."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+    _engine, session_local = isolated_db
+    creator = session_local()
+    task = Task(
+        id="task-plane-pending-298",
+        project_id="project-plane-pending-298",
+        state=TaskState.PLAN_APPROVED,
+        proposed_by="agent-1",
+        plane_issue_id="plane-issue-298",
+    )
+    creator.add(task)
+    await creator.commit()
+
+    class _CrashedProjection:
+        async def update_state(self, **_kwargs: object) -> dict[str, object]:
+            raise asyncio.CancelledError
+
+    service = ApprovalService(
+        db=creator,
+        executor=AsyncMock(),
+        plane_projection=_CrashedProjection(),  # type: ignore[arg-type]
+        permission_service=PermissionService(admins={"admin"}),
+    )
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await service._project_state_to_plane(
+                task=task,
+                state=TaskState.PLAN_APPROVED,
+                approval_type=ApprovalType.PLAN,
+            )
+        await creator.rollback()
+
+        async with session_local() as observer:
+            rows = await observer.execute(
+                select(AuditLog).where(
+                    AuditLog.task_id == "task-plane-pending-298"
+                )
+            )
+            entries = list(rows.scalars().all())
+
+        pending = [
+            entry
+            for entry in entries
+            if entry.event_type == "plane_projection_pending"
+        ]
+        assert len(pending) == 1
+        assert pending[0].payload["operation"] == "update_state"
+        assert pending[0].payload["plane_issue_id"] == "plane-issue-298"
+    finally:
+        await creator.close()
 
 
 class TestApprovalServiceIdempotency:

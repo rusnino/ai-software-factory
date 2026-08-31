@@ -73,6 +73,17 @@ class TaskService:
         if settings.plane_base_url:
             # Commit the authoritative task and audit rows before the
             # non-authoritative Plane request can block on external I/O.
+            pending = await AuditService.log(
+                db=self.db,
+                event_type="plane_issue_creation_pending",
+                task_id=task.id,
+                actor="system",
+                source="task_service",
+                payload={
+                    "operation": "create_issue",
+                    "project_id": task.project_id,
+                },
+            )
             await self.db.commit()
             await acquire_plane_projection_lock(self.db, task.id)
             try:
@@ -95,6 +106,18 @@ class TaskService:
                 # Persist the Plane link before returning. A caller rollback or
                 # crash after the Plane request must not lose the id that makes
                 # subsequent ensure calls idempotent.
+                await AuditService.log(
+                    db=self.db,
+                    event_type="plane_issue_creation_completed",
+                    task_id=task.id,
+                    actor="system",
+                    source="task_service",
+                    payload={
+                        "operation": "create_issue",
+                        "pending_event_id": pending.event_id,
+                        "plane_issue_id": task.plane_issue_id,
+                    },
+                )
                 await self.db.commit()
             except Exception as exc:
                 # Plane projection failures must not block task creation, but
@@ -108,6 +131,7 @@ class TaskService:
                     source="task_service",
                     payload={
                         "project_id": task.project_id,
+                        "pending_event_id": pending.event_id,
                         "error": str(exc),
                         "error_type": type(exc).__name__,
                     },
