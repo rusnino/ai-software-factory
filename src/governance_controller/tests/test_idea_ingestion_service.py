@@ -130,6 +130,44 @@ async def test_create_draft_escapes_html_in_plane_payload() -> None:
     assert "&lt;script&gt;" in call["description"]
 
 
+async def test_intake_submission_survives_plane_failure_and_request_rollback(
+    db_session: AsyncSession,
+) -> None:
+    """#256: a Plane outage must not erase duplicate protection."""
+
+    class _FailingPlaneClient:
+        calls = 0
+
+        async def create_issue(
+            self,
+            name: str,
+            description: str | None = None,
+            project_id: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls += 1
+            raise RuntimeError("Plane unavailable")
+
+    failing_client = _FailingPlaneClient()
+    service = IdeaIngestionService(plane_client=failing_client)
+    classified = service.classify(_idea(source_id="plane-down-256"))
+
+    with pytest.raises(RuntimeError, match="Plane unavailable"):
+        await service.create_draft(classified, project_id="proj-1", db=db_session)
+    await db_session.rollback()
+
+    rows = await db_session.execute(
+        select(IntakeSubmission).where(
+            IntakeSubmission.source == "email",
+            IntakeSubmission.source_id == "plane-down-256",
+        )
+    )
+    assert len(rows.scalars().all()) == 1
+
+    with pytest.raises(DuplicateIntakeError):
+        await service.create_draft(classified, project_id="proj-1", db=db_session)
+    assert failing_client.calls == 1
+
+
 async def test_create_draft_translates_race_lost_integrity_error_to_duplicate(
     db_session: AsyncSession,
 ) -> None:

@@ -12,7 +12,7 @@ def utc_now() -> datetime:
 
 
 class IntakeSubmission(SQLModel, table=True):
-    """A durable record of an intake request that produced a Plane draft."""
+    """A durable record of an intake request accepted for processing."""
 
     __table_args__ = (
         Index(

@@ -121,6 +121,10 @@ class IdeaIngestionService:
                     f"Duplicate intake submission: "
                     f"{classified.idea.source}/{classified.idea.source_id}"
                 ) from exc
+            # Commit the guard record before non-authoritative Plane I/O. The
+            # request dependency rolls back on Plane failures, so a flush alone
+            # would erase the duplicate and sender-rate-limit history (#256).
+            await db.commit()
 
         client = self._client
         if client is None:
