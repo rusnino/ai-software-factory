@@ -290,6 +290,50 @@ async def test_list_all_issues_uses_next_page_results_for_termination(
     assert "cursor=1000%3A1%3A0" in str(requests[1].url)
 
 
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+async def test_list_all_issues_rejects_missing_next_cursor(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """A response advertising another page must include a cursor."""
+    httpx_mock.add_response(
+        status_code=200,
+        json={"results": [], "next_page_results": True},
+    )
+
+    with pytest.raises(PlaneClientError, match="non-empty cursor"):
+        await PlaneClient().list_all_issues()
+
+    assert len(httpx_mock.get_requests()) == 1
+
+
+@pytest.mark.httpx_mock(can_send_already_matched_responses=True)
+async def test_list_all_issues_rejects_repeated_next_cursor(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """A repeated cursor must not cause another page request."""
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [],
+            "next_cursor": "cursor-1",
+            "next_page_results": True,
+        },
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [],
+            "next_cursor": "cursor-1",
+            "next_page_results": True,
+        },
+    )
+
+    with pytest.raises(PlaneClientError, match="repeated cursor"):
+        await PlaneClient().list_all_issues()
+
+    assert len(httpx_mock.get_requests()) == 2
+
+
 async def test_update_issue_accepts_extra_fields(
     httpx_mock, settings_override: Settings
 ) -> None:

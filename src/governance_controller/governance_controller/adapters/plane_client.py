@@ -298,6 +298,7 @@ class PlaneClient:
         all_results: list[dict[str, Any]] = []
         params: dict[str, Any] = {"per_page": per_page}
         next_cursor: str | None = None
+        seen_cursors: set[str] = set()
         last_page: dict[str, Any] = {}
         max_pages = 1000
 
@@ -318,6 +319,16 @@ class PlaneClient:
             has_more = page.get("next_page_results")
             if not has_more:
                 break
+            if not isinstance(next_cursor, str) or not next_cursor.strip():
+                raise PlaneClientError(
+                    "Plane pagination advertised another page without a "
+                    "non-empty cursor"
+                )
+            if next_cursor in seen_cursors:
+                raise PlaneClientError(
+                    f"Plane pagination repeated cursor {next_cursor!r}; aborting"
+                )
+            seen_cursors.add(next_cursor)
         else:
             raise PlaneClientError(
                 f"Plane pagination exceeded {max_pages} pages; aborting"
