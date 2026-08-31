@@ -392,6 +392,21 @@ class TestPolicyEngineCompletionContractShellAllowlist:
         assert result.allowed is False
         assert any("destructive" in v for v in result.violations)
 
+    def test_rm_uppercase_force_flag_is_rejected(self) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="cleanup", command="rm -RF /tmp/build")],
+                scope_check=ScopeCheck(description="uppercase cleanup check"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive" in v for v in result.violations)
+
     def test_command_with_redirection_rejected(self) -> None:
         contract = _make_contract(
             completion_contract=CompletionContract(

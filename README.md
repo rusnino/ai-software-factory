@@ -83,6 +83,9 @@ Optional or context-dependent:
 See `src/governance_controller/governance_controller/config.py` for the full
 settings definition and defaults.
 
+When `GC_OPA_BASE_URL` is configured, deploy OPA 1.0 or newer. The bundled Rego
+uses Rego v1 syntax; CI validates it with `openpolicyagent/opa:1.19.1`.
+
 ## Development Approach
 
 This project is designed to be implemented incrementally by AI agents under human supervision. See `AGENTS.md` for agent behavior rules, context order, and current implementation priority.

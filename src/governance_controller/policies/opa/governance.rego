@@ -30,10 +30,10 @@ _violation contains _destructive_violation[_]
 _violation contains _container_escape_violation[_]
 _violation contains _profile_security_violation[_]
 _violation contains _git_config_violation[_]
-_violation contains _forbidden_path_violation[_]
 _violation contains _network_tool_violation[_]
 _violation contains _approval_chain_violation[_]
 _violation contains _approval_type_violation[_]
+_violation contains _completeness_violation[_]
 _violation contains _command_allowlist_violation[_]
 _violation contains _privilege_violation[_]
 _violation contains _control_character_violation[_]
@@ -76,7 +76,7 @@ _harness_violation contains msg if {
 # Wrapper / interpreter commands
 # ---------------------------------------------------------------------------
 
-_forbidden_wrappers := {"bash", "sh", "dash", "zsh", "python", "python3", "node", "ruby", "perl", "php", "lua", "env", "xargs", "nice", "nohup", "ssh", "timeout", "script", "command", "exec", "eval", "busybox", "install"}
+_forbidden_wrappers := {"bash", "sh", "dash", "zsh", "python", "python3", "node", "ruby", "perl", "php", "lua", "env", "xargs", "nice", "nohup", "ssh", "timeout", "command", "exec", "eval", "busybox", "install"}
 
 _wrapper_violation contains msg if {
     some cmd in _commands
@@ -115,8 +115,10 @@ _forbidden_metachars := {";", "&", "|", ">", "<", "`", "$", "(", ")", "{", "}", 
 
 _metachar_violation contains msg if {
     some cmd in _commands
+    argv := _command_argv(cmd)
+    some arg in argv
     some char in _forbidden_metachars
-    contains(cmd, char)
+    contains(arg, char)
     msg := sprintf("Command contains forbidden shell metacharacter: %q", [char])
 }
 
@@ -124,6 +126,18 @@ _control_character_violation contains msg if {
     some cmd in _commands
     contains(cmd, "\u0000")
     msg := sprintf("Command contains forbidden control character: %q", ["NUL"])
+}
+
+_control_character_violation contains msg if {
+    some cmd in _commands
+    contains(cmd, "\n")
+    msg := "Command contains forbidden control character: newline"
+}
+
+_control_character_violation contains msg if {
+    some cmd in _commands
+    contains(cmd, "\r")
+    msg := "Command contains forbidden control character: carriage return"
 }
 
 _privilege_violation contains msg if {
@@ -145,6 +159,20 @@ _network_tool_violation contains msg if {
 }
 
 # ---------------------------------------------------------------------------
+# Contract completeness
+# ---------------------------------------------------------------------------
+
+_completeness_violation contains msg if {
+    object.get(input, "has_objective", true) == false
+    msg := "Task contract objective is empty"
+}
+
+_completeness_violation contains msg if {
+    object.get(input, "has_acceptance", true) == false
+    msg := "Task contract acceptance criteria are empty"
+}
+
+# ---------------------------------------------------------------------------
 # Destructive flags and command-execution primitives
 # ---------------------------------------------------------------------------
 
@@ -155,6 +183,18 @@ _destructive_violation contains msg if {
     _base_command(argv[0]) == "rm"
     _short_flag_present(argv, "r")
     _short_flag_present(argv, "f")
+    msg := sprintf("Destructive rm flags in command: %s", [cmd])
+}
+
+_destructive_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "rm"
+    some arg in argv
+    startswith(arg, "-")
+    contains(lower(arg), "r")
+    contains(lower(arg), "f")
     msg := sprintf("Destructive rm flags in command: %s", [cmd])
 }
 
@@ -212,7 +252,7 @@ _destructive_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "find"
     some arg in argv
-    arg in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0"}
+    lower(arg) in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0"}
     msg := sprintf("Dangerous find action in command: %s", [cmd])
 }
 
@@ -223,7 +263,7 @@ _destructive_violation contains msg if {
     _base_command(argv[0]) == "tar"
     some arg in argv
     some flag in {"--to-command", "--remove-files", "--remove-file"}
-    arg == flag
+    lower(arg) == flag
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
@@ -234,7 +274,7 @@ _destructive_violation contains msg if {
     _base_command(argv[0]) == "tar"
     some arg in argv
     some flag in {"--to-command", "--remove-files", "--remove-file"}
-    startswith(arg, sprintf("%s=", [flag]))
+    startswith(lower(arg), sprintf("%s=", [flag]))
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
@@ -243,22 +283,32 @@ _destructive_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "git"
-    some arg in argv
-    arg == "clean"
-    _short_flag_present(argv, "f")
+    count(argv) > 1
+    argv[1] == "clean"
+    some index
+    index >= 2
+    arg := argv[index]
+    _git_clean_dangerous_flag(arg)
     msg := sprintf("Dangerous git clean flags in command: %s", [cmd])
 }
 
 _git_config_violation contains msg if {
     some cmd in _commands
     argv := _command_argv(cmd)
-    argv[0] == "git"
-    some arg in argv
-    startswith(arg, "-c")
-    dangerous_key := [k | k := ["core.sshcommand", "core.fsmonitor", "core.editor", "credential.helper", "user.signingkey"][_]]
-    lower_arg := lower(arg)
-    some key in dangerous_key
-    contains(lower_arg, key)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index
+    arg := argv[index]
+    index >= 1
+    _git_config_key(argv, index) != ""
+    lower(_git_config_key(argv, index)) in {
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    }
     msg := sprintf("Dangerous git config override in command: %s", [cmd])
 }
 
@@ -372,18 +422,6 @@ _profile_security_violation contains msg if {
 # Forbidden paths
 # ---------------------------------------------------------------------------
 
-_all_forbidden_paths := array.concat(
-    object.get(input, "forbidden_paths", []),
-    object.get(_security, "forbidden_paths", [])
-)
-
-_forbidden_path_violation contains msg if {
-    some cmd in _commands
-    some path in _all_forbidden_paths
-    contains(cmd, path)
-    msg := sprintf("Command references forbidden path: %s", [path])
-}
-
 _path_conflict_violation contains msg if {
     some path in object.get(input, "forbidden_path_conflicts", [])
     msg := sprintf("Task touches forbidden path: %s", [path])
@@ -441,6 +479,34 @@ _approval_type_violation contains msg if {
 
 _commands := object.get(input, "commands", [])
 _parsed_commands := object.get(input, "parsed_commands", [])
+
+_git_clean_dangerous_flag(arg) if {
+    arg in {"-f", "--force", "-x", "-d"}
+}
+
+_git_clean_dangerous_flag(arg) if {
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    some flag in {"f", "x", "d"}
+    contains(arg, flag)
+}
+
+_git_config_key(argv, index) := key if {
+    arg := argv[index]
+    arg in {"-c", "--config"}
+    next := argv[index + 1]
+    parts := split(next, "=")
+    key := parts[0]
+}
+
+_git_config_key(argv, index) := key if {
+    arg := argv[index]
+    startswith(lower(arg), "-c")
+    not arg in {"-c", "--config"}
+    config := substring(arg, 2, -1)
+    parts := split(config, "=")
+    key := parts[0]
+}
 
 _base_command(token) := base if {
     parts := split(lower(token), "/")

@@ -140,6 +140,8 @@ async def test_opa_input_contains_policy_parity_facts(
 
     assert result.allowed is True
     assert captured is not None
+    assert captured["has_objective"] is True
+    assert captured["has_acceptance"] is True
     execution = captured["execution"]
     assert isinstance(execution, dict)
     assert execution["timeout_minutes"] == 30

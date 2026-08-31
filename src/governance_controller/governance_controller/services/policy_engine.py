@@ -606,9 +606,10 @@ def _is_recursive_force_rm(argv: list[str]) -> bool:
         if token == "--no-preserve-root":
             return True
         if token.startswith("-") and len(token) > 1:
-            if "r" in token or "R" in token:
+            lowered = token.lower()
+            if "r" in lowered:
                 recursive = True
-            if "f" in token:
+            if "f" in lowered:
                 force = True
     return recursive and force
 

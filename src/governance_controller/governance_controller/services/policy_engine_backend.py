@@ -158,6 +158,8 @@ class PolicyEngineBackend:
             "task_id": contract.task_id,
             "project_id": contract.project_id,
             "proposed_by": contract.proposed_by,
+            "has_objective": bool(contract.objective.strip()),
+            "has_acceptance": bool(contract.acceptance),
             "approval_type": approval_type.value,
             "approval": {
                 "actor": actor or "",
