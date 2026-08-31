@@ -12,6 +12,9 @@ from governance_controller.constants import ApprovalType
 from governance_controller.db import dispose_engines_sync, get_db_session
 from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
+from governance_controller.services.plane_projection import (
+    acquire_plane_projection_lock,
+)
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
 )
@@ -115,12 +118,13 @@ def reconcile(
             # time (#215). This keeps plane_issue_id in sync without blocking
             # the original task creation.
             projection = PlaneProjectionService()
-            for row in rows:
-                if row.plane_issue_id is not None:
-                    continue
-                if not settings.plane_base_url:
-                    continue
-                task = await db.get(Task, row.id)
+            retry_task_ids = [
+                row.id
+                for row in rows
+                if row.plane_issue_id is None and settings.plane_base_url
+            ]
+            for task_id in retry_task_ids:
+                task = await db.get(Task, task_id)
                 if task is None:
                     continue
                 contract = task.task_contract_json
@@ -135,6 +139,10 @@ def reconcile(
                         description = acc[0]
                 title = objective or task.id
                 try:
+                    # Keep the task-scoped lock out of the read transaction and
+                    # release it immediately after the non-authoritative write.
+                    await db.commit()
+                    await acquire_plane_projection_lock(db, task.id)
                     issue = await projection.ensure_plane_issue(
                         controller_task_id=task.id,
                         title=title,
@@ -147,14 +155,23 @@ def reconcile(
                         if isinstance(plane_issue_id, str):
                             task.plane_issue_id = plane_issue_id
                             await db.flush()
+                    await db.commit()
                 except Exception as exc:
+                    await db.rollback()
                     typer.echo(
                         f"[retry] plane issue creation failed for {task.id}: {exc}",
                         err=True,
                     )
 
             # Build the snapshot after retries so newly captured Plane issue IDs
-            # are used by this reconciliation pass (#282).
+            # are used by this reconciliation pass (#282). Re-reading also
+            # avoids using expired or stale ORM objects after a retry rollback.
+            result = await db.execute(
+                select(Task)
+                .where(Task.project_id == project_id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            rows = result.scalars().all()
             controller_tasks = [
                 (
                     str(row.id),

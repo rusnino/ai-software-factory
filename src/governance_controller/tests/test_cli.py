@@ -1,9 +1,11 @@
 """Tests for the governance_controller CLI commands."""
 
+import asyncio
 import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -11,9 +13,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from sqlalchemy import select
 from typer.testing import CliRunner
 
-from governance_controller.cli import app
+from governance_controller.cli import app, reconcile
 from governance_controller.constants import TaskState
 from governance_controller.models.task import Task
 
@@ -279,6 +282,8 @@ class TestCliReconcile:
         db.execute = AsyncMock(return_value=query_result)
         db.get = AsyncMock(return_value=row)
         db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
 
         @asynccontextmanager
         async def fake_db_session():
@@ -368,3 +373,164 @@ class TestCliReconcile:
             ("task-a", TaskState.PROPOSED, "project-a", None)
         ]
         assert all(t[2] == "project-a" for t in controller_tasks)
+
+
+async def test_reconcile_plane_id_survives_later_rollback(
+    isolated_db: tuple,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry link remains durable when reconciliation later rolls back."""
+    from governance_controller import config
+
+    task_id = "cli-plane-durable-288"
+    project_id = "cli-project-288"
+    _engine, local_session = isolated_db
+
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                proposed_by="test",
+                task_contract_json={
+                    "objective": "Recover Plane link",
+                    "acceptance": ["the link is durable"],
+                },
+            )
+        )
+        await seed.commit()
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+    projection = MagicMock()
+    projection.ensure_plane_issue = AsyncMock(
+        return_value={"id": "plane-recovered-288"}
+    )
+    reconciliation = MagicMock()
+    reconciliation.reconcile = AsyncMock(
+        side_effect=RuntimeError("rollback after retry")
+    )
+    monkeypatch.setattr(
+        "governance_controller.services.plane_projection.PlaneProjectionService",
+        MagicMock(return_value=projection),
+    )
+    monkeypatch.setattr(
+        "governance_controller.cli.ReconciliationService",
+        MagicMock(return_value=reconciliation),
+    )
+
+    with pytest.raises(RuntimeError, match="rollback after retry"):
+        await asyncio.to_thread(reconcile, project_id)
+
+    async with local_session() as check:
+        task = await check.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        assert task.plane_issue_id == "plane-recovered-288"
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_reconcile_retries_plane_issue_under_task_lock(
+    isolated_db: tuple,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent retries for one task make only one external create request."""
+    from governance_controller import config
+    from governance_controller.services.plane_projection import (
+        acquire_plane_projection_lock as real_acquire_plane_projection_lock,
+    )
+
+    task_id = "cli-plane-lock-288"
+    project_id = "cli-project-lock-288"
+    _engine, local_session = isolated_db
+
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                proposed_by="test",
+                task_contract_json={},
+            )
+        )
+        await seed.commit()
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+
+    class _BlockedProjection:
+        def __init__(self) -> None:
+            self.first_lookup = threading.Event()
+            self.second_lookup = threading.Event()
+            self.release = threading.Event()
+            self._mutex = threading.Lock()
+            self._lookup_attempts = 0
+            self.create_requests = 0
+            self.created = False
+
+        async def ensure_plane_issue(self, **_kwargs: object) -> dict[str, object]:
+            with self._mutex:
+                if self.created:
+                    return {"id": "plane-locked-288"}
+                self._lookup_attempts += 1
+                first = self._lookup_attempts == 1
+                (self.first_lookup if first else self.second_lookup).set()
+
+            if first and not await asyncio.to_thread(self.release.wait, 10):
+                raise TimeoutError("test projection was not released")
+
+            with self._mutex:
+                self.create_requests += 1
+                self.created = True
+            return {"id": "plane-locked-288"}
+
+    projection = _BlockedProjection()
+
+    class _NoopReconciliation:
+        async def reconcile(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(checked=1, divergences=[])
+
+    monkeypatch.setattr(
+        "governance_controller.services.plane_projection.PlaneProjectionService",
+        lambda: projection,
+    )
+    monkeypatch.setattr(
+        "governance_controller.cli.ReconciliationService",
+        lambda **_kwargs: _NoopReconciliation(),
+    )
+
+    lock_attempts = 0
+    lock_attempts_mutex = threading.Lock()
+    second_lock_attempted = threading.Event()
+
+    async def _tracking_lock(db, controller_task_id: str) -> None:
+        nonlocal lock_attempts
+        with lock_attempts_mutex:
+            lock_attempts += 1
+            if lock_attempts == 2:
+                second_lock_attempted.set()
+        await real_acquire_plane_projection_lock(db, controller_task_id)
+
+    monkeypatch.setattr(
+        "governance_controller.cli.acquire_plane_projection_lock",
+        _tracking_lock,
+        raising=False,
+    )
+
+    first = asyncio.create_task(asyncio.to_thread(reconcile, project_id))
+    second: asyncio.Task[None] | None = None
+    try:
+        assert await asyncio.to_thread(projection.first_lookup.wait, 10)
+        second = asyncio.create_task(asyncio.to_thread(reconcile, project_id))
+        assert await asyncio.to_thread(second_lock_attempted.wait, 10)
+        assert not projection.second_lookup.is_set()
+    finally:
+        projection.release.set()
+        tasks = [first]
+        if second is not None:
+            tasks.append(second)
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert projection.create_requests == 1
