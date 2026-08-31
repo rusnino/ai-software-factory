@@ -2,53 +2,58 @@
 
 ## Current State
 
-**Phase 2 hardening is gate-clean as of 2026-08-31. Do not trust a "gate-clean" claim in this file's own history —
-it has been declared prematurely at least three separate times, each later found wrong by
-independent live verification.** As of 2026-08-31, sixteen review rounds have run. Rounds 1-8
-(`#154`-`#258`) landed and hold up on re-verification. Rounds 9-13 established two recurring defect
-classes — `RISK-16` (write before CAS, committed regardless of outcome, 3 confirmed instances) and
-`RISK-19` (identity-map staleness, 5 confirmed instances, including round 13's `#278` revealing round
-6's own `#242` fix had silently never worked) — plus `#277` (HIGH, round 13 — the `approve` CLI
-command had never once authenticated against any real deployment, invisible because its own tests
-only mocked `httpx.post`). Round 14 confirmed round 13's fixes clean, found opencode's own `#277` fix
-had only strengthened a mocked test rather than adding a live-server check (fixed directly), then
-found this project's worst finding to date: `#280` (CRITICAL) — the `AuditLog` hash chain, this
-project's core tamper-evidence guarantee, silently forked under real concurrent writers — plus `#281`
-(MEDIUM, `compute_hash()` unusable on ORM-loaded rows) and `#282` (HIGH, `gc reconcile` never
-matched tasks against Plane correctly, an exact recurrence of `#201`'s defect class in code that
-fix never touched). **Round 15 confirmed all three of Round 14's fixes (`#280`-`#282`) are genuinely
-closed — independently re-reproduced live, including a fresh 20-concurrent-writer chain-integrity
-check with zero forks. Per this project's now-standard practice of adversarially reviewing the
-IMMEDIATELY PRECEDING round's own fix, this round found `#280`'s fix itself introduces a NEW,
-real regression: `#283` (HIGH) — the global `pg_advisory_xact_lock` the fix uses is
-TRANSACTION-scoped, and at least three real call sites (`ApprovalService.approve()`,
-`VerificationService.verify_and_advance()`, `TaskService.create()`) call `AuditService.log()` and
-then make a SLOW outbound Plane HTTP call before committing — meaning the lock stays held across
-that entire external call. Live-reproduced: an unrelated, otherwise-instant audit write for a
-DIFFERENT task was blocked for the full duration of a simulated 2s Plane call. Since Plane is
-explicitly documented as a non-authoritative projection (`CLAUDE.md`), this inverts the architecture
-— a slow/degraded Plane instance can now stall EVERY audit-log write system-wide, for any task, via
-completely ordinary traffic (any approval, any verification failure). Two genuinely new angles then
-found two more real gaps: real, unmocked testing against the live `macro_agent_service` process
-found `#285` (HIGH) — an untrusted-boundary response missing an expected field raises an unhandled
-`KeyError` OUTSIDE the error-handling `try/except` at two call sites, leaving a task silently stuck
-with zero audit trail — and `#286` (MEDIUM) — `Execution.status_error` records only the exception
-CLASS NAME, so a genuine 404 (run permanently lost) and a genuine 500 (transient) are indistinguishable,
-defeating `#261`'s own original diagnostic purpose. A replay/security audit of every intake/webhook
-adapter found `#284` (HIGH) — `TelegramAdapter.process_update`'s `/approve` command has the EXACT
-same bug shape as `#277`: it never sends `X-Controller-Secret`, so Telegram-based human approval has
-also never worked against any real, properly-configured deployment, in a code path `#277`'s fix
-never touched.** **Every round that tried a genuinely new angle has found something no prior round's
-angles could have found, without exception across all sixteen rounds so far. A third lesson now
-joins the standing two (`RISK-16`/`RISK-19` sweeps; "mocked/unrealistic-fixture tests hide broken
-documented workflows"): a fix for one bug can introduce a NEW regression of a DIFFERENT kind — this
-round's `#283` is the second time this has happened (the first being `RISK-16`/`RISK-19` themselves
-recurring inside their own predecessor fixes) — so every round should keep adversarially reviewing
-not just "does the immediately preceding fix close its reported bug" but "does it introduce anything
-new," even after confirming the original bug is genuinely gone. `#277`'s lesson has now generalized
-twice in one round too: `#284` (Telegram) and `#285`/`#286` (macro-agent HTTP boundary) both surfaced
-by finally testing a real, unmocked network boundary nobody had driven live before.** Query the live
-issue list before trusting anything else in this file:
+**Neither phase has ever been declared gate-clean by the reviewer's own independent verification
+until this round. Do not trust a "gate-clean" claim in this file's own history — it has been
+declared prematurely at least three times before (each by the reviewer, later found wrong), and
+this round adds a FOURTH self-declaration to be skeptical of: opencode itself wrote a docs update
+claiming "gate-clean" after this round's fix batch, before any independent re-verification
+happened.** As of 2026-08-31, sixteen review rounds have run. Rounds 1-15 (`#154`-`#286`) landed and
+hold up on re-verification; three recurring defect classes were established along the way —
+`RISK-16` (write before CAS, committed regardless of outcome, 3 confirmed instances), `RISK-19`
+(identity-map staleness, 5 confirmed instances), and a third, unnamed pattern where a fix for one
+bug introduces a genuinely new regression of a different kind (`#280`'s advisory lock → `#283`'s
+system-wide stall). Round 15 found `#283`-`#286`: a global audit-log advisory lock held across slow
+Plane calls (CRITICAL-adjacent HIGH), a second `#277`-shaped Telegram auth gap, an unhandled
+`KeyError` on a malformed macro-agent response, and an indistinguishable-error-code diagnostic gap.
+
+**Round 16 is the largest single batch in this project's history: opencode landed 21 commits fixing
+not just the 4 issues the reviewer filed (`#283`-`#286`) but 10 MORE issues opencode found and filed
+itself (`#287`-`#296`) — new task-scoped Plane-projection advisory locks, idempotent Plane-issue
+lookup-by-trace-field, a retry-execution "sentinel" mechanism for crash recovery, Pydantic-validated
+macro-agent responses, and CAS-loss run-cancellation/attachment logic — then declared Phase 2
+"gate-clean" in its own docs edit, before the reviewer had verified any of it.** Given this
+project's history of premature gate-clean claims, the reviewer ran the largest verification effort
+to date: 8 parallel agents, each independently live-reproducing (not diff-reading) one cluster of
+the 14 closed issues, PLUS three genuinely fresh angles no prior round had tried — a systematic
+`RISK-16`/`RISK-19`/`#283`-pattern sweep of this round's own new code, a full real end-to-end task
+lifecycle (create→approve→run→verify→review→done) driven through the REAL HTTP API against a REAL
+`macro_agent_service` process and a real fake-Plane server, including a genuine THREE-way concurrent
+scenario (an approval, a `reconcile --fix`, and a poller pass, all racing on the same task via
+separate real Postgres sessions/processes at once), and a dedicated look at two areas untouched by
+this round's changes (the OPA policy backend, and intake's rate-limiter/duplicate-guard
+interaction). **Result: all 14 issues (`#283`-`#296`) are CONFIRMED genuinely closed** — every fix
+was independently reproduced against real Postgres/real HTTP servers/real concurrent sessions, and
+every claimed regression test was independently verified to fail on the exact pre-fix commit and
+pass on the post-fix commit. The full real end-to-end pipeline, including the three-way-concurrent
+scenario, completed cleanly with a genuinely re-validated audit hash chain (57 rows written by 3
+separate OS processes under real concurrent load, zero broken links — independently re-confirming
+`#280`'s fix holds under load well beyond any single prior round's test). **But the fresh-angle work
+found 4 more real, if lower-severity, gaps `#283`-`#296`'s own batch and the previously-stale areas
+missed: `#297` (MEDIUM) — `#288`'s idempotent Plane-issue lookup scans every issue in the project on
+every task creation, no server-side filter, an unbounded O(N) cost on the task-creation hot path,
+architecturally the same "new fix, new performance cost" shape as `#283` but narrower; `#298` (LOW)
+— `#283`'s early-commit fix leaves a narrow crash-timing-only window where state is durably
+committed with zero audit trail that Plane was never told; `#299` (LOW) — the OPA policy backend's
+Rego file has drifted significantly behind the embedded `PolicyEngine` across 16 rounds of
+bypass-closing fixes to the latter, though the embedded-engine-is-authoritative guarantee itself was
+live-proven to hold (a real OPA server allowed `sudo whoami`; the full backend correctly denied it
+without even consulting OPA); `#300` (MEDIUM) — intake's per-IP rate limiter and per-sender
+duplicate guard interact badly, letting a burst of ordinary duplicate-retry traffic exhaust the
+IP-level budget and starve legitimate new submissions with misleading `429`s, live-reproduced.**
+Every round that tried a genuinely new angle has found something no prior round's angles could have
+found, without exception across all sixteen rounds so far — including this one, where "verify a
+massive batch that already claims gate-clean" was itself the new angle. Query the live issue list
+before trusting anything else in this file:
 
 ```bash
 gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
@@ -56,10 +61,18 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of the latest live check: **0 open issues (0 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW)**. Issues
-`#283`-`#296` are closed and carry the `phase-2` label. Round 16's reviewed commits are pushed
-through `74e59a0`; the local gate is green. The two live Plane contract tests remain skipped because
-`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured.
+As of this writing: **4 open issues (0 CRITICAL, 0 HIGH, 2 MEDIUM, 2 LOW)** — `#297` (MEDIUM,
+unbounded Plane-issue scan on task creation), `#300` (MEDIUM, intake rate-limit/duplicate-guard
+starvation), `#298` (LOW, narrow crash-timing audit-trail gap in `#283`'s fix), `#299` (LOW, OPA
+Rego policy drift, not exploitable). **By this project's own established definition of gate-clean —
+zero open `severity:critical`/`severity:high` — Phase 2 genuinely IS gate-clean as of this round,
+for the first time in this project's history where that claim has survived independent
+re-verification rather than being made and then found wrong.** This should still be read as "clean
+by the severity bar that's been tracked," not "flawless" — 4 real, live-reproduced MEDIUM/LOW gaps
+remain open, and this project's history of premature declarations means the next round should keep
+verifying rather than treating this milestone as a reason to relax scrutiny. Every prior round's
+findings (`#151`-`#296`) are closed and independently re-verified — the fifth consecutive round with
+none reopened.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -70,31 +83,37 @@ container escape flags, and removal of unauditable network/package-manager tools
 
 Phase 2 architectural summary: real Plane CE HTTP client + authenticated webhook receiver with
 workspace-member actor resolution + allowlist; Controller→Plane projection service wired into
-`ApprovalService.approve()`; a macro-agent-facing HTTP client wired to a self-declared Python stand-in
-service (real `macro-agent` package deferred to Phase 3 — see
-`decisions/ADR-002-macro-agent-stub-vs-package.md`); an opentasks DAG materializer reading live
-Plane dependencies with guarded cycle detection, size cap, and concurrent fetching; a reconciliation
-service/CLI that reads Controller DB state and can fix Plane state divergences with staleness checks;
-authenticated intake adapters (Telegram/Email/generic) using shared secrets or HMAC signatures,
-with body-size caps, creating HTML-escaped Plane drafts; verification failure feedback to macro-agent
-and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
-passes and receives a minimized, optionally bearer-token-authenticated input document.
+`ApprovalService.approve()`, now serialized per-task via a dedicated advisory lock (`#287`) held
+across the outbound call, released before/after with commits scoped to keep the audit-tip lock
+(`#280`/`#283`) database-only; a macro-agent-facing HTTP client wired to a self-declared Python
+stand-in service (real `macro-agent` package deferred to Phase 3 — see
+`decisions/ADR-002-macro-agent-stub-vs-package.md`), now validating every `POST /runs` response via
+a Pydantic schema (`#285`); an opentasks DAG materializer reading live Plane dependencies with
+guarded cycle detection, size cap, and concurrent fetching; a reconciliation service/CLI that reads
+Controller DB state and can fix Plane state divergences with staleness checks, now sharing the same
+task-scoped projection lock as the approval path (`#287`); authenticated intake adapters
+(Telegram/Email/generic) using shared secrets or HMAC signatures, with body-size caps, creating
+HTML-escaped Plane drafts, and a Telegram-approval path now authenticated the same way the CLI is
+(`#284`); verification failure feedback to macro-agent and terminal alerting; optional OPA policy
+backend that runs only after the embedded PolicyEngine passes and receives a minimized, optionally
+bearer-token-authenticated input document (the embedded-engine-authoritative guarantee live-proven
+this round, though the Rego policy itself has drifted — `#299`).
 
 Test status (2026-08-31): **464 passed / 20 skipped** on SQLite, **482 passed / 2 skipped** on
 PostgreSQL, `ruff` clean, `mypy governance_controller` clean (69 source files); `macro_agent_service`
-has **10 passed**, with `ruff`/`mypy` clean. The two live Plane contract tests are skipped because
-`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured.
-**CI is green** (`.github/workflows/ci.yml`, added by `#223`, had failed on all 13 runs since
-2026-08-26 until Round 11's CI-infra fix). Round 15 made no
-production-code changes of its own beyond what opencode's `8888ddc` fix commit already covered
-(that commit's own new tests account for this round's count increase over Round 14's 429/435). Green
-tests are still not evidence of correctness in this project beyond "nothing crashes" — none of round
-8's through round 15's findings (`#253`-`#286`), including all six CRITICALs found across those
-rounds, were caught by this suite before their respective fixes landed; they required killing a live
-process, adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely
-concurrent real HTTP/DB load at a live server or real Postgres, or — for `#277`/`#280`/`#282`/`#284`
-/`#285` — simply trying to actually exercise a documented workflow or a real (not mocked) network
-boundary that every existing test's fixture shape happened to sidestep.
+has **10 passed**, `ruff`/`mypy` clean — all independently re-run and confirmed by the reviewer, not
+just taken from opencode's own claim. The two live Plane contract tests are skipped because
+`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured in
+this environment. **CI is green** (`.github/workflows/ci.yml`, added by `#223`, had failed on all 13
+runs since 2026-08-26 until Round 11's CI-infra fix) — confirmed via `gh run list`, current HEAD's
+run included. Green tests plus a self-declared "gate-clean" are still not sufficient evidence of
+correctness in this project — none of round 8's through round 16's findings, including all six
+CRITICALs found across those rounds and this round's own `#297`-`#300`, were caught by the test
+suite before their respective fixes/findings landed; they required killing a live process,
+adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely concurrent
+real HTTP/DB/multi-process load at a live server or real Postgres, running the full real pipeline
+end to end against real services, or simply trying to actually exercise a documented workflow or a
+real (not mocked) network boundary that every existing test's fixture shape happened to sidestep.
 
 Implemented components:
 
@@ -137,7 +156,7 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Fifteen review
+All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Sixteen review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -166,19 +185,44 @@ per the new Regression Coverage Policy, a live end-to-end check of the `reconcil
 audit log's own hash chain, `#280`-`#282`), Round 15 (verification of round 14's fixes, an
 adversarial review of `#280`'s OWN fix for a new regression, real HTTP-boundary testing against the
 live `macro_agent_service` process, a systematic sweep for other tip-lookup serialization patterns,
-and a replay/security audit of every intake/webhook adapter, `#283`-`#286`). Round 16 completed the
-follow-up hardening for retry-start recovery (`#289`), approval/retry external-run CAS handling
-(`#293`, `#294`), Plane traceability and property projection (`#290`), durable CLI Plane retries
-(`#288`, `#295`, `#296`), reconciliation DAG IDs (`#291`), and malformed pagination (`#292`). The
-changes are pushed through `74e59a0`; issues `#283`-`#296` are closed and relabeled `phase-2`. The
-current local gate is green, but live Plane contract tests remain skipped because credentials are not
-configured. Keep the adversarial review practice: green tests do not replace live boundary checks,
-and no phase may be declared complete while critical/high issue queries remain non-empty.
+and a replay/security audit of every intake/webhook adapter, `#283`-`#286`). **Round 16 (this round)
+was the largest single batch yet: opencode landed 21 commits closing not just the 4 issues the
+reviewer filed (`#283`-`#286`) but 10 more it found and filed itself (`#287`-`#296`), then declared
+Phase 2 "gate-clean" in its own docs edit — unverified. The reviewer ran 8 parallel live-verification
+agents (one per issue cluster, plus a systematic sweep of this round's own new code for `RISK-16`/
+`RISK-19`/the-`#283`-pattern, a full real end-to-end task-lifecycle pipeline including a genuine
+three-way-concurrent scenario across real Postgres sessions/processes, and dedicated fresh looks at
+the previously-stale OPA and intake-rate-limiting areas) before trusting any of it. All 14 issues
+(`#283`-`#296`) are CONFIRMED genuinely closed — independently re-reproduced, not diff-read — but the
+fresh-angle work found 4 more real gaps: `#297` (MEDIUM, unbounded per-task-creation Plane-issue
+scan, architecturally the same "new fix, new cost" shape as `#283`), `#300` (MEDIUM, intake's
+rate-limiter and duplicate-guard interact badly and can starve legitimate submissions), `#298` (LOW,
+a narrow crash-timing-only audit-trail gap in `#283`'s own fix), and `#299` (LOW, the OPA Rego policy
+has drifted behind the embedded engine across 16 rounds of the latter's bypass-closing fixes — not
+exploitable, the embedded-engine-authoritative guarantee was live-proven to hold).** **By this
+project's own established definition — zero open `severity:critical`/`severity:high` — Phase 2 IS
+genuinely gate-clean as of this round, for the first time surviving independent re-verification
+rather than being declared and later found wrong. This is a real milestone, not a reason to relax:
+4 live-reproduced MEDIUM/LOW gaps remain open, and the exact pattern that's repeated in this
+project's history — a fix introducing a new, different-shaped regression (`#280`→`#283`→`#297`) —
+just recurred a third time within a single fix's own aftermath (`#283`→`#297`/`#298`), so the next
+round should keep adversarially reviewing every fix, not just confirm it closes its reported bug.**
 
-## Immediate Next Step: Phase 3 Preparation
+## Immediate Next Step: Clear the 4 Open MEDIUM/LOW Issues, Then Phase 3 Prep
 
-Phase 2 hardening is gate-clean. Before starting Phase 3, keep the live critical/high issue queries
-empty and decide whether to provision a Plane instance for the skipped live contract tests.
+Prioritize `#297` and `#300` (both MEDIUM — real, live-reproduced availability/scalability defects,
+not security bypasses) before the two LOWs. `#297`: give `find_issue_by_controller_task_id` a
+server-side filter if Plane's API supports one, or restrict the full-project scan to the actual
+crash-recovery case (`plane_issue_id IS NULL`) rather than running it on every ordinary task
+creation. `#300`: scope `InMemoryRateLimitMiddleware`'s budget separately per endpoint class (or key
+it by IP+sender for `/intake/*`) so a burst of expected duplicate-retry traffic can't exhaust budget
+for legitimate new submissions from the same source. Then `#298` (narrow the audit-trail gap around
+`#283`'s early commit) and `#299` (bring `governance.rego` back to parity with the embedded engine,
+or explicitly document/deprecate the gap). Phase 2 is gate-clean by the tracked severity bar — before
+starting Phase 3, still confirm the live `severity:critical`/`severity:high` queries are empty (per
+the standing practice, never trust this file's own claim without re-running them), and decide
+whether provisioning a real Plane instance for the two skipped live-contract tests is worth doing
+before Phase 3 work begins, since Phase 3 will lean further on the Plane integration surface.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
