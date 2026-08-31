@@ -76,6 +76,9 @@ class StuckExecutionPoller:
         """Run one polling pass and return a list of actions taken."""
         actions: list[dict[str, Any]] = []
 
+        retry_start_actions = await self._poll_retry_start()
+        actions.extend(retry_start_actions)
+
         running_actions = await self._poll_running()
         actions.extend(running_actions)
 
@@ -84,6 +87,66 @@ class StuckExecutionPoller:
 
         agent_review_actions = await self._poll_agent_review()
         actions.extend(agent_review_actions)
+
+        return actions
+
+    async def _poll_retry_start(self) -> list[dict[str, Any]]:
+        """Fail retry executions whose external start never completed (#289).
+
+        Verification uses the internal Execution ID as a temporary task pointer
+        while the external macro-agent run ID is unknown. This sentinel must be
+        recovered separately: it is not a real run ID and must never be sent to
+        the macro-agent status endpoint.
+        """
+        result = await self.db.execute(
+            select(Task, Execution)
+            .join(Execution, Execution.task_id == Task.id)  # type: ignore[arg-type]
+            .where(Task.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
+            .where(Execution.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
+            .where(Execution.macro_agent_run_id.is_(None))  # type: ignore[union-attr]
+            .where(
+                Task.latest_macro_agent_run_id == Execution.id  # type: ignore[arg-type]
+            )
+            .limit(self._batch_size)
+        )
+
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task, execution in result.tuples().all():
+            timeout = await self._task_timeout_minutes(task)
+            deadline = execution.started_at + timedelta(
+                minutes=timeout * self._crash_timeout_factor()
+            )
+            if now < deadline:
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "would_fail_retry_start",
+                        "reason": "retry execution start never completed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            await self._mark_failed(
+                task,
+                execution,
+                "retry_execution_start_never_completed",
+            )
+            actions.append(
+                {
+                    "task_id": task.id,
+                    "execution_id": execution.id,
+                    "action": "failed_retry_start",
+                    "reason": "retry execution start never completed",
+                    "deadline": deadline.isoformat(),
+                }
+            )
+            await self.db.commit()
 
         return actions
 

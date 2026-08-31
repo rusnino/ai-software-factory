@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.constants import TaskState
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
@@ -217,6 +218,77 @@ class TestStuckExecutionPoller:
         assert actions == []
         state = await _fetch_task_state(db_session, task.id)
         assert state == TaskState.RUNNING
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="retry-start recovery requires a real PostgreSQL database",
+    )
+    async def test_retry_start_sentinel_is_selected_by_poller(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#289: a crashed retry start must not strand a RUNNING task."""
+        _engine, local_session = isolated_db
+        execution_id = str(uuid4())
+        task_id = f"task-retry-start-{execution_id[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    latest_macro_agent_run_id=execution_id,
+                    task_contract_json={"execution": {"timeout_minutes": 1}},
+                )
+            )
+            seed.add(
+                Execution(
+                    id=execution_id,
+                    task_id=task_id,
+                    state=TaskState.RUNNING,
+                    started_at=datetime.now(UTC) - timedelta(minutes=10),
+                    macro_agent_run_id=None,
+                )
+            )
+            await seed.commit()
+
+        class _UnexpectedStatusClient:
+            async def status(self, _run_id: str) -> dict[str, Any]:
+                raise AssertionError("retry-start sentinel must never be polled")
+
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(
+                db,
+                client=_UnexpectedStatusClient(),  # type: ignore[arg-type]
+            ).poll()
+
+        retry_actions = [
+            action for action in actions if action["action"] == "failed_retry_start"
+        ]
+        assert len(retry_actions) == 1
+        assert retry_actions[0]["task_id"] == task_id
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            assert execution.ended_at is not None
+
+            audit_rows = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+            assert any(
+                row.event_type == "execution_start_failed"
+                for row in audit_rows.scalars().all()
+            )
 
 
 async def _ready_task_with_execution(
