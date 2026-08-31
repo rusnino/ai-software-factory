@@ -158,8 +158,10 @@ class ReconciliationService:
                     root_plane_task_id=plane_issue_key,
                     project_id=effective_project_id,
                 )
-                if dag.tasks:
-                    opentasks_ids[task_id] = dag.tasks[0].id
+                for dag_task in dag.tasks:
+                    if dag_task.plane_task_id == plane_issue_key:
+                        opentasks_ids[task_id] = dag_task.id
+                        break
             except MaterializerError as exc:
                 report.divergences.append(
                     Divergence(

@@ -217,6 +217,70 @@ async def test_state_fix_includes_materialized_opentasks_id(
     assert projection.update_calls[0]["opentasks_id"] == "ot-291"
 
 
+async def test_state_fix_uses_root_materialized_opentasks_id(
+    fake_client: _FakePlaneClient,
+) -> None:
+    class _FakeMaterializer:
+        async def materialize(
+            self, root_plane_task_id: str, project_id: str
+        ) -> OpentasksDAG:
+            return OpentasksDAG(
+                project_id=project_id,
+                tasks=[
+                    OpentasksTask(
+                        id="ot-100",
+                        plane_task_id="plane-child-291",
+                        objective="Child task",
+                    ),
+                    OpentasksTask(
+                        id="ot-900",
+                        plane_task_id=root_plane_task_id,
+                        objective="Root task",
+                    ),
+                ],
+            )
+
+    class _FakeProjection:
+        def __init__(self) -> None:
+            self.update_calls: list[dict[str, Any]] = []
+
+        async def update_state(self, **kwargs: Any) -> dict[str, object]:
+            self.update_calls.append(kwargs)
+            return {}
+
+        async def add_comment(self, **_kwargs: Any) -> dict[str, object]:
+            return {}
+
+    fake_client.issues = [
+        {
+            "id": "plane-root-291",
+            "name": "Root task",
+            "state": {"name": "Done"},
+        }
+    ]
+    projection = _FakeProjection()
+    service = ReconciliationService(
+        plane_client=fake_client,
+        materializer=_FakeMaterializer(),  # type: ignore[arg-type]
+        projection_service=projection,  # type: ignore[arg-type]
+    )
+
+    await service.reconcile(
+        controller_tasks=[
+            (
+                "controller-task-291",
+                TaskState.RUNNING,
+                "proj-1",
+                "plane-root-291",
+            )
+        ],
+        project_id="proj-1",
+        fix=True,
+    )
+
+    assert projection.update_calls[0]["opentasks_id"] == "ot-900"
+
+
 async def test_state_uuid_resolved_to_name(
     fake_client: _FakePlaneClient,
 ) -> None:
