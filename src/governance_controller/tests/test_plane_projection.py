@@ -162,20 +162,6 @@ async def test_ensure_plane_issue_reuses_existing_issue(
     }
     httpx_mock.add_response(
         status_code=200,
-        json={
-            "results": [
-                {
-                    "id": "issue-other",
-                    "external_id": "TASK-other",
-                    "external_source": "governance-controller",
-                }
-            ],
-            "next_cursor": "cursor-1",
-            "next_page_results": True,
-        },
-    )
-    httpx_mock.add_response(
-        status_code=200,
         json={"results": [existing_issue], "next_page_results": False},
     )
     service = PlaneProjectionService(
@@ -193,8 +179,10 @@ async def test_ensure_plane_issue_reuses_existing_issue(
 
     assert result == existing_issue
     requests = httpx_mock.get_requests()
-    assert len(requests) == 2
-    assert all(request.method == "GET" for request in requests)
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.params["external_id"] == "TASK-1"
+    assert requests[0].url.params["external_source"] == "governance-controller"
 
 
 async def test_ensure_plane_issue_writes_external_traceability(

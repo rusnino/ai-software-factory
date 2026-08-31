@@ -18,6 +18,10 @@ _PLANE_EXTERNAL_SOURCE = "governance-controller"
 class PlaneClientError(Exception):
     """Raised when a Plane CE API call fails."""
 
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class PlaneClient:
     """Async HTTP client for Plane CE.
@@ -147,7 +151,25 @@ class PlaneClient:
         project_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Find an existing issue carrying a Controller task identifier."""
-        response = await self.list_all_issues(project_id=project_id)
+        try:
+            response = await self.list_issues(
+                project_id=project_id,
+                params={
+                    "external_id": controller_task_id,
+                    "external_source": _PLANE_EXTERNAL_SOURCE,
+                },
+            )
+        except PlaneClientError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+
+        if (
+            response.get("external_id") == controller_task_id
+            and response.get("external_source") == _PLANE_EXTERNAL_SOURCE
+        ):
+            return response
+
         issues = response.get("results", [])
         if not isinstance(issues, list):
             return None
@@ -380,5 +402,6 @@ class PlaneClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             raise PlaneClientError(
-                f"Plane API error {response.status_code}: {response.text}"
+                f"Plane API error {response.status_code}: {response.text}",
+                status_code=response.status_code,
             ) from exc

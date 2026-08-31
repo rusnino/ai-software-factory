@@ -74,33 +74,40 @@ async def test_list_issues_request(httpx_mock, settings_override: Settings) -> N
     )
 
 
-async def test_find_issue_by_controller_task_id_scans_all_issues(
+async def test_find_issue_by_controller_task_id_uses_server_filter(
     httpx_mock, settings_override: Settings
 ) -> None:
-    """Retries can recover a Plane issue created before its link was committed."""
-    httpx_mock.add_response(
-        status_code=200,
-        json={
-            "results": [
-                {
-                    "id": "issue-1",
-                    "external_id": "TASK-1",
-                    "external_source": "governance-controller",
-                },
-            ]
-        },
-    )
-
-    result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
-
-    assert result == {
+    """Lookup asks Plane for one external traceability match."""
+    matching_issue = {
         "id": "issue-1",
         "external_id": "TASK-1",
         "external_source": "governance-controller",
     }
+    httpx_mock.add_response(
+        status_code=200,
+        json=matching_issue,
+    )
+
+    result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
+
+    assert result == matching_issue
     request = httpx_mock.get_request()
     assert request is not None
     assert request.method == "GET"
+    assert request.url.params["external_id"] == "TASK-1"
+    assert request.url.params["external_source"] == "governance-controller"
+    assert "per_page" not in request.url.params
+
+
+async def test_find_issue_by_controller_task_id_returns_none_for_plane_404(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """A filtered Plane lookup treats a missing external match as absent."""
+    httpx_mock.add_response(status_code=404, json={"detail": "Not found"})
+
+    result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
+
+    assert result is None
 
 
 async def test_find_issue_by_controller_task_id_uses_external_id(
