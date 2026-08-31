@@ -1,5 +1,7 @@
 """Tests for macro-agent client and executor abstraction."""
 
+import http.server
+import threading
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -107,6 +109,35 @@ async def test_http_error_raises_exception(
 
     with pytest.raises(httpx.HTTPStatusError):
         await client.start({"task_id": "task-1"})
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_malformed_response_from_real_http_server() -> None:
+    """#285: a start response without run_id must fail at the HTTP boundary."""
+
+    class _MalformedResponseHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"queued"}')
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _MalformedResponseHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = MacroAgentClient(
+            base_url=f"http://127.0.0.1:{server.server_port}"
+        )
+        with pytest.raises(ValueError, match="Invalid macro-agent start response"):
+            await client.start({"task_id": "task-malformed-response"})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.mark.asyncio

@@ -646,6 +646,88 @@ async def test_verify_and_advance_sends_macro_agent_feedback_on_retry(
     assert call_args.args[1]["verification_report"]["passed"] is False
 
 
+async def test_malformed_retry_start_response_is_audited_and_fails_task(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#285: an invalid retry response must not leave a RUNNING task stranded."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller import config
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    _engine, session_local = isolated_db
+    task_id = "task-malformed-retry"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="project-malformed-retry",
+        proposed_by="agent-1",
+        objective="Test malformed retry response",
+        acceptance=["the retry failure is durable"],
+        execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+        verification={"commands": ["false"]},
+    )
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                state=TaskState.AGENT_REVIEW,
+                proposed_by="agent-1",
+                latest_macro_agent_run_id="run-malformed-original",
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            Execution(
+                id="exec-malformed-retry-original",
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                macro_agent_run_id="run-malformed-original",
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"status": "queued"})
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        with pytest.raises(RuntimeError, match="retry macro-agent start failed"):
+            await VerificationService.verify_and_advance(
+                db, task, contract, executor=fake_executor
+            )
+
+    async with session_local() as check:
+        task = await check.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        assert task.state == TaskState.FAILED
+
+        execution_result = await check.execute(
+            select(Execution).where(Execution.task_id == task_id)
+        )
+        executions = execution_result.scalars().all()
+        retry = next(
+            row
+            for row in executions
+            if row.id != "exec-malformed-retry-original"
+        )
+        assert retry.state == TaskState.FAILED
+        assert retry.ended_at is not None
+
+        audits = await check.execute(
+            select(AuditLog).where(AuditLog.task_id == task_id)
+        )
+        assert any(
+            row.event_type == "retry_execution_start_failed"
+            for row in audits.scalars().all()
+        )
+
+
 @pytest.mark.skipif(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",

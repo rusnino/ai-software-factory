@@ -12,6 +12,7 @@ from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
+from governance_controller.schemas.macro_agent import MacroAgentStartResponse
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
@@ -506,6 +507,9 @@ class ApprovalService:
                 sandbox=profile.execution.sandbox,
                 max_parallel_agents=profile.execution.max_parallel_agents,
             )
+            macro_agent_run_id = MacroAgentStartResponse.model_validate(
+                result
+            ).run_id
         except Exception as exc:  # pragma: no cover - broad error shield
             if await StateMachine.atomic_transition(self.db, task, TaskState.FAILED):
                 execution.state = TaskState.FAILED
@@ -547,7 +551,6 @@ class ApprovalService:
         # RUNNING wins. If the CAS loses (e.g. the poller already moved the task
         # to FAILED), flushing early would commit a RUNNING Execution row for a
         # FAILED task and orphan the real macro-agent run (#262).
-        macro_agent_run_id = result["run_id"]
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
             await AuditService.log(
                 db=self.db,

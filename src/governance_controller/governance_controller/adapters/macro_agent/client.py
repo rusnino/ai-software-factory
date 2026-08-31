@@ -5,6 +5,11 @@ from typing import Any, cast
 import httpx
 
 from governance_controller.config import settings
+from governance_controller.schemas.macro_agent import MacroAgentStartResponse
+
+
+class MacroAgentResponseError(ValueError):
+    """Raised when a macro-agent response violates the wire contract."""
 
 
 class MacroAgentClient:
@@ -18,7 +23,13 @@ class MacroAgentClient:
         async with self._client() as client:
             response = await client.post(f"{self.base_url}/runs", json=payload)
             response.raise_for_status()
-            return cast(dict[str, Any], response.json())
+            try:
+                parsed = MacroAgentStartResponse.model_validate(response.json())
+            except (TypeError, ValueError) as exc:
+                raise MacroAgentResponseError(
+                    "Invalid macro-agent start response"
+                ) from exc
+            return parsed.model_dump(exclude_none=True)
 
     async def status(self, run_id: str) -> dict[str, Any]:
         """Query macro-agent run status."""

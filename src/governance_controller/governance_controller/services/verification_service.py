@@ -24,6 +24,7 @@ from governance_controller.constants import TaskState
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
 from governance_controller.schemas.completion_contract import Check
+from governance_controller.schemas.macro_agent import MacroAgentStartResponse
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.alert_service import AlertService
@@ -665,6 +666,9 @@ class VerificationService:
                 sandbox=sandbox,
                 max_parallel_agents=max_parallel_agents,
             )
+            macro_agent_run_id = MacroAgentStartResponse.model_validate(
+                result
+            ).run_id
         except Exception as exc:
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted. Do NOT
@@ -712,7 +716,7 @@ class VerificationService:
             await db.commit()
             raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
-        execution.macro_agent_run_id = result["run_id"]
+        execution.macro_agent_run_id = macro_agent_run_id
         # Persist the new run ID on the task so feedback has a target even when
         # the relationship is not loaded.
         task.latest_macro_agent_run_id = execution.macro_agent_run_id

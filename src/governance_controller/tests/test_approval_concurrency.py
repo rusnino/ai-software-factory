@@ -290,6 +290,61 @@ class TestApprovalConcurrency:
             )
             assert len(executions.scalars().all()) == 1
 
+    async def test_malformed_start_response_is_audited_and_fails_task(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#285: an invalid macro-agent response must use the failure path."""
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            await _seed_task(seed, "task-malformed-start")
+
+        contract = _make_contract("task-malformed-start")
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"status": "queued"}
+
+        async with local_session() as db:
+            task = await db.scalar(
+                select(Task).where(Task.id == "task-malformed-start")
+            )
+            assert task is not None
+            service = ApprovalService(db=db, executor=fake_executor)
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-malformed-start",
+                )
+
+        async with local_session() as check:
+            task = await check.scalar(
+                select(Task).where(Task.id == "task-malformed-start")
+            )
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task.id)
+            )
+            assert any(
+                row.event_type == "execution_start_failed"
+                for row in audits.scalars().all()
+            )
+
     async def test_concurrent_execution_approvals_do_not_double_trigger(
         self,
         isolated_db: tuple,
