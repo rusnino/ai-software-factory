@@ -1,7 +1,10 @@
 """Tests for the global per-IP rate-limiting middleware (#248)."""
 
+import asyncio
+import os
 import time
 from collections import deque
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -172,4 +175,172 @@ async def test_duplicate_intake_does_not_consume_global_ip_budget(
     assert first.status_code == 200
     assert duplicate_one.status_code == 409
     assert duplicate_two.status_code == 409
+    assert new_submission.status_code == 200
+
+
+async def test_inflight_duplicate_intake_burst_does_not_starve_new_submission(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#300: duplicate retries already in the handler must not fill IP slots."""
+    from governance_controller.api.intake import get_idea_ingestion_service
+    from governance_controller.main import app
+    from governance_controller.schemas.intake import ClassifiedIdea, RawIdea
+    from governance_controller.services.idea_ingestion_service import (
+        DuplicateIntakeError,
+    )
+
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
+    monkeypatch.setattr(settings, "intake_secret", "intake-secret")
+    reset_rate_limits()
+
+    duplicate_started = asyncio.Event()
+    release_duplicates = asyncio.Event()
+    started_count = 0
+
+    class _SlowDuplicateService:
+        def classify(self, idea: RawIdea) -> ClassifiedIdea:
+            return ClassifiedIdea(
+                idea=idea,
+                category="new_project",
+                confidence=1.0,
+                reason="test",
+            )
+
+        async def create_draft(
+            self,
+            classified: ClassifiedIdea,
+            project_id: str | None = None,
+            db: Any = None,
+        ) -> dict[str, object]:
+            nonlocal started_count
+            if classified.idea.source_id == "duplicate":
+                started_count += 1
+                if started_count == 3:
+                    duplicate_started.set()
+                await release_duplicates.wait()
+                raise DuplicateIntakeError("duplicate")
+            return {"id": "new-draft"}
+
+    service = _SlowDuplicateService()
+    app.dependency_overrides[get_idea_ingestion_service] = lambda: service
+
+    def payload(source_id: str) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": source_id,
+            "sender": "alice@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    headers = {"X-Intake-Secret": "intake-secret"}
+    duplicate_requests = [
+        asyncio.create_task(
+            async_client.post(
+                "/intake/idea", json=payload("duplicate"), headers=headers
+            )
+        )
+        for _ in range(3)
+    ]
+    try:
+        await duplicate_started.wait()
+        new_submission = await async_client.post(
+            "/intake/idea", json=payload("new"), headers=headers
+        )
+        release_duplicates.set()
+        duplicate_responses = await asyncio.gather(*duplicate_requests)
+    finally:
+        release_duplicates.set()
+        app.dependency_overrides.pop(get_idea_ingestion_service, None)
+
+    assert [response.status_code for response in duplicate_responses] == [409] * 3
+    assert new_submission.status_code == 200
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_inflight_duplicate_intake_burst_uses_real_postgres_sessions(
+    isolated_db: tuple,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#300: concurrent real intake requests cannot starve a new submission."""
+    from governance_controller.api.intake import get_idea_ingestion_service
+    from governance_controller.schemas.intake import ClassifiedIdea
+    from governance_controller.services.idea_ingestion_service import (
+        IdeaIngestionService,
+    )
+
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 3)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "intake_secret", "intake-secret")
+    monkeypatch.setattr(settings, "plane_base_url", "")
+    reset_rate_limits()
+
+    duplicate_started = asyncio.Event()
+    release_duplicates = asyncio.Event()
+    started_count = 0
+
+    class _DelayedIngestionService(IdeaIngestionService):
+        async def create_draft(
+            self,
+            classified: ClassifiedIdea,
+            project_id: str | None = None,
+            db: Any = None,
+        ) -> dict[str, object] | None:
+            nonlocal started_count
+            if classified.idea.source_id == "duplicate":
+                started_count += 1
+                if started_count == 3:
+                    duplicate_started.set()
+                await release_duplicates.wait()
+            return await super().create_draft(
+                classified, project_id=project_id, db=db
+            )
+
+    from governance_controller.main import app
+
+    service = _DelayedIngestionService()
+    app.dependency_overrides[get_idea_ingestion_service] = lambda: service
+
+    def payload(source_id: str) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": source_id,
+            "sender": "alice@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    headers = {"X-Intake-Secret": "intake-secret"}
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            duplicate_requests = [
+                asyncio.create_task(
+                    client.post(
+                        "/intake/idea", json=payload("duplicate"), headers=headers
+                    )
+                )
+                for _ in range(3)
+            ]
+            await asyncio.wait_for(duplicate_started.wait(), timeout=5)
+            new_submission = await client.post(
+                "/intake/idea", json=payload("new"), headers=headers
+            )
+            release_duplicates.set()
+            duplicate_responses = await asyncio.gather(*duplicate_requests)
+    finally:
+        release_duplicates.set()
+        app.dependency_overrides.pop(get_idea_ingestion_service, None)
+
+    assert sorted(response.status_code for response in duplicate_responses) == [
+        200,
+        409,
+        409,
+    ]
     assert new_submission.status_code == 200

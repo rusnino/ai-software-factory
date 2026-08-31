@@ -19,6 +19,7 @@ WRITE_PATHS = {
     "/intake/telegram",
     "/webhooks/plane",
 }
+_INTAKE_PATHS = {path for path in WRITE_PATHS if path.startswith("/intake/")}
 
 _RATE_LIMIT_WINDOW_SECONDS = 60
 # Cap on distinct source IPs tracked simultaneously; prevents unbounded memory
@@ -41,8 +42,9 @@ class InMemoryRateLimitMiddleware:
 
     Tracks request timestamps in memory per source IP. Requests beyond
     ``GC_RATE_LIMIT_PER_MINUTE`` within a rolling 60-second window receive
-    ``429 Too Many Requests``. ``/health`` is exempt so load balancers and
-    monitoring stay functional.
+    ``429 Too Many Requests``. ``/health`` and intake endpoints are exempt:
+    intake authentication and its durable sender/duplicate guard must run
+    before a retry can be classified without starving a new submission (#300).
 
     # ponytail: in-memory only; multi-process deployments need a shared store
     # (Redis, memcached) once rate limits must be cluster-wide.
@@ -62,7 +64,7 @@ class InMemoryRateLimitMiddleware:
             return
 
         path = scope.get("path", "")
-        if path.rstrip("/") == "/health":
+        if path.rstrip("/") == "/health" or path.rstrip("/") in _INTAKE_PATHS:
             await self.app(scope, receive, send)
             return
 
