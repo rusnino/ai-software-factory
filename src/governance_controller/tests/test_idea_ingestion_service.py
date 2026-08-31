@@ -23,16 +23,13 @@ class _FakePlaneClient:
         self,
         name: str,
         description: str | None = None,
-        state: str | None = None,
         project_id: str | None = None,
-        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "name": name,
                 "description": description,
                 "project_id": project_id,
-                "extra": extra,
             }
         )
         return {"id": "issue-1", "name": name}
@@ -114,7 +111,7 @@ async def test_create_draft_creates_plane_issue() -> None:
     assert call["name"] == "Dark mode"
     assert call["description"] == "Make it dark"
     assert call["project_id"] == "proj-1"
-    assert call["extra"]["controller_status"] == "needs_triage"
+    assert set(call) == {"name", "description", "project_id"}
 
 
 async def test_create_draft_escapes_html_in_plane_payload() -> None:

@@ -179,7 +179,6 @@ class PlaneClient:
         description: str | None = None,
         state: str | None = None,
         project_id: str | None = None,
-        extra: dict[str, Any] | None = None,
         external_id: str | None = None,
         external_source: str | None = None,
     ) -> dict[str, Any]:
@@ -190,7 +189,6 @@ class PlaneClient:
             description: Optional HTML/markdown description.
             state: Optional Plane state UUID.
             project_id: Optional project override.
-            extra: Additional Plane fields.
             external_id: Optional external identifier stored by Plane.
             external_source: Optional source for the external identifier.
         """
@@ -200,8 +198,6 @@ class PlaneClient:
             payload["description_html"] = description
         if state is not None:
             payload["state"] = state
-        if extra is not None:
-            payload.update(extra)
         if external_id is not None:
             payload["external_id"] = external_id
         if external_source is not None:

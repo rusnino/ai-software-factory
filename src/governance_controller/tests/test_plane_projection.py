@@ -50,7 +50,6 @@ class _FakePlaneClient:
         description: str | None = None,
         state: str | None = None,
         project_id: str | None = None,
-        extra: dict[str, Any] | None = None,
         external_id: str | None = None,
         external_source: str | None = None,
     ) -> dict[str, Any]:
@@ -62,7 +61,6 @@ class _FakePlaneClient:
                     description,
                     state,
                     project_id,
-                    extra,
                     external_id,
                     external_source,
                 ),
@@ -173,9 +171,7 @@ async def test_ensure_plane_issue_writes_external_traceability(
     )
 
     create_call = next(c for c in fake_client.calls if c[0] == "create_issue")
-    extra = create_call[1][4]
-    assert extra is None
-    assert create_call[1][5:] == ("TASK-1", "governance-controller")
+    assert create_call[1][4:] == ("TASK-1", "governance-controller")
 
 
 async def test_update_state_resolves_state_and_updates(

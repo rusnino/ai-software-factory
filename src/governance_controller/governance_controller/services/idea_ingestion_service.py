@@ -136,17 +136,10 @@ class IdeaIngestionService:
 
         title = html.escape(classified.idea.subject or "Intake draft")
         description = html.escape(classified.idea.body)
+        # Intake-only metadata has no supported Plane create-field contract.
         result = await client.create_issue(
             name=title,
             description=description,
-            extra={
-                "source": classified.idea.source,
-                "controller_status": "needs_triage",
-                # SPEC-04 §4.7 custom fields. controller_task_id and
-                # opentasks_id are not known at intake time; approval_required
-                # is inherited from the intake idea where applicable.
-                "approval_required": False,
-            },
             project_id=effective_project,
         )
 
