@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import patch
@@ -643,6 +644,196 @@ async def test_verify_and_advance_sends_macro_agent_feedback_on_retry(
     assert call_args.args[0] == "run-124"
     assert call_args.args[1]["controller_task_id"] == "task-feedback-1"
     assert call_args.args[1]["verification_report"]["passed"] is False
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_verify_commits_before_slow_plane_alert(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#283: failed state/audit must commit before alerting Plane."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller import config
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    class _SlowAlert:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def notify_verification_failure(self, **_kwargs: object) -> None:
+            self.started.set()
+            await self.release.wait()
+
+    _engine, session_local = isolated_db
+    slow_alert = _SlowAlert()
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    monkeypatch.setattr(
+        "governance_controller.services.verification_service.AlertService",
+        lambda: slow_alert,
+    )
+
+    task_id = "task-alert-boundary-283"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="project-alert-283",
+        proposed_by="agent-1",
+        objective="Test alert transaction boundary",
+        acceptance=["failure state is durable before alerting"],
+        execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+        verification={"commands": ["false"]},
+    )
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                state=TaskState.AGENT_REVIEW,
+                proposed_by="agent-1",
+                latest_macro_agent_run_id="run-alert-original",
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            Execution(
+                id="exec-alert-boundary-283",
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                macro_agent_run_id="run-alert-original",
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"run_id": "run-alert-retry"})
+    fake_executor.feedback = AsyncMock(return_value={"status": "ok"})
+    verification_task = None
+    async with session_local() as worker:
+        task = await worker.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        verification_task = asyncio.create_task(
+            VerificationService.verify_and_advance(
+                worker, task, contract, executor=fake_executor
+            )
+        )
+        try:
+            await slow_alert.started.wait()
+            async with session_local() as observer:
+                task_row = await observer.scalar(select(Task).where(Task.id == task_id))
+                failed_audits = await observer.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "verification_failed",
+                    )
+                )
+
+            assert task_row is not None
+            assert task_row.state == TaskState.FAILED
+            assert failed_audits.scalars().first() is not None
+        finally:
+            slow_alert.release.set()
+            assert verification_task is not None
+            await verification_task
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_retry_audit_commits_before_macro_agent_feedback(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#283: retry-start audit must commit before feedback I/O."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller import config
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    class _SlowFeedback:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def __call__(
+            self, _run_id: str, _payload: dict[str, object]
+        ) -> dict[str, object]:
+            self.started.set()
+            await self.release.wait()
+            return {"status": "ok"}
+
+    _engine, session_local = isolated_db
+    slow_feedback = _SlowFeedback()
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+
+    task_id = "task-feedback-boundary-283"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="project-feedback-283",
+        proposed_by="agent-1",
+        objective="Test feedback transaction boundary",
+        acceptance=["retry audit is durable before feedback"],
+        execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+        verification={"commands": ["false"]},
+    )
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                state=TaskState.AGENT_REVIEW,
+                proposed_by="agent-1",
+                latest_macro_agent_run_id="run-feedback-original",
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            Execution(
+                id="exec-feedback-boundary-283",
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                macro_agent_run_id="run-feedback-original",
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"run_id": "run-feedback-retry"})
+    fake_executor.feedback = slow_feedback  # type: ignore[method-assign]
+    verification_task = None
+    async with session_local() as worker:
+        task = await worker.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        verification_task = asyncio.create_task(
+            VerificationService.verify_and_advance(
+                worker, task, contract, executor=fake_executor
+            )
+        )
+        try:
+            await slow_feedback.started.wait()
+            async with session_local() as observer:
+                retry_audits = await observer.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "retry_execution_start",
+                    )
+                )
+
+            assert retry_audits.scalars().first() is not None
+        finally:
+            slow_feedback.release.set()
+            assert verification_task is not None
+            await verification_task
 
 
 async def test_verify_and_advance_finalizes_execution_to_human_review(

@@ -1,6 +1,8 @@
 """Tests for the AuditLog model and AuditService."""
 
+import asyncio
 import os
+from typing import Any
 from unittest.mock import patch
 from uuid import UUID
 
@@ -630,6 +632,76 @@ class TestAuditLogPostgresDDL:
         assert len({row.previous_hash for row in rows[1:]}) == writers
         for previous, current in zip(rows, rows[1:], strict=False):
             assert current.previous_hash == previous.row_hash
+
+    async def test_audit_lock_is_released_before_slow_projection(
+        self, isolated_db: tuple[AsyncEngine, sessionmaker]
+    ) -> None:
+        """#283: projection I/O must not hold the global audit tip lock."""
+        engine, session_local = isolated_db
+        assert engine.dialect.name == "postgresql"
+
+        class _SlowProjection:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+
+            async def update_state(self, **_kwargs: Any) -> dict[str, Any]:
+                self.started.set()
+                await self.release.wait()
+                return {}
+
+        async with session_local() as seed:
+            task = await _make_task(seed, task_id="task-slow-projection")
+            await seed.commit()
+
+        slow_projection = _SlowProjection()
+        slow_session = session_local()
+        try:
+            task = await slow_session.scalar(
+                select(Task).where(Task.id == "task-slow-projection")
+            )
+            assert task is not None
+            service = ApprovalService(
+                db=slow_session,
+                plane_projection=slow_projection,  # type: ignore[arg-type]
+            )
+            await AuditService.log(
+                db=slow_session,
+                event_type="state_change",
+                task_id=task.id,
+                actor="system",
+                source="test",
+            )
+
+            projection_task = asyncio.create_task(
+                service._project_state_to_plane(
+                    task=task,
+                    state=TaskState.PLAN_APPROVED,
+                    approval_type=ApprovalType.PLAN,
+                )
+            )
+            await slow_projection.started.wait()
+
+            async def write_unrelated_audit() -> None:
+                async with session_local() as unrelated:
+                    await AuditService.log(
+                        db=unrelated,
+                        event_type="unrelated_write",
+                        task_id="task-other",
+                        actor="system",
+                        source="test",
+                    )
+                    await unrelated.commit()
+
+            await asyncio.wait_for(write_unrelated_audit(), timeout=0.5)
+            slow_projection.release.set()
+            await projection_task
+        finally:
+            if not slow_projection.release.is_set():
+                slow_projection.release.set()
+            if "projection_task" in locals():
+                await projection_task
+            await slow_session.rollback()
 
 
 class TestAuditServiceSideEffects:

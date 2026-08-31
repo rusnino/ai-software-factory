@@ -331,6 +331,11 @@ class ApprovalService:
         if projection is None:
             return
 
+        # The Postgres audit-tip lock is transaction-scoped. Commit the
+        # authoritative Controller state before non-authoritative Plane I/O so
+        # a slow projection cannot hold the global lock for another task.
+        await self.db.commit()
+
         try:
             await projection.update_state(
                 controller_task_id=task.id,

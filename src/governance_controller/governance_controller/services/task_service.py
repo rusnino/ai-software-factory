@@ -54,7 +54,19 @@ class TaskService:
         self.db.add(task)
         await self.db.flush()
 
+        await AuditService.log(
+            db=self.db,
+            event_type="task_created",
+            task_id=task.id,
+            actor=task.proposed_by,
+            source="task_service",
+            payload={"project_id": task.project_id},
+        )
+
         if settings.plane_base_url:
+            # Commit the authoritative task and audit rows before the
+            # non-authoritative Plane request can block on external I/O.
+            await self.db.commit()
             try:
                 issue = await PlaneProjectionService().ensure_plane_issue(
                     controller_task_id=task.id,
@@ -88,15 +100,6 @@ class TaskService:
                         "error_type": type(exc).__name__,
                     },
                 )
-
-        await AuditService.log(
-            db=self.db,
-            event_type="task_created",
-            task_id=task.id,
-            actor=task.proposed_by,
-            source="task_service",
-            payload={"project_id": task.project_id},
-        )
 
         return task
 

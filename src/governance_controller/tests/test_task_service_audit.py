@@ -1,5 +1,7 @@
 """Tests for audit logging inside TaskService."""
 
+import asyncio
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -7,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.models.audit_log import AuditLog
+from governance_controller.models.task import Task
 from governance_controller.schemas import ProjectProfile, RepositoryConfig, TaskContract
 from governance_controller.services.task_service import TaskService
 
@@ -130,3 +133,71 @@ async def test_plane_issue_creation_failure_is_audited(
     )
     entries = rows.scalars().all()
     assert any(e.event_type == "plane_issue_creation_failed" for e in entries)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_task_creation_commits_before_slow_plane_projection(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#283: task/audit rows must be visible before Plane I/O begins."""
+    from governance_controller import config
+
+    class _SlowProjection:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def ensure_plane_issue(self, **_kwargs: object) -> dict[str, str]:
+            self.started.set()
+            await self.release.wait()
+            return {"id": "plane-task-283"}
+
+    _engine, session_local = isolated_db
+    slow_projection = _SlowProjection()
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+
+    contract = TaskContract(
+        task_id="task-create-283",
+        project_id="project-create-283",
+        proposed_by="agent-1",
+        objective="Test task creation transaction boundary",
+        acceptance=["the audit is durable before projection"],
+    )
+    profile = ProjectProfile(
+        project_id="project-create-283",
+        project_name="Project 283",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+
+    creator = session_local()
+    with patch(
+        "governance_controller.services.task_service.PlaneProjectionService",
+        return_value=slow_projection,
+    ):
+        create_task = asyncio.create_task(
+            TaskService(creator).create(contract, profile)
+        )
+        try:
+            await slow_projection.started.wait()
+            async with session_local() as observer:
+                task_row = await observer.scalar(
+                    select(Task).where(Task.id == contract.task_id)
+                )
+                audit_rows = await observer.execute(
+                    select(AuditLog).where(AuditLog.task_id == contract.task_id)
+                )
+
+            assert task_row is not None
+            assert any(
+                row.event_type == "task_created"
+                for row in audit_rows.scalars().all()
+            )
+        finally:
+            slow_projection.release.set()
+            await create_task
+            await creator.rollback()
+            await creator.close()

@@ -444,6 +444,9 @@ class VerificationService:
                         report=report,
                         reason="max_retries_exhausted",
                     )
+                    # Release the transaction-scoped audit-tip lock before
+                    # sending the non-authoritative Plane alert.
+                    await db.commit()
                     await AlertService().notify_terminal_failure(
                         task=task,
                         contract=contract,
@@ -465,6 +468,9 @@ class VerificationService:
                         },
                     )
                 return report
+            # The failed state and its audit entry are authoritative; commit
+            # them before the potentially slow Plane feedback call.
+            await db.commit()
             try:
                 await AlertService().notify_verification_failure(
                     task=task,
@@ -510,6 +516,10 @@ class VerificationService:
                     profile=profile,
                     report=report,
                 )
+                # _start_retry_execution records the retry-start audit after
+                # its own pre-start commit. Release that audit-tip lock before
+                # the outbound feedback request.
+                await db.commit()
                 # SPEC-09 §9.6 step 2: send failure feedback to macro-agent so
                 # the retry run receives the previous verification report.
                 await service._send_macro_agent_feedback(
