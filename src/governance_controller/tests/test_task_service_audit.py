@@ -135,6 +135,48 @@ async def test_plane_issue_creation_failure_is_audited(
     assert any(e.event_type == "plane_issue_creation_failed" for e in entries)
 
 
+async def test_plane_issue_link_survives_caller_rollback(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A link returned by Plane must be durable before the service returns."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+
+    projection = MagicMock()
+    projection.ensure_plane_issue = AsyncMock(return_value={"id": "plane-linked"})
+
+    contract = TaskContract(
+        task_id="audit-plane-link",
+        project_id="audit-proj-link",
+        proposed_by="agent-1",
+        objective="Persist the Plane link",
+        acceptance=["the link survives a caller rollback"],
+    )
+    profile = ProjectProfile(
+        project_id="audit-proj-link",
+        project_name="Project Link",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+
+    with patch(
+        "governance_controller.services.task_service.PlaneProjectionService",
+        return_value=projection,
+    ):
+        await TaskService(db_session).create(contract, profile)
+
+    # Simulate a caller failing after TaskService.create returned. The task and
+    # Plane issue link must already be committed by the service itself.
+    await db_session.rollback()
+
+    task = await db_session.scalar(
+        select(Task).where(Task.id == "audit-plane-link")
+    )
+    assert task is not None
+    assert task.plane_issue_id == "plane-linked"
+
+
 @pytest.mark.skipif(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",

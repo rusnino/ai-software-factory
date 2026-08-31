@@ -139,6 +139,23 @@ class PlaneClient:
             params=params or {},
         )
 
+    async def find_issue_by_controller_task_id(
+        self,
+        controller_task_id: str,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Find an existing issue carrying a Controller task identifier."""
+        response = await self.list_all_issues(project_id=project_id)
+        issues = response.get("results", [])
+        if not isinstance(issues, list):
+            return None
+        for issue in issues:
+            if isinstance(issue, dict) and issue.get("controller_task_id") == (
+                controller_task_id
+            ):
+                return issue
+        return None
+
     async def get_issue(
         self,
         issue_id: str,

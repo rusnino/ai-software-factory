@@ -74,6 +74,27 @@ async def test_list_issues_request(httpx_mock, settings_override: Settings) -> N
     )
 
 
+async def test_find_issue_by_controller_task_id_scans_all_issues(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """Retries can recover a Plane issue created before its link was committed."""
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [
+                {"id": "issue-1", "controller_task_id": "TASK-1"},
+            ]
+        },
+    )
+
+    result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
+
+    assert result == {"id": "issue-1", "controller_task_id": "TASK-1"}
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert request.method == "GET"
+
+
 async def test_create_issue_request(httpx_mock, settings_override: Settings) -> None:
     """create_issue serializes the payload correctly."""
     httpx_mock.add_response(

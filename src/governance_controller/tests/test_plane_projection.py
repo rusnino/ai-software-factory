@@ -11,6 +11,7 @@ from governance_controller.services.plane_projection import PlaneProjectionServi
 class _FakePlaneClient:
     def __init__(self, state_map: dict[str, str] | None = None) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.existing_issue: dict[str, Any] | None = None
         self._state_map = state_map or {
             "Proposed": "state-proposed",
             "Plan Approved": "state-plan-approved",
@@ -23,6 +24,13 @@ class _FakePlaneClient:
             "Failed": "state-failed",
             "Blocked": "state-blocked",
         }
+
+    async def find_issue_by_controller_task_id(
+        self,
+        controller_task_id: str,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self.existing_issue
 
     async def list_states(
         self, project_id: str | None = None
@@ -87,6 +95,24 @@ async def test_ensure_plane_issue_creates_issue(fake_client: _FakePlaneClient) -
     assert fake_client.calls[1][0] == "create_issue"
     assert fake_client.calls[1][2] == {}  # kwargs empty
     assert fake_client.calls[1][1][2] == "state-proposed"  # state id
+
+
+async def test_ensure_plane_issue_reuses_existing_issue(
+    fake_client: _FakePlaneClient,
+) -> None:
+    """A retry after a post-create crash must not create a duplicate issue."""
+    fake_client.existing_issue = {
+        "id": "issue-existing",
+        "controller_task_id": "TASK-1",
+    }
+    service = PlaneProjectionService(client=fake_client)
+
+    result = await service.ensure_plane_issue(
+        controller_task_id="TASK-1", title="Do work", state=TaskState.PROPOSED
+    )
+
+    assert result == fake_client.existing_issue
+    assert not any(call[0] == "create_issue" for call in fake_client.calls)
 
 
 async def test_ensure_plane_issue_writes_custom_fields(

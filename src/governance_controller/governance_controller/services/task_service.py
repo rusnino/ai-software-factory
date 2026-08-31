@@ -13,7 +13,10 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
-from governance_controller.services.plane_projection import PlaneProjectionService
+from governance_controller.services.plane_projection import (
+    PlaneProjectionService,
+    acquire_plane_projection_lock,
+)
 
 
 class TaskService:
@@ -67,6 +70,7 @@ class TaskService:
             # Commit the authoritative task and audit rows before the
             # non-authoritative Plane request can block on external I/O.
             await self.db.commit()
+            await acquire_plane_projection_lock(self.db, task.id)
             try:
                 issue = await PlaneProjectionService().ensure_plane_issue(
                     controller_task_id=task.id,
@@ -84,6 +88,10 @@ class TaskService:
                     if isinstance(plane_issue_id, str):
                         task.plane_issue_id = plane_issue_id
                         await self.db.flush()
+                # Persist the Plane link before returning. A caller rollback or
+                # crash after the Plane request must not lose the id that makes
+                # subsequent ensure calls idempotent.
+                await self.db.commit()
             except Exception as exc:
                 # Plane projection failures must not block task creation, but
                 # they must be durable and actionable. Record an audit entry so
@@ -100,6 +108,7 @@ class TaskService:
                         "error_type": type(exc).__name__,
                     },
                 )
+                await self.db.commit()
 
         return task
 

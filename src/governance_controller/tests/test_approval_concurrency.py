@@ -7,7 +7,8 @@ production guard without requiring true interleaved concurrency.
 """
 
 import asyncio
-from contextlib import asynccontextmanager
+import os
+from contextlib import asynccontextmanager, suppress
 from unittest.mock import AsyncMock
 
 import pytest
@@ -61,6 +62,130 @@ async def _seed_task(db: AsyncSession, task_id: str) -> None:
 
 
 class TestApprovalConcurrency:
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_slow_older_plane_projection_cannot_overwrite_newer_state(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#283: a later state projection must win over an older slow request."""
+
+        class _OrderedProjection:
+            def __init__(self) -> None:
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.running_started = asyncio.Event()
+                self.states: list[TaskState] = []
+
+            async def update_state(self, **kwargs: object) -> dict[str, object]:
+                state = kwargs["state"]
+                assert isinstance(state, TaskState)
+                if state == TaskState.PLAN_APPROVED:
+                    self.started.set()
+                    await self.release.wait()
+                elif state == TaskState.RUNNING:
+                    self.running_started.set()
+                self.states.append(state)
+                return {}
+
+        _engine, local_session = isolated_db
+        projection = _OrderedProjection()
+        contract = _make_contract("task-plane-order-283")
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-plane-order-283"}
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=contract.task_id,
+                    project_id=contract.project_id,
+                    state=TaskState.PROPOSED,
+                    proposed_by=contract.proposed_by,
+                )
+            )
+            await seed.commit()
+
+        session_a = local_session()
+        plan_task = None
+        try:
+            task_a = await session_a.scalar(
+                select(Task).where(Task.id == contract.task_id)
+            )
+            assert task_a is not None
+            plan_task = asyncio.create_task(
+                ApprovalService(
+                    db=session_a,
+                    plane_projection=projection,  # type: ignore[arg-type]
+                ).approve(
+                    task=task_a,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.PLAN,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-plane-plan-283",
+                )
+            )
+            await projection.started.wait()
+
+            async def _approve_execution() -> Task:
+                async with local_session() as session_b:
+                    task_b = await session_b.scalar(
+                        select(Task).where(Task.id == contract.task_id)
+                    )
+                    assert task_b is not None
+                    result = await ApprovalService(
+                        db=session_b,
+                        executor=fake_executor,
+                        plane_projection=projection,  # type: ignore[arg-type]
+                    ).approve(
+                        task=task_b,
+                        contract=contract,
+                        profile=profile,
+                        approval_type=ApprovalType.EXECUTION,
+                        source="test",
+                        actor="admin",
+                        idempotency_key="key-plane-execution-283",
+                    )
+                    await session_b.commit()
+                    return result
+
+            execution_task = asyncio.create_task(_approve_execution())
+            for _ in range(100):
+                async with local_session() as observer:
+                    current = await observer.scalar(
+                        select(Task).where(Task.id == contract.task_id)
+                    )
+                if current is not None and current.state in {
+                    TaskState.EXEC_APPROVED,
+                    TaskState.RUNNING,
+                }:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                pytest.fail("execution approval never committed EXEC_APPROVED")
+
+            # Without a per-task projection lock, the newer RUNNING projection
+            # completes before the older PLAN projection is released. A correct
+            # lock implementation keeps it waiting here until PLAN completes.
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(projection.running_started.wait(), 1.0)
+            projection.release.set()
+            await plan_task
+            result = await execution_task
+            assert result.state == TaskState.RUNNING
+            assert projection.states[-1] == TaskState.RUNNING
+        finally:
+            projection.release.set()
+            if plan_task is not None and not plan_task.done():
+                await plan_task
+            if "execution_task" in locals() and not execution_task.done():
+                await execution_task
+            await session_a.close()
+
     async def test_second_approval_after_commit_fails_with_concurrent_modification(
         self,
         isolated_db: tuple,

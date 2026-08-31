@@ -5,9 +5,40 @@ authoritative Controller state. Plane is a projection; the Controller decides
 when and how to update it.
 """
 
+import hashlib
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
+
+
+def _plane_projection_lock_key(controller_task_id: str) -> int:
+    """Return a stable advisory-lock key for one Controller task."""
+    digest = hashlib.sha256(
+        b"plane-projection:" + controller_task_id.encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+async def acquire_plane_projection_lock(
+    db: AsyncSession, controller_task_id: str
+) -> None:
+    """Serialize Plane projections for one task on PostgreSQL.
+
+    The caller must commit or roll back after the external projection completes.
+    This is deliberately a task-scoped transaction lock, not the global audit
+    chain lock, so it cannot serialize unrelated tasks across Plane I/O.
+    """
+    bind = db.bind
+    if bind is None or bind.dialect.name != "postgresql":
+        return
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(:key)"),
+        {"key": _plane_projection_lock_key(controller_task_id)},
+    )
 
 # Mapping from Controller state name to Plane state display name. Plane CE state
 # UUIDs are fetched at runtime per project.
@@ -62,6 +93,12 @@ class PlaneProjectionService:
         client = self._client_or_none()
         if client is None:
             return None
+
+        existing = await client.find_issue_by_controller_task_id(
+            controller_task_id, project_id=project_id
+        )
+        if existing is not None:
+            return existing
 
         state_id = await self._resolve_state_id(state, project_id=project_id)
         extra: dict[str, object] = {

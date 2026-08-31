@@ -23,6 +23,7 @@ from governance_controller.services.opentasks_materializer import (
 from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.plane_projection import (
     PlaneProjectionService,
+    acquire_plane_projection_lock,
 )
 from governance_controller.services.policy_engine import (
     PolicyEngine,
@@ -336,6 +337,19 @@ class ApprovalService:
         # authoritative Controller state before non-authoritative Plane I/O so
         # a slow projection cannot hold the global lock for another task.
         await self.db.commit()
+        # Serialize projections for this task without blocking unrelated task
+        # transitions. The fresh read prevents a projection that waited behind
+        # a newer transition from sending its stale requested state.
+        await acquire_plane_projection_lock(self.db, task.id)
+        fresh_result = await self.db.execute(
+            select(Task)
+            .where(Task.id == task.id)  # type: ignore[arg-type]
+            .execution_options(populate_existing=True)
+        )
+        fresh_task = fresh_result.scalar_one_or_none()
+        if fresh_task is not None:
+            task = fresh_task
+            state = fresh_task.state
 
         try:
             await projection.update_state(
@@ -360,6 +374,10 @@ class ApprovalService:
                     "error_type": type(exc).__name__,
                 },
             )
+            await self.db.commit()
+        else:
+            # Release the task-scoped advisory lock after the external call.
+            await self.db.commit()
 
     async def _log_rejection_and_raise(
         self,
