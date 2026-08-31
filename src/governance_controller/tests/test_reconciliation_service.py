@@ -1,12 +1,17 @@
 """Tests for the reconciliation service."""
 
+import asyncio
+import os
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 
-from governance_controller.constants import TaskState
+from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.task import Task
+from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.reconciliation_service import (
+    ReconciliationReport,
     ReconciliationService,
 )
 
@@ -305,4 +310,107 @@ async def test_task_still_in_state_detects_concurrent_change(
         )
         assert still_human_review is True
     finally:
+        await session_a.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+async def test_reconciliation_projection_cannot_overwrite_newer_state(
+    isolated_db: tuple,
+) -> None:
+    """#287: reconciliation and approvals share task projection ordering."""
+
+    class _OrderedProjection:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.states: list[TaskState] = []
+
+        async def update_state(self, **kwargs: object) -> dict[str, object]:
+            state = kwargs["state"]
+            assert isinstance(state, TaskState)
+            if state == TaskState.RUNNING:
+                self.started.set()
+                await self.release.wait()
+            self.states.append(state)
+            return {}
+
+        async def add_comment(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    _engine, local_session = isolated_db
+    projection = _OrderedProjection()
+    task_id = "task-reconcile-order-287"
+
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                version=0,
+                proposed_by="agent-1",
+            )
+        )
+        await seed.commit()
+
+    session_a = local_session()
+    reconciliation_task = None
+    approval_task = None
+    try:
+        reconciliation = ReconciliationService(
+            projection_service=projection,  # type: ignore[arg-type]
+            db=session_a,
+        )
+        reconciliation_task = asyncio.create_task(
+            reconciliation._apply_state_fix(
+                projection=projection,  # type: ignore[arg-type]
+                plane_issue_id="plane-issue-287",
+                controller_task_id=task_id,
+                state=TaskState.RUNNING,
+                expected_plane="In Progress",
+                report=ReconciliationReport(),
+                project_id="proj-1",
+            )
+        )
+        await projection.started.wait()
+
+        async def _project_newer_state() -> None:
+            async with local_session() as session_b:
+                task_b = await session_b.scalar(select(Task).where(Task.id == task_id))
+                assert task_b is not None
+                task_b.state = TaskState.HUMAN_REVIEW
+                task_b.version += 1
+                await session_b.commit()
+                await ApprovalService(
+                    db=session_b,
+                    plane_projection=projection,  # type: ignore[arg-type]
+                )._project_state_to_plane(
+                    task=task_b,
+                    state=TaskState.HUMAN_REVIEW,
+                    approval_type=ApprovalType.MERGE,
+                )
+
+        approval_task = asyncio.create_task(_project_newer_state())
+        for _ in range(100):
+            async with local_session() as observer:
+                current = await observer.scalar(select(Task).where(Task.id == task_id))
+            if current is not None and current.state == TaskState.HUMAN_REVIEW:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("newer Controller state was not committed")
+
+        projection.release.set()
+        await reconciliation_task
+        await approval_task
+        assert projection.states[-1] == TaskState.HUMAN_REVIEW
+    finally:
+        projection.release.set()
+        if reconciliation_task is not None and not reconciliation_task.done():
+            await reconciliation_task
+        if approval_task is not None and not approval_task.done():
+            await approval_task
         await session_a.close()

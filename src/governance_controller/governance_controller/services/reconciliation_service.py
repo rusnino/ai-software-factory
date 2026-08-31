@@ -17,6 +17,7 @@ from governance_controller.services.opentasks_materializer import (
 )
 from governance_controller.services.plane_projection import (
     PlaneProjectionService,
+    acquire_plane_projection_lock,
 )
 
 
@@ -252,27 +253,29 @@ class ReconciliationService:
         Before applying the fix, re-read the Controller task from the database
         to ensure its state has not changed since the divergence was detected.
         This prevents a stale reconciliation pass from overwriting Plane with
-        an out-of-date state under a race.
+        an out-of-date state under a race. The task-scoped advisory lock keeps
+        the state check and external projection ordered with approvals.
         """
         try:
-            if self._db is not None and not await self._task_still_in_state(
-                controller_task_id, state
-            ):
-                report.divergences.append(
-                    Divergence(
-                        plane_task_id=plane_issue_id,
-                        controller_task_id=controller_task_id,
-                        field="state",
-                        plane_value=None,
-                        controller_value=state.value,
-                        severity="alert",
-                        message=(
-                            f"Controller task {controller_task_id} state "
-                            f"changed during reconciliation; fix skipped"
-                        ),
+            if self._db is not None:
+                await acquire_plane_projection_lock(self._db, controller_task_id)
+                if not await self._task_still_in_state(controller_task_id, state):
+                    await self._db.rollback()
+                    report.divergences.append(
+                        Divergence(
+                            plane_task_id=plane_issue_id,
+                            controller_task_id=controller_task_id,
+                            field="state",
+                            plane_value=None,
+                            controller_value=state.value,
+                            severity="alert",
+                            message=(
+                                f"Controller task {controller_task_id} state "
+                                f"changed during reconciliation; fix skipped"
+                            ),
+                        )
                     )
-                )
-                return
+                    return
 
             updated = await projection.update_state(
                 controller_task_id=controller_task_id,
@@ -282,6 +285,8 @@ class ReconciliationService:
                 opentasks_id=opentasks_id,
             )
             if updated is None:
+                if self._db is not None:
+                    await self._db.commit()
                 return
             report.projection_fixes.append(
                 (
@@ -299,7 +304,11 @@ class ReconciliationService:
                 ),
                 project_id=project_id,
             )
+            if self._db is not None:
+                await self._db.commit()
         except Exception as exc:
+            if self._db is not None:
+                await self._db.rollback()
             raise ReconciliationError(
                 f"Failed to apply Plane state fix for {controller_task_id}"
             ) from exc
