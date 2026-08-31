@@ -570,6 +570,11 @@ class ApprovalService:
         # to FAILED), flushing early would commit a RUNNING Execution row for a
         # FAILED task and orphan the real macro-agent run (#262).
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
+            # The external run already exists even though this caller lost the
+            # task CAS. Persist its ID on the pre-RUNNING execution before any
+            # cleanup request so a cancellation failure remains recoverable.
+            execution.macro_agent_run_id = macro_agent_run_id
+            await self.db.flush()
             await AuditService.log(
                 db=self.db,
                 event_type="concurrent_modification",
@@ -581,9 +586,39 @@ class ApprovalService:
                     "approval_type": ApprovalType.EXECUTION.value,
                     "expected_state": TaskState.READY.value,
                     "target_state": TaskState.RUNNING.value,
+                    "macro_agent_run_id": macro_agent_run_id,
                 },
             )
             await self.db.commit()
+
+            # Do not cancel a run if a concurrent winner legitimately attached
+            # this exact ID while the CAS result was being handled.
+            fresh_result = await self.db.execute(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            fresh_task = fresh_result.scalar_one_or_none()
+            if fresh_task is None or (
+                fresh_task.latest_macro_agent_run_id != macro_agent_run_id
+            ):
+                try:
+                    await self.executor.cancel(macro_agent_run_id)
+                except Exception as cleanup_exc:  # pragma: no cover - boundary shield
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="execution_cancel_failed",
+                        task_id=task.id,
+                        actor=actor,
+                        source=source,
+                        execution_id=execution.id,
+                        payload={
+                            "macro_agent_run_id": macro_agent_run_id,
+                            "error": str(cleanup_exc),
+                            "error_type": type(cleanup_exc).__name__,
+                        },
+                    )
+                    await self.db.commit()
             raise ValueError(
                 "Concurrent modification detected: task state changed before RUNNING"
             )

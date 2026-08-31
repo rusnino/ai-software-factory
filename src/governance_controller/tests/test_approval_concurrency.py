@@ -865,4 +865,82 @@ class TestApprovalConcurrency:
             rows = executions.scalars().all()
             assert len(rows) == 1
             assert rows[0].state == TaskState.READY
-            assert rows[0].macro_agent_run_id is None
+            assert rows[0].macro_agent_run_id == "run-running-cas"
+            fake_executor.cancel.assert_awaited_once_with("run-running-cas")
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_running_cas_loss_records_and_cancels_started_run(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#293: a run returned before CAS loss must not become untracked."""
+        _engine, local_session = isolated_db
+        task_id = "task-orphaned-start-293"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+
+        async def _start_then_win_elsewhere(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.FAILED
+                )
+                assert won is True
+                await racer.commit()
+            return {"run_id": "run-orphan-293"}
+
+        fake_executor.start.side_effect = _start_then_win_elsewhere
+        fake_executor.cancel.return_value = {}
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await ApprovalService(db=db, executor=fake_executor).approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-orphaned-start-293",
+                )
+
+        fake_executor.cancel.assert_awaited_once_with("run-orphan-293")
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].state == TaskState.READY
+            assert rows[0].macro_agent_run_id == "run-orphan-293"
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+            concurrent = [
+                row
+                for row in audits.scalars().all()
+                if row.event_type == "concurrent_modification"
+            ]
+            assert concurrent
+            assert concurrent[-1].payload["macro_agent_run_id"] == "run-orphan-293"
