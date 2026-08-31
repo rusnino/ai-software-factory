@@ -12,6 +12,8 @@ import httpx
 
 from governance_controller.config import settings
 
+_PLANE_EXTERNAL_SOURCE = "governance-controller"
+
 
 class PlaneClientError(Exception):
     """Raised when a Plane CE API call fails."""
@@ -150,8 +152,10 @@ class PlaneClient:
         if not isinstance(issues, list):
             return None
         for issue in issues:
-            if isinstance(issue, dict) and issue.get("controller_task_id") == (
-                controller_task_id
+            if (
+                isinstance(issue, dict)
+                and issue.get("external_id") == controller_task_id
+                and issue.get("external_source") == _PLANE_EXTERNAL_SOURCE
             ):
                 return issue
         return None
@@ -176,6 +180,8 @@ class PlaneClient:
         state: str | None = None,
         project_id: str | None = None,
         extra: dict[str, Any] | None = None,
+        external_id: str | None = None,
+        external_source: str | None = None,
     ) -> dict[str, Any]:
         """Create a new issue.
 
@@ -185,6 +191,8 @@ class PlaneClient:
             state: Optional Plane state UUID.
             project_id: Optional project override.
             extra: Additional Plane fields.
+            external_id: Optional external identifier stored by Plane.
+            external_source: Optional source for the external identifier.
         """
         project_id = project_id or self.project_id
         payload: dict[str, Any] = {"name": name}
@@ -194,6 +202,10 @@ class PlaneClient:
             payload["state"] = state
         if extra is not None:
             payload.update(extra)
+        if external_id is not None:
+            payload["external_id"] = external_id
+        if external_source is not None:
+            payload["external_source"] = external_source
 
         return await self._request(
             "POST",

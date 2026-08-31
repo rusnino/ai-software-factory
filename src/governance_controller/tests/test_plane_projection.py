@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.constants import TaskState
 from governance_controller.services.plane_projection import PlaneProjectionService
 
@@ -50,9 +51,23 @@ class _FakePlaneClient:
         state: str | None = None,
         project_id: str | None = None,
         extra: dict[str, Any] | None = None,
+        external_id: str | None = None,
+        external_source: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
-            ("create_issue", (name, description, state, project_id, extra), {})
+            (
+                "create_issue",
+                (
+                    name,
+                    description,
+                    state,
+                    project_id,
+                    extra,
+                    external_id,
+                    external_source,
+                ),
+                {},
+            )
         )
         return {"id": "issue-1", "name": name, "state_id": state}
 
@@ -98,27 +113,55 @@ async def test_ensure_plane_issue_creates_issue(fake_client: _FakePlaneClient) -
 
 
 async def test_ensure_plane_issue_reuses_existing_issue(
-    fake_client: _FakePlaneClient,
+    httpx_mock,
 ) -> None:
     """A retry after a post-create crash must not create a duplicate issue."""
-    fake_client.existing_issue = {
+    existing_issue = {
         "id": "issue-existing",
-        "controller_task_id": "TASK-1",
+        "external_id": "TASK-1",
+        "external_source": "governance-controller",
     }
-    service = PlaneProjectionService(client=fake_client)
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [
+                {
+                    "id": "issue-other",
+                    "external_id": "TASK-other",
+                    "external_source": "governance-controller",
+                }
+            ],
+            "next_cursor": "cursor-1",
+            "next_page_results": True,
+        },
+    )
+    httpx_mock.add_response(
+        status_code=200,
+        json={"results": [existing_issue], "next_page_results": False},
+    )
+    service = PlaneProjectionService(
+        client=PlaneClient(
+            base_url="http://plane.test",
+            api_key="test-token",
+            workspace_slug="ws",
+            project_id="proj-1",
+        )
+    )
 
     result = await service.ensure_plane_issue(
         controller_task_id="TASK-1", title="Do work", state=TaskState.PROPOSED
     )
 
-    assert result == fake_client.existing_issue
-    assert not any(call[0] == "create_issue" for call in fake_client.calls)
+    assert result == existing_issue
+    requests = httpx_mock.get_requests()
+    assert len(requests) == 2
+    assert all(request.method == "GET" for request in requests)
 
 
-async def test_ensure_plane_issue_writes_custom_fields(
+async def test_ensure_plane_issue_writes_external_traceability(
     fake_client: _FakePlaneClient,
 ) -> None:
-    """#229: SPEC-04 §4.7 fields are written on issue creation."""
+    """The Controller task id uses Plane's supported external fields."""
     service = PlaneProjectionService(client=fake_client)
     await service.ensure_plane_issue(
         controller_task_id="TASK-1",
@@ -131,12 +174,8 @@ async def test_ensure_plane_issue_writes_custom_fields(
 
     create_call = next(c for c in fake_client.calls if c[0] == "create_issue")
     extra = create_call[1][4]
-    assert extra == {
-        "controller_task_id": "TASK-1",
-        "source": "telegram",
-        "approval_required": False,
-        "opentasks_id": "OT-1",
-    }
+    assert extra is None
+    assert create_call[1][5:] == ("TASK-1", "governance-controller")
 
 
 async def test_update_state_resolves_state_and_updates(
@@ -152,14 +191,14 @@ async def test_update_state_resolves_state_and_updates(
     assert result is not None
     assert result["state_id"] == "state-done"
     assert fake_client.calls[0][0] == "list_states"
-    assert fake_client.calls[1][0] == "update_issue"
-    assert fake_client.calls[1][1][1]["state"] == "state-done"
+    assert fake_client.calls[1][0] == "update_issue_state"
+    assert fake_client.calls[1][1][1] == "state-done"
 
 
-async def test_update_state_writes_opentasks_id(
+async def test_update_state_does_not_send_unsupported_custom_field(
     fake_client: _FakePlaneClient,
 ) -> None:
-    """#229: opentasks_id is written back to Plane on state update."""
+    """State updates do not send unsupported top-level custom fields."""
     service = PlaneProjectionService(client=fake_client)
     result = await service.update_state(
         controller_task_id="TASK-1",
@@ -170,8 +209,8 @@ async def test_update_state_writes_opentasks_id(
 
     assert result is not None
     assert result["state_id"] == "state-in-progress"
-    update_call = next(c for c in fake_client.calls if c[0] == "update_issue")
-    assert update_call[1][1]["opentasks_id"] == "OT-42"
+    update_call = next(c for c in fake_client.calls if c[0] == "update_issue_state")
+    assert update_call[1][1] == "state-in-progress"
 
 
 async def test_update_state_unknown_controller_state_returns_none(

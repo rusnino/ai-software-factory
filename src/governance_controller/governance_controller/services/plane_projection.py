@@ -101,20 +101,14 @@ class PlaneProjectionService:
             return existing
 
         state_id = await self._resolve_state_id(state, project_id=project_id)
-        extra: dict[str, object] = {
-            "controller_task_id": controller_task_id,
-            "source": source,
-            "approval_required": approval_required,
-        }
-        if opentasks_id is not None:
-            extra["opentasks_id"] = opentasks_id
 
         return await client.create_issue(
             name=title,
             description=description,
             state=state_id,
             project_id=project_id,
-            extra=extra,
+            external_id=controller_task_id,
+            external_source="governance-controller",
         )
 
     async def update_state(
@@ -137,12 +131,8 @@ class PlaneProjectionService:
         if state_id is None:
             return None
 
-        fields: dict[str, object] = {"state": state_id}
-        if opentasks_id is not None:
-            fields["opentasks_id"] = opentasks_id
-
-        return await client.update_issue(
-            plane_issue_id, fields, project_id=project_id
+        return await client.update_issue_state(
+            plane_issue_id, state_id, project_id=project_id
         )
 
     async def add_comment(

@@ -82,17 +82,53 @@ async def test_find_issue_by_controller_task_id_scans_all_issues(
         status_code=200,
         json={
             "results": [
-                {"id": "issue-1", "controller_task_id": "TASK-1"},
+                {
+                    "id": "issue-1",
+                    "external_id": "TASK-1",
+                    "external_source": "governance-controller",
+                },
             ]
         },
     )
 
     result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
 
-    assert result == {"id": "issue-1", "controller_task_id": "TASK-1"}
+    assert result == {
+        "id": "issue-1",
+        "external_id": "TASK-1",
+        "external_source": "governance-controller",
+    }
     request = httpx_mock.get_request()
     assert request is not None
     assert request.method == "GET"
+
+
+async def test_find_issue_by_controller_task_id_uses_external_id(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """Lookup matches Plane's persisted external traceability fields."""
+    matching_issue = {
+        "id": "issue-1",
+        "external_id": "TASK-1",
+        "external_source": "governance-controller",
+    }
+    httpx_mock.add_response(
+        status_code=200,
+        json={
+            "results": [
+                {
+                    "id": "issue-wrong-source",
+                    "external_id": "TASK-1",
+                    "external_source": "other-system",
+                },
+                matching_issue,
+            ]
+        },
+    )
+
+    result = await PlaneClient().find_issue_by_controller_task_id("TASK-1")
+
+    assert result == matching_issue
 
 
 async def test_create_issue_request(httpx_mock, settings_override: Settings) -> None:
@@ -116,6 +152,33 @@ async def test_create_issue_request(httpx_mock, settings_override: Settings) -> 
     assert body["name"] == "Hello Plane"
     assert body["description_html"] == "<p>body</p>"
     assert body["state"] == "state-1"
+
+
+async def test_create_issue_includes_external_traceability(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """create_issue serializes Plane's supported external fields."""
+    httpx_mock.add_response(
+        status_code=201,
+        json={
+            "id": "issue-1",
+            "external_id": "TASK-1",
+            "external_source": "governance-controller",
+        },
+    )
+    client = PlaneClient()
+
+    await client.create_issue(
+        name="Hello Plane",
+        external_id="TASK-1",
+        external_source="governance-controller",
+    )
+
+    import json
+
+    body = json.loads(httpx_mock.get_request().content)
+    assert body["external_id"] == "TASK-1"
+    assert body["external_source"] == "governance-controller"
 
 
 async def test_update_issue_state_request(
