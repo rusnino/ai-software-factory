@@ -8,10 +8,12 @@ import pytest
 from sqlalchemy import select
 
 from governance_controller.constants import ApprovalType, TaskState
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
 from governance_controller.schemas.opentasks import OpentasksDAG, OpentasksTask
 from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.reconciliation_service import (
+    ReconciliationError,
     ReconciliationReport,
     ReconciliationService,
 )
@@ -279,6 +281,123 @@ async def test_state_fix_uses_root_materialized_opentasks_id(
     )
 
     assert projection.update_calls[0]["opentasks_id"] == "ot-900"
+
+
+async def test_reconciliation_crash_leaves_durable_pending_marker(
+    isolated_db: tuple,
+) -> None:
+    """#298: a crash during a state fix leaves an audit breadcrumb."""
+
+    class _CrashedProjection:
+        async def update_state(self, **_kwargs: object) -> dict[str, object]:
+            raise asyncio.CancelledError
+
+        async def add_comment(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    task_id = "task-reconcile-pending-298"
+    _engine, local_session = isolated_db
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+            )
+        )
+        await seed.commit()
+
+    async with local_session() as worker:
+        service = ReconciliationService(
+            projection_service=_CrashedProjection(),  # type: ignore[arg-type]
+            db=worker,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await service._apply_state_fix(
+                projection=_CrashedProjection(),  # type: ignore[arg-type]
+                plane_issue_id="plane-reconcile-pending-298",
+                controller_task_id=task_id,
+                state=TaskState.RUNNING,
+                expected_plane="In Progress",
+                report=ReconciliationReport(),
+                project_id="proj-1",
+            )
+        await worker.rollback()
+
+    async with local_session() as observer:
+        result = await observer.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,
+                AuditLog.event_type == "plane_projection_pending",
+            )
+        )
+        entries = list(result.scalars().all())
+
+    assert len(entries) == 1
+    assert entries[0].payload["operation"] == "reconciliation_state_fix"
+
+
+async def test_reconciliation_failure_links_failed_marker_to_pending_marker(
+    isolated_db: tuple,
+) -> None:
+    """A normal Plane failure resolves the pending marker as failed."""
+
+    class _FailingProjection:
+        async def update_state(self, **_kwargs: object) -> dict[str, object]:
+            raise RuntimeError("Plane unavailable")
+
+        async def add_comment(self, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+    task_id = "task-reconcile-failed-298"
+    _engine, local_session = isolated_db
+    async with local_session() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+            )
+        )
+        await seed.commit()
+
+    async with local_session() as worker:
+        projection = _FailingProjection()
+        service = ReconciliationService(projection_service=projection, db=worker)
+        with pytest.raises(
+            ReconciliationError, match="Failed to apply Plane state fix"
+        ):
+            await service._apply_state_fix(
+                projection=projection,  # type: ignore[arg-type]
+                plane_issue_id="plane-reconcile-failed-298",
+                controller_task_id=task_id,
+                state=TaskState.RUNNING,
+                expected_plane="In Progress",
+                report=ReconciliationReport(),
+                project_id="proj-1",
+            )
+
+    async with local_session() as observer:
+        result = await observer.execute(
+            select(AuditLog).where(AuditLog.task_id == task_id)
+        )
+        entries = list(result.scalars().all())
+
+    pending = [
+        entry
+        for entry in entries
+        if entry.event_type == "plane_projection_pending"
+    ]
+    failed = [
+        entry
+        for entry in entries
+        if entry.event_type == "plane_projection_failed"
+    ]
+    assert len(pending) == 1
+    assert len(failed) == 1
+    assert failed[0].payload["pending_event_id"] == pending[0].event_id
 
 
 async def test_state_uuid_resolved_to_name(

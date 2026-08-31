@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from governance_controller.adapters.plane_client import PlaneClient
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.opentasks_materializer import (
     MaterializerError,
     OpentasksMaterializer,
@@ -258,6 +259,7 @@ class ReconciliationService:
         an out-of-date state under a race. The task-scoped advisory lock keeps
         the state check and external projection ordered with approvals.
         """
+        pending_event_id: str | None = None
         try:
             if self._db is not None:
                 await acquire_plane_projection_lock(self._db, controller_task_id)
@@ -279,6 +281,55 @@ class ReconciliationService:
                     )
                     return
 
+                pending = await AuditService.log(
+                    db=self._db,
+                    event_type="plane_projection_pending",
+                    task_id=controller_task_id,
+                    actor="system",
+                    source="reconciliation_service",
+                    payload={
+                        "operation": "reconciliation_state_fix",
+                        "plane_issue_id": plane_issue_id,
+                        "state": state.value,
+                    },
+                )
+                pending_event_id = pending.event_id
+                # Persist the breadcrumb before Plane I/O. Reacquiring the
+                # task lock and rechecking afterward preserves ordering with a
+                # newer approval while still making cancellation discoverable.
+                await self._db.commit()
+                await acquire_plane_projection_lock(self._db, controller_task_id)
+                if not await self._task_still_in_state(controller_task_id, state):
+                    await self._db.rollback()
+                    await AuditService.log(
+                        db=self._db,
+                        event_type="plane_projection_skipped",
+                        task_id=controller_task_id,
+                        actor="system",
+                        source="reconciliation_service",
+                        payload={
+                            "operation": "reconciliation_state_fix",
+                            "pending_event_id": pending_event_id,
+                            "reason": "controller_state_changed",
+                        },
+                    )
+                    await self._db.commit()
+                    report.divergences.append(
+                        Divergence(
+                            plane_task_id=plane_issue_id,
+                            controller_task_id=controller_task_id,
+                            field="state",
+                            plane_value=None,
+                            controller_value=state.value,
+                            severity="alert",
+                            message=(
+                                f"Controller task {controller_task_id} state "
+                                "changed during reconciliation; fix skipped"
+                            ),
+                        )
+                    )
+                    return
+
             updated = await projection.update_state(
                 controller_task_id=controller_task_id,
                 plane_issue_id=plane_issue_id,
@@ -288,6 +339,18 @@ class ReconciliationService:
             )
             if updated is None:
                 if self._db is not None:
+                    await AuditService.log(
+                        db=self._db,
+                        event_type="plane_projection_completed",
+                        task_id=controller_task_id,
+                        actor="system",
+                        source="reconciliation_service",
+                        payload={
+                            "operation": "reconciliation_state_fix",
+                            "pending_event_id": pending_event_id,
+                            "result": "no_op",
+                        },
+                    )
                     await self._db.commit()
                 return
             report.projection_fixes.append(
@@ -307,10 +370,37 @@ class ReconciliationService:
                 project_id=project_id,
             )
             if self._db is not None:
+                await AuditService.log(
+                    db=self._db,
+                    event_type="plane_projection_completed",
+                    task_id=controller_task_id,
+                    actor="system",
+                    source="reconciliation_service",
+                    payload={
+                        "operation": "reconciliation_state_fix",
+                        "pending_event_id": pending_event_id,
+                        "plane_issue_id": plane_issue_id,
+                    },
+                )
                 await self._db.commit()
         except Exception as exc:
             if self._db is not None:
                 await self._db.rollback()
+                if pending_event_id is not None:
+                    await AuditService.log(
+                        db=self._db,
+                        event_type="plane_projection_failed",
+                        task_id=controller_task_id,
+                        actor="system",
+                        source="reconciliation_service",
+                        payload={
+                            "operation": "reconciliation_state_fix",
+                            "pending_event_id": pending_event_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await self._db.commit()
             raise ReconciliationError(
                 f"Failed to apply Plane state fix for {controller_task_id}"
             ) from exc

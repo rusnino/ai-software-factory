@@ -4,8 +4,10 @@ from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import select
 
 from governance_controller.constants import TaskState
+from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.alert_service import AlertService
@@ -118,10 +120,11 @@ async def test_without_plane_config_only_logs(
     assert len(fake_plane.calls) == 0
 
 
-async def test_plane_comment_failure_is_swallowed(
+async def test_plane_comment_failure_is_retryable(
     fake_plane: _FakePlaneClient,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    db_session,
 ) -> None:
     async def raise_exc(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Plane down")
@@ -145,12 +148,17 @@ async def test_plane_comment_failure_is_swallowed(
         cache_logger_on_first_use=False,
     )
 
-    # Should not raise.
-    await service.notify_terminal_failure(
-        task=_task(TaskState.FAILED),
-        contract=_contract(),
-        report={"passed": False, "checks": []},
-        reason="plane_unreachable",
-    )
+    with pytest.raises(RuntimeError, match="Plane down"):
+        await service.notify_terminal_failure(
+            task=_task(TaskState.FAILED),
+            contract=_contract(),
+            report={"passed": False, "checks": []},
+            reason="plane_unreachable",
+            db=db_session,
+        )
 
     assert any("plane_comment_failed" in r.message for r in caplog.records)
+    result = await db_session.execute(
+        select(ProcessedEvent).where(ProcessedEvent.task_id == "TASK-1")
+    )
+    assert result.scalar_one_or_none() is None

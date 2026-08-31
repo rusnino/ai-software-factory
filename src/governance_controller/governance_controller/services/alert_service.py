@@ -165,7 +165,9 @@ class AlertService:
                 plane_issue_id=plane_issue_id,
                 error=str(exc),
             )
-            return None
+            # Callers record success only after this returns. Propagate the
+            # failure so durable alert/projection audit state remains retryable.
+            raise
 
 
 def _format_verification_failure_report(
