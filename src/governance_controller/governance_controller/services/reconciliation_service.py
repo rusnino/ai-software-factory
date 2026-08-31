@@ -144,6 +144,37 @@ class ReconciliationService:
             if isinstance(issue, dict)
         }
 
+        # Validate runtime DAG for tasks in EXEC_APPROVED+ states that do
+        # exist in Plane before applying any state fixes.
+        opentasks_ids: dict[str, str] = {}
+        for task_id, state, _proj, plane_issue_id in controller_tasks:
+            plane_issue_key = plane_issue_id or task_id
+            if state.value in {"PROPOSED", "PLAN_APPROVED"}:
+                continue
+            if plane_issue_key not in plane_issues:
+                continue
+            try:
+                dag = await self._materializer_or_default().materialize(
+                    root_plane_task_id=plane_issue_key,
+                    project_id=effective_project_id,
+                )
+                if dag.tasks:
+                    opentasks_ids[task_id] = dag.tasks[0].id
+            except MaterializerError as exc:
+                report.divergences.append(
+                    Divergence(
+                        plane_task_id=plane_issue_key,
+                        controller_task_id=task_id,
+                        field="dag",
+                        plane_value=None,
+                        controller_value=state.value,
+                        severity="alert",
+                        message=f"Runtime DAG validation failed: {exc}",
+                    )
+                )
+
+        report.opentasks_ids = opentasks_ids
+
         for task_id, state, _proj, plane_issue_id in controller_tasks:
             plane_issue_key = plane_issue_id or task_id
             plane_issue = plane_issues.get(plane_issue_key)
@@ -204,37 +235,6 @@ class ReconciliationService:
                         )
 
             report.checked += 1
-
-        # Validate runtime DAG for tasks in EXEC_APPROVED+ states that do
-        # exist in Plane. Missing tasks are already reported above.
-        opentasks_ids: dict[str, str] = {}
-        for task_id, state, _proj, plane_issue_id in controller_tasks:
-            plane_issue_key = plane_issue_id or task_id
-            if state.value in {"PROPOSED", "PLAN_APPROVED"}:
-                continue
-            if plane_issue_key not in plane_issues:
-                continue
-            try:
-                dag = await self._materializer_or_default().materialize(
-                    root_plane_task_id=plane_issue_key,
-                    project_id=effective_project_id,
-                )
-                if dag.tasks:
-                    opentasks_ids[task_id] = dag.tasks[0].id
-            except MaterializerError as exc:
-                report.divergences.append(
-                    Divergence(
-                        plane_task_id=plane_issue_key,
-                        controller_task_id=task_id,
-                        field="dag",
-                        plane_value=None,
-                        controller_value=state.value,
-                        severity="alert",
-                        message=f"Runtime DAG validation failed: {exc}",
-                    )
-                )
-
-        report.opentasks_ids = opentasks_ids
         return report
 
     async def _apply_state_fix(
