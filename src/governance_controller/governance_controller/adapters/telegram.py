@@ -131,6 +131,7 @@ class TelegramAdapter:
             response = await client.post(
                 f"{self.base_url}/approvals",
                 json=payload.model_dump(mode="json"),
+                headers={"X-Controller-Secret": settings.controller_api_secret},
             )
             response.raise_for_status()
 

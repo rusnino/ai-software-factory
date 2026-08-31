@@ -143,6 +143,7 @@ class LocalMacroAgentService:
         env = os.environ.copy()
         env["MACRO_AGENT_SERVICE_PORT"] = str(self.port)
         env["MACRO_AGENT_SERVICE_HOST"] = self.host
+        env["MACRO_AGENT_SERVICE_API_SECRET"] = settings.macro_agent_api_secret
 
         logger.info(
             "starting_local_macro_agent_service",

@@ -3,6 +3,7 @@
 import socket
 import subprocess
 from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -116,3 +117,30 @@ async def test_spawner_yields_client_for_local_service(
 
     assert "run_id" in result
     assert result["status"] == "queued"
+
+
+async def test_local_service_propagates_controller_secret_to_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local service must receive the same secret its client sends."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "macro_agent_api_secret", "shared-secret")
+    service = LocalMacroAgentService(host="127.0.0.1", port=39999)
+    monkeypatch.setattr(service, "_service_root", lambda: "/tmp")
+    monkeypatch.setattr(service, "_wait_for_port", lambda *_args: True)
+    monkeypatch.setattr(service, "_health_check", AsyncMock(return_value=True))
+
+    process = MagicMock()
+    process.pid = 999999
+    process.poll.return_value = None
+    process.wait.return_value = 0
+    with patch(
+        "governance_controller.adapters.macro_agent.local_service.subprocess.Popen",
+        return_value=process,
+    ) as popen:
+        async with service:
+            pass
+
+    environment = popen.call_args.kwargs["env"]
+    assert environment["MACRO_AGENT_SERVICE_API_SECRET"] == "shared-secret"
