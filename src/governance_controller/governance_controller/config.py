@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     plane_opentasks_id_property_id: str = ""
     plane_source_property_id: str = ""
     plane_approval_required_property_id: str = ""
+    plane_source_option_ids: dict[str, str] = {}
 
     log_level: str = "info"
 

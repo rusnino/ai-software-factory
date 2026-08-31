@@ -21,6 +21,9 @@ from governance_controller.services.reconciliation_service import (
 from governance_controller.services.stuck_execution_poller import (
     StuckExecutionPoller,
 )
+from governance_controller.services.task_service import (
+    PLANE_PROJECTION_SOURCE_METADATA_KEY,
+)
 
 app = typer.Typer(help="Governance Controller CLI")
 
@@ -130,6 +133,8 @@ def reconcile(
                 contract = task.task_contract_json
                 objective: str | None = None
                 description: str | None = None
+                source: str | None = None
+                approval_required: bool | None = None
                 if isinstance(contract, dict):
                     obj = contract.get("objective")
                     if isinstance(obj, str):
@@ -137,6 +142,12 @@ def reconcile(
                     acc = contract.get("acceptance")
                     if isinstance(acc, list) and acc and isinstance(acc[0], str):
                         description = acc[0]
+                    stored_source = contract.get(PLANE_PROJECTION_SOURCE_METADATA_KEY)
+                    if isinstance(stored_source, str) and stored_source:
+                        source = stored_source
+                    stored_approval_required = contract.get("approval_required")
+                    if isinstance(stored_approval_required, bool):
+                        approval_required = stored_approval_required
                 title = objective or task.id
                 try:
                     # Keep the task-scoped lock out of the read transaction and
@@ -149,6 +160,8 @@ def reconcile(
                         description=description,
                         state=task.state,
                         project_id=task.project_id,
+                        source=source,
+                        approval_required=approval_required,
                     )
                     if isinstance(issue, dict):
                         plane_issue_id = issue.get("id")

@@ -177,6 +177,38 @@ async def test_plane_issue_link_survives_caller_rollback(
     assert task.plane_issue_id == "plane-linked"
 
 
+async def test_task_creation_persists_plane_projection_source(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plane retry metadata survives independently of the external projection."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    contract = TaskContract(
+        task_id="audit-plane-source",
+        project_id="audit-proj-source",
+        proposed_by="agent-1",
+        objective="Persist the Plane source",
+        acceptance=["the source is durable"],
+        approval_required=False,
+    )
+    profile = ProjectProfile(
+        project_id="audit-proj-source",
+        project_name="Source Project",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+
+    task = await TaskService(db_session).create(
+        contract,
+        profile,
+        source="telegram",
+    )
+
+    assert task.task_contract_json["_plane_projection_source"] == "telegram"
+    assert task.task_contract_json["approval_required"] is False
+
+
 @pytest.mark.skipif(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",

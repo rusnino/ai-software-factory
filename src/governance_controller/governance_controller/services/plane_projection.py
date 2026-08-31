@@ -74,6 +74,19 @@ class PlaneProjectionService:
             return None
         return PlaneClient()
 
+    @staticmethod
+    def _source_property_value(source: str | None) -> str | None:
+        if not settings.plane_source_property_id or source is None:
+            return source
+
+        option_id = settings.plane_source_option_ids.get(source)
+        if not isinstance(option_id, str) or not option_id.strip():
+            raise PlaneClientError(
+                "Plane source property is configured but no non-empty option "
+                f"UUID is configured for source {source!r}"
+            )
+        return option_id.strip()
+
     async def _write_property_value(
         self,
         client: PlaneClient,
@@ -103,8 +116,8 @@ class PlaneProjectionService:
         client: PlaneClient,
         issue: dict[str, object],
         controller_task_id: str,
-        source: str,
-        approval_required: bool,
+        source: str | None,
+        approval_required: bool | None,
         opentasks_id: str | None,
         project_id: str | None,
     ) -> None:
@@ -151,8 +164,8 @@ class PlaneProjectionService:
         description: str | None = None,
         state: TaskState = TaskState.PROPOSED,
         project_id: str | None = None,
-        source: str = "api",
-        approval_required: bool = True,
+        source: str | None = None,
+        approval_required: bool | None = None,
         opentasks_id: str | None = None,
     ) -> dict[str, object] | None:
         """Create or update a Plane issue for the given Controller task.
@@ -164,6 +177,7 @@ class PlaneProjectionService:
         if client is None:
             return None
 
+        source_property_value = self._source_property_value(source)
         existing = await client.find_issue_by_controller_task_id(
             controller_task_id, project_id=project_id
         )
@@ -172,7 +186,7 @@ class PlaneProjectionService:
                 client,
                 existing,
                 controller_task_id,
-                source,
+                source_property_value,
                 approval_required,
                 opentasks_id,
                 project_id,
@@ -193,7 +207,7 @@ class PlaneProjectionService:
             client,
             issue,
             controller_task_id,
-            source,
+            source_property_value,
             approval_required,
             opentasks_id,
             project_id,

@@ -18,6 +18,8 @@ from governance_controller.services.plane_projection import (
     acquire_plane_projection_lock,
 )
 
+PLANE_PROJECTION_SOURCE_METADATA_KEY = "_plane_projection_source"
+
 
 class TaskService:
     """Create and retrieve Task records with stored contracts and profiles."""
@@ -48,11 +50,13 @@ class TaskService:
             actor=task_contract.proposed_by,
         )
 
+        task_contract_json = task_contract.model_dump(mode="json")
+        task_contract_json[PLANE_PROJECTION_SOURCE_METADATA_KEY] = source
         task = Task(
             id=task_contract.task_id,
             project_id=task_contract.project_id,
             proposed_by=task_contract.proposed_by,
-            task_contract_json=task_contract.model_dump(mode="json"),
+            task_contract_json=task_contract_json,
         )
         self.db.add(task)
         await self.db.flush()

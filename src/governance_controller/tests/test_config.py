@@ -25,6 +25,7 @@ def test_plane_property_ids_default_to_empty() -> None:
     assert settings.plane_opentasks_id_property_id == ""
     assert settings.plane_source_property_id == ""
     assert settings.plane_approval_required_property_id == ""
+    assert settings.plane_source_option_ids == {}
 
 
 def test_plane_property_ids_read_from_environment(
@@ -35,6 +36,7 @@ def test_plane_property_ids_read_from_environment(
         "GC_PLANE_OPENTASKS_ID_PROPERTY_ID": "prop-opentasks",
         "GC_PLANE_SOURCE_PROPERTY_ID": "prop-source",
         "GC_PLANE_APPROVAL_REQUIRED_PROPERTY_ID": "prop-approval",
+        "GC_PLANE_SOURCE_OPTION_IDS": '{"telegram":"option-telegram"}',
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
@@ -45,6 +47,7 @@ def test_plane_property_ids_read_from_environment(
     assert settings.plane_opentasks_id_property_id == "prop-opentasks"
     assert settings.plane_source_property_id == "prop-source"
     assert settings.plane_approval_required_property_id == "prop-approval"
+    assert settings.plane_source_option_ids == {"telegram": "option-telegram"}
 
 
 def test_macro_agent_timeout_seconds_can_be_overridden() -> None:

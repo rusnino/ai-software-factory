@@ -260,6 +260,116 @@ class TestCliReconcile:
             )
         ]
 
+    def test_reconcile_retry_preserves_persisted_plane_metadata(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        row = SimpleNamespace(
+            id="controller-task-1",
+            state=TaskState.RUNNING,
+            project_id="project-a",
+            plane_issue_id=None,
+            task_contract_json={
+                "objective": "Recover Plane link",
+                "acceptance": ["the link is recovered"],
+                "_plane_projection_source": "telegram",
+                "approval_required": False,
+            },
+        )
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = [row]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=query_result)
+        db.get = AsyncMock(return_value=row)
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        @asynccontextmanager
+        async def fake_db_session():
+            yield db
+
+        projection = MagicMock()
+        projection.ensure_plane_issue = AsyncMock(
+            return_value={"id": "plane-created-uuid"}
+        )
+        report = SimpleNamespace(checked=1, divergences=[])
+        reconciliation = MagicMock()
+        reconciliation.reconcile = AsyncMock(return_value=report)
+        with (
+            patch("governance_controller.cli.get_db_session", fake_db_session),
+            patch(
+                "governance_controller.services.plane_projection.PlaneProjectionService",
+                return_value=projection,
+            ),
+            patch(
+                "governance_controller.cli.ReconciliationService",
+                return_value=reconciliation,
+            ),
+        ):
+            result = runner.invoke(app, ["reconcile", "project-a"])
+
+        assert result.exit_code == 0, result.output
+        kwargs = projection.ensure_plane_issue.await_args.kwargs
+        assert kwargs["source"] == "telegram"
+        assert kwargs["approval_required"] is False
+
+    def test_reconcile_legacy_retry_does_not_invent_plane_metadata(
+        self,
+        runner: CliRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        row = SimpleNamespace(
+            id="legacy-task-1",
+            state=TaskState.RUNNING,
+            project_id="project-a",
+            plane_issue_id=None,
+            task_contract_json={},
+        )
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = [row]
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=query_result)
+        db.get = AsyncMock(return_value=row)
+        db.flush = AsyncMock()
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        @asynccontextmanager
+        async def fake_db_session():
+            yield db
+
+        projection = MagicMock()
+        projection.ensure_plane_issue = AsyncMock(return_value={"id": "plane-legacy"})
+        reconciliation = MagicMock()
+        reconciliation.reconcile = AsyncMock(
+            return_value=SimpleNamespace(checked=1, divergences=[])
+        )
+        with (
+            patch("governance_controller.cli.get_db_session", fake_db_session),
+            patch(
+                "governance_controller.services.plane_projection.PlaneProjectionService",
+                return_value=projection,
+            ),
+            patch(
+                "governance_controller.cli.ReconciliationService",
+                return_value=reconciliation,
+            ),
+        ):
+            result = runner.invoke(app, ["reconcile", "project-a"])
+
+        assert result.exit_code == 0, result.output
+        kwargs = projection.ensure_plane_issue.await_args.kwargs
+        assert kwargs["source"] is None
+        assert kwargs["approval_required"] is None
+
     def test_reconcile_refreshes_plane_id_after_issue_retry(
         self,
         runner: CliRunner,

@@ -118,6 +118,7 @@ def fake_client() -> _FakePlaneClient:
 
 def _set_property_ids(
     monkeypatch: pytest.MonkeyPatch,
+    source_options: dict[str, str] | None = None,
     **property_ids: str,
 ) -> None:
     settings = Settings(
@@ -129,6 +130,7 @@ def _set_property_ids(
         plane_approval_required_property_id=property_ids.get(
             "approval_required", ""
         ),
+        plane_source_option_ids=source_options or {},
     )
     monkeypatch.setattr(
         "governance_controller.services.plane_projection.settings", settings
@@ -222,6 +224,7 @@ async def test_ensure_plane_issue_writes_configured_properties_after_create(
 ) -> None:
     _set_property_ids(
         monkeypatch,
+        source_options={"telegram": "option-telegram"},
         controller_task_id="property-controller-task",
         opentasks_id="property-opentasks",
         source="property-source",
@@ -246,7 +249,7 @@ async def test_ensure_plane_issue_writes_configured_properties_after_create(
     assert property_calls == [
         ("issue-1", "property-controller-task", "TASK-1", None),
         ("issue-1", "property-opentasks", "OT-1", None),
-        ("issue-1", "property-source", "telegram", None),
+        ("issue-1", "property-source", "option-telegram", None),
         ("issue-1", "property-approval", False, None),
     ]
 
@@ -257,6 +260,7 @@ async def test_ensure_plane_issue_writes_configured_properties_for_existing_issu
 ) -> None:
     _set_property_ids(
         monkeypatch,
+        source_options={"telegram": "option-telegram"},
         controller_task_id="property-controller-task",
         source="property-source",
         approval_required="property-approval",
@@ -284,7 +288,7 @@ async def test_ensure_plane_issue_writes_configured_properties_for_existing_issu
     ]
     assert property_calls == [
         ("issue-existing", "property-controller-task", "TASK-1", None),
-        ("issue-existing", "property-source", "telegram", None),
+        ("issue-existing", "property-source", "option-telegram", None),
         ("issue-existing", "property-approval", False, None),
     ]
 
@@ -293,7 +297,11 @@ async def test_ensure_plane_issue_surfaces_property_failure_and_retries_existing
     fake_client: _FakePlaneClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_property_ids(monkeypatch, source="property-source")
+    _set_property_ids(
+        monkeypatch,
+        source_options={"telegram": "option-telegram"},
+        source="property-source",
+    )
     fake_client.existing_issue = {
         "id": "issue-existing",
         "external_id": "TASK-1",
@@ -321,6 +329,51 @@ async def test_ensure_plane_issue_surfaces_property_failure_and_retries_existing
     assert sum(
         call[0] == "upsert_work_item_property_value" for call in fake_client.calls
     ) == 2
+
+
+async def test_ensure_plane_issue_rejects_missing_source_option_before_lookup(
+    fake_client: _FakePlaneClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_property_ids(monkeypatch, source="property-source")
+
+    with pytest.raises(PlaneClientError, match="source.*option UUID"):
+        await PlaneProjectionService(client=fake_client).ensure_plane_issue(
+            controller_task_id="TASK-1",
+            title="Do work",
+            source="telegram",
+        )
+
+    assert fake_client.calls == []
+
+
+async def test_ensure_plane_issue_skips_unavailable_property_metadata(
+    fake_client: _FakePlaneClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_property_ids(
+        monkeypatch,
+        controller_task_id="property-controller-task",
+        source="property-source",
+        approval_required="property-approval",
+    )
+    fake_client.existing_issue = {
+        "id": "issue-existing",
+        "external_id": "TASK-1",
+        "external_source": "governance-controller",
+    }
+
+    result = await PlaneProjectionService(client=fake_client).ensure_plane_issue(
+        controller_task_id="TASK-1",
+        title="Do work",
+    )
+
+    assert result == fake_client.existing_issue
+    assert [
+        call[1]
+        for call in fake_client.calls
+        if call[0] == "upsert_work_item_property_value"
+    ] == [("issue-existing", "property-controller-task", "TASK-1", None)]
 
 
 async def test_update_state_resolves_state_and_updates(
