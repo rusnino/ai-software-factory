@@ -141,6 +141,19 @@ async def test_start_rejects_malformed_response_from_real_http_server() -> None:
 
 
 @pytest.mark.asyncio
+async def test_start_rejects_whitespace_only_run_id(
+    httpx_mock: pytest_httpx.HTTPXMock,
+) -> None:
+    """#285: whitespace cannot become an unusable macro-agent run id."""
+    httpx_mock.add_response(json={"run_id": "   "})
+
+    with pytest.raises(ValueError, match="Invalid macro-agent start response"):
+        await MacroAgentClient(base_url="https://example.com").start(
+            {"task_id": "task-blank-run-id"}
+        )
+
+
+@pytest.mark.asyncio
 async def test_client_uses_configurable_timeout(
     httpx_mock: pytest_httpx.HTTPXMock,
 ) -> None:
