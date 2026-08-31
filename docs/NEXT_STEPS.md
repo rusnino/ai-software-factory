@@ -4,7 +4,7 @@
 
 **Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
 it has been declared prematurely at least three separate times, each later found wrong by
-independent live verification.** As of 2026-08-31, fifteen review rounds have run. Rounds 1-8
+independent live verification.** As of 2026-08-31, sixteen review rounds have run. Rounds 1-8
 (`#154`-`#258`) landed and hold up on re-verification. Rounds 9-13 established two recurring defect
 classes — `RISK-16` (write before CAS, committed regardless of outcome, 3 confirmed instances) and
 `RISK-19` (identity-map staleness, 5 confirmed instances, including round 13's `#278` revealing round
@@ -56,17 +56,12 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **4 open issues (0 CRITICAL, 3 HIGH, 1 MEDIUM, 0 LOW)** — `#283` (HIGH — `#280`'s
-own fix holds a global lock across slow outbound Plane calls, letting a slow Plane instance stall
-all audit-log writes system-wide), `#284` (HIGH — Telegram's `/approve` command never authenticates,
-mirroring `#277` in a second code path), `#285` (HIGH — an unexpected macro-agent response shape
-raises an unhandled `KeyError` outside error handling, leaving a task silently stuck with no audit
-trail), `#286` (MEDIUM — `status_error` can't distinguish a lost run from a transient failure).
-This is the first round in this project's history with zero open CRITICAL issues at its close AND
-multiple HIGH findings sourced from the immediately preceding round's own fix rather than fresh
-territory — a sign the codebase's remaining gaps are increasingly about fixes interacting with each
-other and with real (as opposed to mocked) external boundaries, not standalone new logic bugs. Every
-prior round's findings (`#151`-`#282`) are closed and independently re-verified.
+As of the latest pre-push check: **14 open issues (0 CRITICAL, 10 HIGH, 4 MEDIUM, 0 LOW)**. The
+Round 16 follow-up fixes are committed locally through `81158c2` but have not been pushed, so
+remote closure is still pending. The open set is `#283`-`#296`; `#287`-`#294` and `#296` currently
+carry the historical `phase-1` label and must be reclassified to `phase-2` during issue cleanup.
+Do not declare Phase 2 complete until the fixes are pushed and the live critical/high queries are
+empty.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -87,10 +82,12 @@ with body-size caps, creating HTML-escaped Plane drafts; verification failure fe
 and terminal alerting; optional OPA policy backend that runs only after the embedded PolicyEngine
 passes and receives a minimized, optionally bearer-token-authenticated input document.
 
-Test status (2026-08-31): **434 passed / 9 skipped** on SQLite, **441 passed / 2 skipped** on
-PostgreSQL, `ruff` clean, `mypy governance_controller` clean (68 source files); `macro_agent_service`
-tests still pass, `ruff`/`mypy` clean. **CI is green** (`.github/workflows/ci.yml`, added by `#223`,
-had failed on all 13 runs since 2026-08-26 until Round 11's CI-infra fix). Round 15 made no
+Test status (2026-08-31): **464 passed / 20 skipped** on SQLite, **482 passed / 2 skipped** on
+PostgreSQL, `ruff` clean, `mypy governance_controller` clean (69 source files); `macro_agent_service`
+has **10 passed**, with `ruff`/`mypy` clean. The two live Plane contract tests are skipped because
+`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured.
+**CI is green** (`.github/workflows/ci.yml`, added by `#223`, had failed on all 13 runs since
+2026-08-26 until Round 11's CI-infra fix). Round 15 made no
 production-code changes of its own beyond what opencode's `8888ddc` fix commit already covered
 (that commit's own new tests account for this round's count increase over Round 14's 429/435). Green
 tests are still not evidence of correctness in this project beyond "nothing crashes" — none of round
@@ -171,64 +168,22 @@ per the new Regression Coverage Policy, a live end-to-end check of the `reconcil
 audit log's own hash chain, `#280`-`#282`), Round 15 (verification of round 14's fixes, an
 adversarial review of `#280`'s OWN fix for a new regression, real HTTP-boundary testing against the
 live `macro_agent_service` process, a systematic sweep for other tip-lookup serialization patterns,
-and a replay/security audit of every intake/webhook adapter, `#283`-`#286`). **4 issues remain open,
-0 CRITICAL, 3 HIGH.** Round 15 confirmed all three of round 14's fixes are genuinely closed —
-independently re-reproduced live, including a fresh 20-concurrent-writer chain-integrity check with
-zero forks. Following this project's now-standard practice of adversarially reviewing the
-immediately preceding round's own fix (not just confirming it closes its reported bug), this round
-found `#280`'s fix itself introduces a real new regression: `#283` (HIGH) — the global
-`pg_advisory_xact_lock` is transaction-scoped, and at least three real call sites
-(`ApprovalService.approve()`, `VerificationService.verify_and_advance()`, `TaskService.create()`)
-call `AuditService.log()` then make a SLOW outbound Plane HTTP call before committing, holding the
-lock across that entire external call. Live-reproduced: an unrelated audit write for a DIFFERENT
-task was blocked for the full duration of a simulated 2s Plane call — since Plane is explicitly
-documented as non-authoritative (`CLAUDE.md`), a slow/degraded Plane instance can now stall EVERY
-audit-log write system-wide via completely ordinary traffic. Two genuinely new angles then found two
-more real gaps against the actual, unmocked `macro_agent_service` HTTP boundary: `#285` (HIGH) — an
-unexpected response missing an expected field raises an unhandled `KeyError` OUTSIDE the
-error-handling `try/except` at two call sites, leaving a task silently stuck with zero audit trail —
-and `#286` (MEDIUM) — `Execution.status_error` records only the exception class name, so a genuine
-404 (run permanently lost) and a genuine 500 (transient) are indistinguishable, defeating `#261`'s
-own diagnostic purpose. A replay/security audit of every intake/webhook adapter found `#284` (HIGH)
-— `TelegramAdapter.process_update`'s `/approve` command has the EXACT same bug shape as `#277`: it
-never sends `X-Controller-Secret`, so Telegram-based human approval has also never worked against
-any real, properly-configured deployment, in a code path `#277`'s fix never touched. **A third
-lesson now joins the standing two (`RISK-16`/`RISK-19` sweeps; mocked/unrealistic-fixture tests
-hiding broken documented workflows): a fix for one bug can introduce a genuinely NEW regression of a
-DIFFERENT kind — `#283` is the clearest instance yet of this, and every round from here should keep
-adversarially reviewing not just "does the preceding fix close its bug" but "does it introduce
-anything new," even after the original bug is confirmed genuinely gone. `#277`'s lesson has also now
-generalized twice more in one round: `#284` and `#285`/`#286` both surfaced purely by finally
-testing a real, unmocked network boundary nobody had driven live before.** Do not treat "Phase 2
-review" as bounded to Phase 2 code, to any fixed set of angles, or to code the current round didn't
-itself touch — every round that tried a genuinely new angle found something the previous rounds'
-angles couldn't have found, without exception across all fifteen rounds so far.
+and a replay/security audit of every intake/webhook adapter, `#283`-`#286`). Round 16 completed the
+follow-up hardening for retry-start recovery (`#289`), approval/retry external-run CAS handling
+(`#293`, `#294`), Plane traceability and property projection (`#290`), durable CLI Plane retries
+(`#288`, `#295`, `#296`), reconciliation DAG IDs (`#291`), and malformed pagination (`#292`). The
+changes are locally committed through `81158c2`; remote issue closure and label cleanup are pending
+the final push. The current local gate is green, but live Plane contract tests remain skipped because
+credentials are not configured. Keep the adversarial review practice: green tests do not replace
+live boundary checks, and no phase may be declared complete while critical/high issue queries remain
+non-empty.
 
-## Immediate Next Step: Fix the Three HIGHs, Then the MEDIUM
+## Immediate Next Step: Push and Verify Round 16
 
-Prioritize `#283` first (this is the one with the widest blast radius — a slow Plane instance can
-currently stall every audit-log write in the entire system, not just one task's; the fix needs to
-narrow the advisory lock's hold window to just the tip-read-plus-insert, not the surrounding
-transaction, most likely by moving all outbound Plane/alert HTTP calls to strictly after that
-transaction commits, matching the existing "commit before the outbound call" pattern already used
-elsewhere in this codebase for macro-agent calls). Then `#284` (HIGH — give `TelegramAdapter` access
-to `X-Controller-Secret` and send it on the internal `POST /approvals` call, matching `#277`'s fix
-pattern, plus a live-server test per the Regression Coverage Policy since mocked tests are exactly
-what hid this the first time) and `#285` (HIGH — validate the macro-agent response shape with
-Pydantic, or at minimum widen the `try/except` at both call sites to cover the `result["run_id"]`
-access, so a malformed response fails cleanly with an audit trail instead of silently stranding the
-task). Then `#286` (MEDIUM — capture the actual HTTP status code into `status_error`, not just the
-exception class name). Before declaring Phase 2 gate-clean, run a fresh live-reproduction review and
-confirm the live issue list has no open `severity:critical` or `severity:high` issues — and try an
-angle no prior round has tried yet, given the track record above. Two concrete leads for the next
-round: (1) now that `#284` found a SECOND code path with `#277`'s exact bug shape, do a dedicated
-sweep of every OTHER internal HTTP call this Controller makes to itself or to another of its own
-adapters, checking each one actually sends whatever authentication the receiving endpoint requires
-against a real server — not just `/approvals` callers, but any other internal-to-internal call this
-codebase makes; (2) `#283`'s fix, once landed, deserves the same adversarial "does the fix introduce
-something new" pass this round gave `#280`'s fix — moving Plane calls to after the commit changes
-the failure-atomicity story (what happens if the Plane call fails AFTER the Controller has already
-durably committed the state change it was meant to project?) and is worth checking live.
+Push the reviewed commits, change the incorrectly inherited `phase-1` labels on `#287`-`#294` and
+`#296` to `phase-2`, then verify closure for `#283`-`#296` and rerun the critical/high issue queries.
+Record the final remote counts and any skipped live Plane contract tests here before declaring the
+Phase 2 gate clean.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
