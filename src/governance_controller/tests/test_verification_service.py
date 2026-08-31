@@ -1023,6 +1023,106 @@ async def test_verify_and_advance_finalizes_execution_to_failed(
 class TestVerificationConcurrency:
     """Regression tests for verification CAS and audit durability."""
 
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_retry_start_success_cas_loss_does_not_attach_run_to_changed_task(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#294: a retry run must not attach after a competing task transition."""
+        from unittest.mock import AsyncMock
+
+        from governance_controller.adapters.macro_agent.executor import (
+            MacroAgentExecutor,
+        )
+        from governance_controller.constants import TaskState
+        from governance_controller.models.execution import Execution
+
+        _engine, local_session = isolated_db
+        task_id = "task-retry-attach-cas-294"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise retry attachment CAS",
+            acceptance=["the retry is not attached after a task race"],
+        )
+
+        async def _start_then_block_elsewhere(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.BLOCKED
+                )
+                assert won is True
+                await racer.commit()
+            return {"run_id": "run-retry-cas-294"}
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_start_then_block_elsewhere
+        )
+        fake_executor.cancel = AsyncMock(  # type: ignore[method-assign]
+            return_value={}
+        )
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        fake_executor.cancel.assert_awaited_once_with("run-retry-cas-294")
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.BLOCKED
+            assert task.latest_macro_agent_run_id != "run-retry-cas-294"
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.BLOCKED
+            assert execution.ended_at is not None
+            assert execution.macro_agent_run_id == "run-retry-cas-294"
+
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+            assert any(
+                row.event_type == "retry_execution_start_cas_lost"
+                for row in audits.scalars().all()
+            )
+
     async def test_cas_loss_commits_audit_before_raise(
         self,
         isolated_db: tuple,

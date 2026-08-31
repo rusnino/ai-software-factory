@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import structlog
-from sqlalchemy import desc, select
+from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -654,6 +654,7 @@ class VerificationService:
         # Commit before the outbound macro-agent call so no task row lock is held
         # across the potentially slow network request.
         await db.commit()
+        expected_task_version = task.version
 
         try:
             sandbox = profile.execution.sandbox if profile is not None else "worktree"
@@ -672,9 +673,7 @@ class VerificationService:
         except Exception as exc:
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted. Do NOT
-            # mutate the Execution row before the Task-level CAS — if the CAS
-            # loses, committing a FAILED execution for a task that is now
-            # BLOCKED/RUNNING would leave the two rows inconsistent (#266).
+            # attach a new external run ID when no run was returned.
             if not await StateMachine.atomic_transition(db, task, TaskState.FAILED):
                 await AuditService.log(
                     db=db,
@@ -717,9 +716,86 @@ class VerificationService:
             raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
         execution.macro_agent_run_id = macro_agent_run_id
+        await db.flush()
+
+        # Attach the external run only if the task is still the RUNNING retry
+        # this method started. The sentinel prevents another execution from
+        # being overwritten while the network request was in flight.
+        cas_result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == expected_task_version,  # type: ignore[arg-type]
+                Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                Task.latest_macro_agent_run_id == execution.id,  # type: ignore[arg-type]
+            )
+            .values(latest_macro_agent_run_id=macro_agent_run_id)
+            .execution_options(synchronize_session=False)
+        )
+        if not cas_result.rowcount:  # type: ignore[attr-defined]
+            fresh_result = await db.execute(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            fresh_task = fresh_result.scalar_one_or_none()
+            if fresh_task is None or (
+                fresh_task.latest_macro_agent_run_id != macro_agent_run_id
+            ):
+                execution.state = (
+                    fresh_task.state
+                    if fresh_task is not None
+                    and fresh_task.state is not TaskState.RUNNING
+                    else TaskState.FAILED
+                )
+                execution.ended_at = datetime.now(UTC)
+                await db.flush()
+                await AuditService.log(
+                    db=db,
+                    event_type="retry_execution_start_cas_lost",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    execution_id=execution.id,
+                    payload={
+                        "execution_id": execution.id,
+                        "macro_agent_run_id": macro_agent_run_id,
+                        "expected_task_version": expected_task_version,
+                        "observed_task_state": (
+                            fresh_task.state.value if fresh_task is not None else None
+                        ),
+                    },
+                )
+                await db.commit()
+
+                try:
+                    await self.executor.cancel(macro_agent_run_id)
+                except Exception as cleanup_exc:  # pragma: no cover - boundary shield
+                    await AuditService.log(
+                        db=db,
+                        event_type="execution_cancel_failed",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        execution_id=execution.id,
+                        payload={
+                            "macro_agent_run_id": macro_agent_run_id,
+                            "error": str(cleanup_exc),
+                            "error_type": type(cleanup_exc).__name__,
+                        },
+                    )
+                    await db.commit()
+                raise ValueError(
+                    "Concurrent modification detected during retry execution start"
+                )
+
+            # Another writer attached this exact run while the CAS was being
+            # resolved. Refresh the local object and continue without canceling.
+            task.latest_macro_agent_run_id = macro_agent_run_id
+
         # Persist the new run ID on the task so feedback has a target even when
         # the relationship is not loaded.
-        task.latest_macro_agent_run_id = execution.macro_agent_run_id
+        task.latest_macro_agent_run_id = macro_agent_run_id
         await db.flush()
 
         await AuditService.log(
