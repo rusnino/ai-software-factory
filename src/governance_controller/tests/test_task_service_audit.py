@@ -241,9 +241,8 @@ async def test_plane_creation_crash_leaves_durable_pending_marker(
         with patch(
             "governance_controller.services.task_service.PlaneProjectionService",
             return_value=_CrashedProjection(),
-        ):
-            with pytest.raises(asyncio.CancelledError):
-                await TaskService(creator).create(contract, profile)
+        ), pytest.raises(asyncio.CancelledError):
+            await TaskService(creator).create(contract, profile)
         await creator.rollback()
 
         async with session_local() as observer:

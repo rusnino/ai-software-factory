@@ -16,11 +16,11 @@ from governance_controller.harness import registry
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.policy_engine import (
+    PolicyEngine,
+    PolicyResult,
     _extract_command_paths,
     _forbidden_path_conflicts,
     _parse_command_to_argv,
-    PolicyEngine,
-    PolicyResult,
 )
 
 

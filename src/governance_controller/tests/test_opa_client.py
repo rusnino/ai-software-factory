@@ -129,7 +129,11 @@ async def test_opa_input_contains_policy_parity_facts(
         project_id="P-parity",
         project_name="ParityProject",
         repository=RepositoryConfig(path="/repo"),
-        execution={"allowed_harnesses": ["opencode"], "timeout_minutes": 60, "max_retries": 2},
+        execution={
+            "allowed_harnesses": ["opencode"],
+            "timeout_minutes": 60,
+            "max_retries": 2,
+        },
     )
 
     result = await backend.evaluate(contract, profile, ApprovalType.PLAN)

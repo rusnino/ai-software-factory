@@ -289,6 +289,7 @@ class TestCliReconcile:
         db.flush = AsyncMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
+        db.refresh = AsyncMock()
 
         @asynccontextmanager
         async def fake_db_session():
@@ -342,6 +343,7 @@ class TestCliReconcile:
         db.flush = AsyncMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
+        db.refresh = AsyncMock()
 
         @asynccontextmanager
         async def fake_db_session():
@@ -395,6 +397,7 @@ class TestCliReconcile:
         db.flush = AsyncMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
+        db.refresh = AsyncMock()
 
         @asynccontextmanager
         async def fake_db_session():
@@ -648,6 +651,22 @@ async def test_reconcile_reports_plane_retry_failure_after_rollback(
     async with local_session() as check:
         task = await check.scalar(select(Task).where(Task.id == task_id))
         assert task is not None
+        rows = await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+        entries = list(rows.scalars().all())
+
+    pending = [
+        entry
+        for entry in entries
+        if entry.event_type == "plane_issue_creation_pending"
+    ]
+    failed = [
+        entry
+        for entry in entries
+        if entry.event_type == "plane_issue_creation_failed"
+    ]
+    assert len(pending) == 1
+    assert len(failed) == 1
+    assert failed[0].payload["pending_event_id"] == pending[0].event_id
 
 
 @pytest.mark.skipif(

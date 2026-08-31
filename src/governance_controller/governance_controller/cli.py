@@ -12,10 +12,10 @@ from governance_controller.constants import ApprovalType
 from governance_controller.db import dispose_engines_sync, get_db_session
 from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.plane_projection import (
     acquire_plane_projection_lock,
 )
-from governance_controller.services.audit_service import AuditService
 from governance_controller.services.reconciliation_service import (
     ReconciliationService,
 )
@@ -131,6 +131,7 @@ def reconcile(
                 task = await db.get(Task, task_id)
                 if task is None:
                     continue
+                task_project_id = task.project_id
                 contract = task.task_contract_json
                 objective: str | None = None
                 description: str | None = None
@@ -149,29 +150,31 @@ def reconcile(
                     stored_approval_required = contract.get("approval_required")
                     if isinstance(stored_approval_required, bool):
                         approval_required = stored_approval_required
-                title = objective or task.id
+                title = objective or task_id
+                pending_event_id: str | None = None
                 try:
                     # Keep the task-scoped lock out of the read transaction and
                     # release it immediately after the non-authoritative write.
                     pending = await AuditService.log(
                         db=db,
                         event_type="plane_issue_creation_pending",
-                        task_id=task.id,
+                        task_id=task_id,
                         actor="system",
                         source="cli",
                         payload={
                             "operation": "create_issue",
-                            "project_id": task.project_id,
+                            "project_id": task_project_id,
                         },
                     )
+                    pending_event_id = pending.event_id
                     await db.commit()
-                    await acquire_plane_projection_lock(db, task.id)
+                    await acquire_plane_projection_lock(db, task_id)
                     issue = await projection.ensure_plane_issue(
-                        controller_task_id=task.id,
+                        controller_task_id=task_id,
                         title=title,
                         description=description,
                         state=task.state,
-                        project_id=task.project_id,
+                        project_id=task_project_id,
                         source=source,
                         approval_required=approval_required,
                     )
@@ -183,12 +186,12 @@ def reconcile(
                     await AuditService.log(
                         db=db,
                         event_type="plane_issue_creation_completed",
-                        task_id=task.id,
+                        task_id=task_id,
                         actor="system",
                         source="cli",
                         payload={
                             "operation": "create_issue",
-                            "pending_event_id": pending.event_id,
+                            "pending_event_id": pending_event_id,
                             "plane_issue_id": task.plane_issue_id,
                         },
                     )
@@ -198,11 +201,13 @@ def reconcile(
                     await AuditService.log(
                         db=db,
                         event_type="plane_issue_creation_failed",
-                        task_id=task.id,
+                        task_id=task_id,
                         actor="system",
                         source="cli",
                         payload={
                             "operation": "create_issue",
+                            "project_id": task_project_id,
+                            "pending_event_id": pending_event_id,
                             "error": str(exc),
                             "error_type": type(exc).__name__,
                         },

@@ -156,7 +156,9 @@ async def test_duplicate_intake_does_not_consume_global_ip_budget(
         }
 
     headers = {"X-Intake-Secret": "intake-secret"}
-    first = await async_client.post("/intake/idea", json=payload("idea-1"), headers=headers)
+    first = await async_client.post(
+        "/intake/idea", json=payload("idea-1"), headers=headers
+    )
     duplicate_one = await async_client.post(
         "/intake/idea", json=payload("idea-1"), headers=headers
     )
