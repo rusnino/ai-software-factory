@@ -2,7 +2,7 @@
 
 ## Current State
 
-**Neither phase is gate-clean. Do not trust a "gate-clean" claim in this file's own history —
+**Phase 2 hardening is gate-clean as of 2026-08-31. Do not trust a "gate-clean" claim in this file's own history —
 it has been declared prematurely at least three separate times, each later found wrong by
 independent live verification.** As of 2026-08-31, sixteen review rounds have run. Rounds 1-8
 (`#154`-`#258`) landed and hold up on re-verification. Rounds 9-13 established two recurring defect
@@ -39,7 +39,7 @@ adapter found `#284` (HIGH) — `TelegramAdapter.process_update`'s `/approve` co
 same bug shape as `#277`: it never sends `X-Controller-Secret`, so Telegram-based human approval has
 also never worked against any real, properly-configured deployment, in a code path `#277`'s fix
 never touched.** **Every round that tried a genuinely new angle has found something no prior round's
-angles could have found, without exception across all fifteen rounds so far. A third lesson now
+angles could have found, without exception across all sixteen rounds so far. A third lesson now
 joins the standing two (`RISK-16`/`RISK-19` sweeps; "mocked/unrealistic-fixture tests hide broken
 documented workflows"): a fix for one bug can introduce a NEW regression of a DIFFERENT kind — this
 round's `#283` is the second time this has happened (the first being `RISK-16`/`RISK-19` themselves
@@ -56,12 +56,10 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of the latest pre-push check: **14 open issues (0 CRITICAL, 10 HIGH, 4 MEDIUM, 0 LOW)**. The
-Round 16 follow-up fixes are committed locally through `81158c2` but have not been pushed, so
-remote closure is still pending. The open set is `#283`-`#296`; `#287`-`#294` and `#296` currently
-carry the historical `phase-1` label and must be reclassified to `phase-2` during issue cleanup.
-Do not declare Phase 2 complete until the fixes are pushed and the live critical/high queries are
-empty.
+As of the latest live check: **0 open issues (0 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW)**. Issues
+`#283`-`#296` are closed and carry the `phase-2` label. Round 16's reviewed commits are pushed
+through `74e59a0`; the local gate is green. The two live Plane contract tests remain skipped because
+`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -172,18 +170,15 @@ and a replay/security audit of every intake/webhook adapter, `#283`-`#286`). Rou
 follow-up hardening for retry-start recovery (`#289`), approval/retry external-run CAS handling
 (`#293`, `#294`), Plane traceability and property projection (`#290`), durable CLI Plane retries
 (`#288`, `#295`, `#296`), reconciliation DAG IDs (`#291`), and malformed pagination (`#292`). The
-changes are locally committed through `81158c2`; remote issue closure and label cleanup are pending
-the final push. The current local gate is green, but live Plane contract tests remain skipped because
-credentials are not configured. Keep the adversarial review practice: green tests do not replace
-live boundary checks, and no phase may be declared complete while critical/high issue queries remain
-non-empty.
+changes are pushed through `74e59a0`; issues `#283`-`#296` are closed and relabeled `phase-2`. The
+current local gate is green, but live Plane contract tests remain skipped because credentials are not
+configured. Keep the adversarial review practice: green tests do not replace live boundary checks,
+and no phase may be declared complete while critical/high issue queries remain non-empty.
 
-## Immediate Next Step: Push and Verify Round 16
+## Immediate Next Step: Phase 3 Preparation
 
-Push the reviewed commits, change the incorrectly inherited `phase-1` labels on `#287`-`#294` and
-`#296` to `phase-2`, then verify closure for `#283`-`#296` and rerun the critical/high issue queries.
-Record the final remote counts and any skipped live Plane contract tests here before declaring the
-Phase 2 gate clean.
+Phase 2 hardening is gate-clean. Before starting Phase 3, keep the live critical/high issue queries
+empty and decide whether to provision a Plane instance for the skipped live contract tests.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
