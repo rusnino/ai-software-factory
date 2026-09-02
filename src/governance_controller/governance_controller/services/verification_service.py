@@ -508,8 +508,23 @@ class VerificationService:
                         },
                     )
                 return report
-            # The failed state and its audit entry are authoritative; commit
-            # them before the potentially slow Plane feedback call.
+            retry_attempt = task.execution_attempts + 1
+            retry_pending = await AuditService.log(
+                db=db,
+                event_type="verification_retry_pending",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "operation": "verification_retry",
+                    "attempt": retry_attempt,
+                    "max_retries": max_retries,
+                    "verification_report": report,
+                },
+            )
+            # The failed state and retry intent are authoritative; commit them
+            # before any potentially slow or cancellable handoff.
+            await db.commit()
             pending = await AuditService.log(
                 db=db,
                 event_type="plane_projection_pending",
@@ -518,7 +533,7 @@ class VerificationService:
                 source="verification_service",
                 payload={
                     "operation": "verification_failure_alert",
-                    "attempt": task.execution_attempts,
+                    "attempt": retry_attempt,
                 },
             )
             await db.commit()
@@ -527,7 +542,7 @@ class VerificationService:
                     task=task,
                     contract=contract,
                     report=report,
-                    attempt=task.execution_attempts,
+                    attempt=retry_attempt,
                     max_retries=max_retries,
                 )
             except Exception as exc:
@@ -560,7 +575,7 @@ class VerificationService:
             if await StateMachine.atomic_transition_from_failed_to_running(
                 db,
                 task,
-                execution_attempts=task.execution_attempts + 1,
+                execution_attempts=retry_attempt,
             ):
                 await AuditService.log(
                     db=db,
@@ -574,16 +589,46 @@ class VerificationService:
                         "verification_report": report,
                     },
                 )
-                await service._start_retry_execution(
+                try:
+                    started = await service._start_retry_execution(
+                        db=db,
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        report=report,
+                    )
+                    if started is False:
+                        return report
+                except Exception as exc:
+                    await AuditService.log(
+                        db=db,
+                        event_type="verification_retry_failed",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "pending_event_id": retry_pending.event_id,
+                            "attempt": retry_attempt,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    await db.commit()
+                    raise
+                await AuditService.log(
                     db=db,
-                    task=task,
-                    contract=contract,
-                    profile=profile,
-                    report=report,
+                    event_type="verification_retry_recovered",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    payload={
+                        "pending_event_id": retry_pending.event_id,
+                        "attempt": retry_attempt,
+                    },
                 )
                 # _start_retry_execution records the retry-start audit after
-                # its own pre-start commit. Release that audit-tip lock before
-                # the outbound feedback request.
+                # its own pre-start commit. Release the audit-tip lock before
+                # the outbound feedback request and Plane projection.
                 await db.commit()
                 # SPEC-09 §9.6 step 2: send failure feedback to macro-agent so
                 # the retry run receives the previous verification report.
@@ -680,22 +725,15 @@ class VerificationService:
         contract: TaskContract,
         profile: ProjectProfile | None,
         report: dict[str, object],
-    ) -> None:
+    ) -> bool:
         """Start a new macro-agent execution for a verification retry.
 
         Mirrors ``ApprovalService._trigger_execution`` but skips the READY phase
-        because the task is already approved and we are resuming execution.
+        because the task is already approved and we are resuming execution. The
+        execution row and task sentinel are claimed with one versioned update
+        before any external start, so recovery and the original verifier cannot
+        both launch the same retry.
         """
-        # The failed execution is already in FAILED at this point because
-        # verify_and_advance finalized it before invoking this helper. Guard
-        # against any caller that skipped that step by finalizing the active
-        # row first so we never leave two executions marked RUNNING.
-        await self._finalize_current_execution(
-            db,
-            task_id=task.id,
-            state=TaskState.FAILED,
-        )
-
         started_at = datetime.now(UTC)
         execution = Execution(
             id=str(uuid4()),
@@ -706,13 +744,55 @@ class VerificationService:
         db.add(execution)
         await db.flush()
 
+        expected_task_version = task.version
+        active_execution_exists = (
+            select(Execution.__table__.c.id)  # type: ignore[attr-defined]
+            .where(
+                Execution.task_id == task.id,  # type: ignore[arg-type]
+                Execution.id != execution.id,  # type: ignore[arg-type]
+                Execution.__table__.c.state.in_(  # type: ignore[attr-defined]
+                    [TaskState.READY.value, TaskState.RUNNING.value]
+                ),
+            )
+            .exists()
+        )
+        claim_result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == expected_task_version,  # type: ignore[arg-type]
+                Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                ~active_execution_exists,
+            )
+            .values(
+                latest_macro_agent_run_id=execution.id,
+                version=Task.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not claim_result.rowcount:  # type: ignore[attr-defined]
+            await db.delete(execution)
+            await db.flush()
+            await AuditService.log(
+                db=db,
+                event_type="retry_execution_start_skipped",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "reason": "another retry already claimed execution start",
+                },
+            )
+            await db.commit()
+            return False
+
         # Point the task at the new execution row before committing, so the
-        # stuck-execution poller cannot see a stale execution id during the
-        # potentially slow macro-agent network call. We do not yet have a real
-        # macro-agent run id, so use the execution's internal id as a sentinel;
-        # it is overwritten with the external run id once `executor.start()`
-        # returns.
+        # stuck-execution poller can recover this handoff if the process exits
+        # during the potentially slow macro-agent network call. We do not yet
+        # have a real run id, so the internal Execution ID is the sentinel.
         task.latest_macro_agent_run_id = execution.id
+        task.version = expected_task_version + 1
         await db.flush()
 
         # Commit before the outbound macro-agent call so no task row lock is held
@@ -738,7 +818,27 @@ class VerificationService:
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted. Do NOT
             # attach a new external run ID when no run was returned.
-            if not await StateMachine.atomic_transition(db, task, TaskState.FAILED):
+            transitioned = await StateMachine.atomic_transition(
+                db, task, TaskState.FAILED
+            )
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            await db.flush()
+            await AuditService.log(
+                db=db,
+                event_type="retry_execution_start_failed",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                execution_id=execution.id,
+                payload={
+                    "execution_id": execution.id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "verification_report": report,
+                },
+            )
+            if not transitioned:
                 await AuditService.log(
                     db=db,
                     event_type="concurrent_modification",
@@ -757,25 +857,8 @@ class VerificationService:
                 raise ValueError(
                     "Concurrent modification detected: "
                     "task state changed during retry execution failure handling"
-                ) from None
+                    ) from None
 
-            execution.state = TaskState.FAILED
-            execution.ended_at = datetime.now(UTC)
-            await db.flush()
-            await AuditService.log(
-                db=db,
-                event_type="retry_execution_start_failed",
-                task_id=task.id,
-                actor="system",
-                source="verification_service",
-                execution_id=execution.id,
-                payload={
-                    "execution_id": execution.id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "verification_report": report,
-                },
-            )
             await db.commit()
             raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
@@ -793,7 +876,11 @@ class VerificationService:
                 Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
                 Task.latest_macro_agent_run_id == execution.id,  # type: ignore[arg-type]
             )
-            .values(latest_macro_agent_run_id=macro_agent_run_id)
+            .values(
+                latest_macro_agent_run_id=macro_agent_run_id,
+                version=Task.version + 1,
+                updated_at=datetime.now(UTC),
+            )
             .execution_options(synchronize_session=False)
         )
         if not cas_result.rowcount:  # type: ignore[attr-defined]
@@ -832,6 +919,19 @@ class VerificationService:
                 )
                 await db.commit()
 
+                await AuditService.log(
+                    db=db,
+                    event_type="execution_cancel_pending",
+                    task_id=task.id,
+                    actor="system",
+                    source="verification_service",
+                    execution_id=execution.id,
+                    payload={
+                        "macro_agent_run_id": macro_agent_run_id,
+                        "reason": "retry_execution_start_cas_lost",
+                    },
+                )
+                await db.commit()
                 try:
                     await self.executor.cancel(macro_agent_run_id)
                 except Exception as cleanup_exc:  # pragma: no cover - boundary shield
@@ -849,6 +949,17 @@ class VerificationService:
                         },
                     )
                     await db.commit()
+                else:
+                    await AuditService.log(
+                        db=db,
+                        event_type="execution_cancel_completed",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        execution_id=execution.id,
+                        payload={"macro_agent_run_id": macro_agent_run_id},
+                    )
+                    await db.commit()
                 raise ValueError(
                     "Concurrent modification detected during retry execution start"
                 )
@@ -856,10 +967,14 @@ class VerificationService:
             # Another writer attached this exact run while the CAS was being
             # resolved. Refresh the local object and continue without canceling.
             task.latest_macro_agent_run_id = macro_agent_run_id
+            if fresh_task is not None:
+                task.version = fresh_task.version
 
         # Persist the new run ID on the task so feedback has a target even when
         # the relationship is not loaded.
         task.latest_macro_agent_run_id = macro_agent_run_id
+        if cas_result.rowcount:  # type: ignore[attr-defined]
+            task.version = expected_task_version + 1
         await db.flush()
 
         await AuditService.log(
@@ -874,6 +989,7 @@ class VerificationService:
                 "macro_agent_run_id": execution.macro_agent_run_id,
             },
         )
+        return True
 
     async def _send_macro_agent_feedback(
         self,

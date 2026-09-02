@@ -12,20 +12,24 @@ tasks left at ``AGENT_REVIEW`` because verification crashed mid-flight.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
+from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.state_machine import StateMachine
+from governance_controller.services.task_service import TaskService
 
 
 class StuckExecutionPoller:
@@ -56,6 +60,8 @@ class StuckExecutionPoller:
         self._dry_run = dry_run
         self._batch_size = batch_size
 
+    _retry_recovery_backoff = timedelta(minutes=1)
+
     def _timeout_factor(self) -> int:
         return 2
 
@@ -76,6 +82,15 @@ class StuckExecutionPoller:
         """Run one polling pass and return a list of actions taken."""
         actions: list[dict[str, Any]] = []
 
+        cancellation_actions = await self._poll_pending_cancellations()
+        actions.extend(cancellation_actions)
+
+        approved_start_actions = await self._poll_execution_start_pending()
+        actions.extend(approved_start_actions)
+
+        retry_start_actions = await self._poll_verification_retry_pending()
+        actions.extend(retry_start_actions)
+
         retry_start_actions = await self._poll_retry_start()
         actions.extend(retry_start_actions)
 
@@ -89,6 +104,578 @@ class StuckExecutionPoller:
         actions.extend(agent_review_actions)
 
         return actions
+
+    def _executor_for_recovery(self) -> MacroAgentExecutor:
+        """Return the configured executor, preserving injected test doubles."""
+        if self._executor is not None:
+            return self._executor
+        return MacroAgentExecutor(client=self._client)
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        """Treat legacy database timestamps without timezone as UTC."""
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    @staticmethod
+    def _task_contract(task: Task) -> TaskContract:
+        """Validate and reconstruct a contract persisted on a task row."""
+        return TaskContract(**cast(dict[str, Any], task.task_contract_json))
+
+    async def _poll_pending_cancellations(self) -> list[dict[str, Any]]:
+        """Retry external cancellations that failed after a CAS loser."""
+        completed = aliased(AuditLog)
+        completed_exists = exists().where(
+            completed.event_type == "execution_cancel_completed",  # type: ignore[arg-type]
+            completed.task_id == AuditLog.task_id,  # type: ignore[arg-type]
+            completed.payload["macro_agent_run_id"].as_string()
+            == AuditLog.payload["macro_agent_run_id"].as_string(),
+        )
+        result = await self.db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.event_type == "execution_cancel_pending",  # type: ignore[arg-type]
+            )
+            .where(~completed_exists)
+            .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
+            .limit(self._batch_size)
+        )
+
+        actions: list[dict[str, Any]] = []
+        for marker in result.scalars().all():
+            run_id = marker.payload.get("macro_agent_run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+
+            task = await self.db.scalar(
+                select(Task)
+                .where(Task.id == marker.task_id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            if task is not None and task.latest_macro_agent_run_id == run_id:
+                if self._dry_run:
+                    actions.append(
+                        {
+                            "task_id": marker.task_id,
+                            "execution_id": marker.execution_id,
+                            "action": "would_complete_execution_cancel",
+                            "macro_agent_run_id": run_id,
+                            "reason": "run_attached_to_current_task",
+                        }
+                    )
+                    continue
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_cancel_completed",
+                    task_id=marker.task_id,
+                    actor="system",
+                    source="stuck_execution_poller",
+                    execution_id=marker.execution_id,
+                    payload={
+                        "macro_agent_run_id": run_id,
+                        "reason": "run_attached_to_current_task",
+                    },
+                )
+                await self.db.commit()
+                actions.append(
+                    {
+                        "task_id": marker.task_id,
+                        "execution_id": marker.execution_id,
+                        "action": "execution_cancel_completed",
+                        "macro_agent_run_id": run_id,
+                        "reason": "run_attached_to_current_task",
+                    }
+                )
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": marker.task_id,
+                        "execution_id": marker.execution_id,
+                        "action": "would_cancel_pending_execution",
+                        "macro_agent_run_id": run_id,
+                    }
+                )
+                continue
+
+            try:
+                await self._executor_for_recovery().cancel(run_id)
+            except Exception as exc:  # pragma: no cover - boundary shield
+                if (
+                    isinstance(exc, httpx.HTTPStatusError)
+                    and exc.response.status_code == 404
+                ):
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="execution_cancel_completed",
+                        task_id=marker.task_id,
+                        actor="system",
+                        source="stuck_execution_poller",
+                        execution_id=marker.execution_id,
+                        payload={
+                            "macro_agent_run_id": run_id,
+                            "reason": "run_not_found",
+                        },
+                    )
+                    await self.db.commit()
+                    actions.append(
+                        {
+                            "task_id": marker.task_id,
+                            "execution_id": marker.execution_id,
+                            "action": "execution_cancel_completed",
+                            "macro_agent_run_id": run_id,
+                            "reason": "run_not_found",
+                        }
+                    )
+                    continue
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_cancel_failed",
+                    task_id=marker.task_id,
+                    actor="system",
+                    source="stuck_execution_poller",
+                    execution_id=marker.execution_id,
+                    payload={
+                        "macro_agent_run_id": run_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                await self.db.commit()
+                actions.append(
+                    {
+                        "task_id": marker.task_id,
+                        "execution_id": marker.execution_id,
+                        "action": "execution_cancel_failed",
+                        "macro_agent_run_id": run_id,
+                    }
+                )
+                continue
+
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_cancel_completed",
+                task_id=marker.task_id,
+                actor="system",
+                source="stuck_execution_poller",
+                execution_id=marker.execution_id,
+                payload={"macro_agent_run_id": run_id},
+            )
+            await self.db.commit()
+            actions.append(
+                {
+                    "task_id": marker.task_id,
+                    "execution_id": marker.execution_id,
+                    "action": "execution_cancel_completed",
+                    "macro_agent_run_id": run_id,
+                }
+            )
+
+        return actions
+
+    async def _poll_execution_start_pending(self) -> list[dict[str, Any]]:
+        """Resume approved execution starts interrupted before READY."""
+        result = await self.db.execute(
+            select(Task, AuditLog)
+            .join(AuditLog, AuditLog.task_id == Task.id)  # type: ignore[arg-type]
+            .where(Task.state == TaskState.EXEC_APPROVED.value)  # type: ignore[arg-type]
+            .where(AuditLog.event_type == "execution_start_pending")  # type: ignore[arg-type]
+            .order_by(AuditLog.__table__.c.timestamp)  # type: ignore[attr-defined]
+            .limit(self._batch_size)
+        )
+
+        from governance_controller.services.approval_service import ApprovalService
+
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task, marker in result.tuples().all():
+            timeout = await self._task_timeout_minutes(task)
+            deadline = self._as_utc(marker.timestamp) + timedelta(
+                minutes=timeout * self._crash_timeout_factor()
+            )
+            if now < deadline:
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "would_start_execution",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            try:
+                contract = self._task_contract(task)
+                profile = await TaskService(self.db).get_profile_by_project_id(
+                    task.project_id
+                )
+                if profile is None:
+                    raise RuntimeError(
+                        f"Project profile {task.project_id} not found for recovery"
+                    )
+                await ApprovalService(
+                    db=self.db,
+                    executor=self._executor_for_recovery(),
+                )._trigger_execution(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    actor="system:poller",
+                    source="stuck_execution_poller",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+            except Exception as exc:  # pragma: no cover - boundary shield
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_start_recovery_failed",
+                    task_id=task.id,
+                    actor="system",
+                    source="stuck_execution_poller",
+                    payload={
+                        "pending_event_id": marker.event_id,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                await self.db.commit()
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "execution_start_recovery_failed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_start_recovered",
+                task_id=task.id,
+                actor="system",
+                source="stuck_execution_poller",
+                payload={"pending_event_id": marker.event_id},
+            )
+            await self.db.commit()
+            actions.append(
+                {
+                    "task_id": task.id,
+                    "action": "execution_start_recovered",
+                    "deadline": deadline.isoformat(),
+                }
+            )
+
+        return actions
+
+    async def _poll_verification_retry_pending(self) -> list[dict[str, Any]]:
+        """Resume a verification retry interrupted before its execution start."""
+        terminal = aliased(AuditLog)
+        terminal_exists = exists().where(
+            terminal.task_id == AuditLog.task_id,  # type: ignore[arg-type]
+            terminal.payload["pending_event_id"].as_string()
+            == AuditLog.event_id,
+            or_(
+                terminal.event_type.in_(  # type: ignore[attr-defined]
+                    ["verification_retry_recovered", "verification_retry_failed"]
+                ),
+                and_(
+                    terminal.event_type == "verification_retry_recovery_failed",  # type: ignore[arg-type]
+                    terminal.payload["retryable"].as_boolean().is_(False),
+                ),
+            ),
+        )
+        result = await self.db.execute(
+            select(Task, AuditLog)
+            .join(AuditLog, AuditLog.task_id == Task.id)  # type: ignore[arg-type]
+            .where(
+                Task.__table__.c.state.in_(  # type: ignore[attr-defined]
+                    [TaskState.FAILED.value, TaskState.RUNNING.value]
+                )
+            )
+            .where(AuditLog.event_type == "verification_retry_pending")  # type: ignore[arg-type]
+            .where(~terminal_exists)
+            .order_by(AuditLog.__table__.c.timestamp)  # type: ignore[attr-defined]
+            .limit(self._batch_size)
+        )
+
+        from governance_controller.services.verification_service import (
+            VerificationService,
+        )
+
+        now = datetime.now(UTC)
+        actions: list[dict[str, Any]] = []
+        for task, marker in result.tuples().all():
+            attempt = marker.payload.get("attempt")
+            if not isinstance(attempt, int):
+                continue
+            timeout = await self._task_timeout_minutes(task)
+            deadline = self._as_utc(marker.timestamp) + timedelta(
+                minutes=timeout * self._crash_timeout_factor()
+            )
+            if now < deadline:
+                continue
+
+            if await self._retry_marker_has_outcome(task.id, attempt):
+                continue
+
+            try:
+                contract = self._task_contract(task)
+            except Exception as exc:  # pragma: no cover - malformed persisted data
+                if self._dry_run:
+                    actions.append(
+                        {
+                            "task_id": task.id,
+                            "action": "would_skip_malformed_retry_contract",
+                            "deadline": deadline.isoformat(),
+                        }
+                    )
+                    continue
+                await self._record_retry_recovery_failure(
+                    task=task,
+                    marker=marker,
+                    attempt=attempt,
+                    error=exc,
+                    retryable=False,
+                )
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "verification_retry_recovery_failed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            max_retries = getattr(contract.execution, "max_retries", 2)
+            if task.state == TaskState.FAILED:
+                if attempt > max_retries or attempt not in {
+                    task.execution_attempts,
+                    task.execution_attempts + 1,
+                }:
+                    continue
+            elif (
+                attempt != task.execution_attempts
+                or await self._has_active_execution(task.id)
+            ):
+                continue
+
+            if await self._retry_recovery_is_backing_off(task.id, attempt, now):
+                continue
+
+            if self._dry_run:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "would_start_verification_retry",
+                        "attempt": attempt,
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            profile = await TaskService(self.db).get_profile_by_project_id(
+                task.project_id
+            )
+            if profile is None:
+                error = RuntimeError(
+                    f"Project profile {task.project_id} not found"
+                )
+                await self._record_retry_recovery_failure(
+                    task=task,
+                    marker=marker,
+                    attempt=attempt,
+                    error=error,
+                    retryable=True,
+                )
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "verification_retry_recovery_failed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            if task.state == TaskState.FAILED:
+                transitioned = (
+                    await StateMachine.atomic_transition_from_failed_to_running(
+                        self.db,
+                        task,
+                        execution_attempts=attempt,
+                    )
+                )
+                if not transitioned:
+                    continue
+
+            report = marker.payload.get("verification_report", {})
+            if not isinstance(report, dict):
+                report = {}
+            try:
+                verifier = VerificationService(executor=self._executor_for_recovery())
+                started = await verifier._start_retry_execution(
+                    db=self.db,
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    report=report,
+                )
+                if started is False:
+                    actions.append(
+                        {
+                            "task_id": task.id,
+                            "action": "verification_retry_already_claimed",
+                            "attempt": attempt,
+                            "deadline": deadline.isoformat(),
+                        }
+                    )
+                    continue
+            except Exception as exc:  # pragma: no cover - boundary shield
+                await self._record_retry_recovery_failure(
+                    task=task,
+                    marker=marker,
+                    attempt=attempt,
+                    error=exc,
+                    retryable=True,
+                )
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "verification_retry_recovery_failed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            await AuditService.log(
+                db=self.db,
+                event_type="verification_retry_recovered",
+                task_id=task.id,
+                actor="system",
+                source="stuck_execution_poller",
+                payload={
+                    "pending_event_id": marker.event_id,
+                    "attempt": attempt,
+                },
+            )
+            await self.db.commit()
+            await verifier._send_macro_agent_feedback(
+                task=task,
+                contract=contract,
+                report=report,
+            )
+            actions.append(
+                {
+                    "task_id": task.id,
+                    "action": "verification_retry_recovered",
+                    "deadline": deadline.isoformat(),
+                }
+            )
+
+        return actions
+
+    async def _retry_marker_has_outcome(self, task_id: str, attempt: int) -> bool:
+        """Return whether a retry marker already has a terminal outcome."""
+        result = await self.db.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                AuditLog.__table__.c.event_type.in_(  # type: ignore[attr-defined]
+                    [
+                        "verification_retry_recovered",
+                        "verification_retry_failed",
+                        "verification_retry_recovery_failed",
+                    ]
+                ),
+            )
+        )
+        for entry in result.scalars().all():
+            if entry.payload.get("attempt") != attempt:
+                continue
+            if entry.event_type in {
+                "verification_retry_recovered",
+                "verification_retry_failed",
+            }:
+                return True
+            if (
+                entry.event_type == "verification_retry_recovery_failed"
+                and entry.payload.get("retryable") is False
+            ):
+                return True
+        return False
+
+    async def _retry_recovery_is_backing_off(
+        self,
+        task_id: str,
+        attempt: int,
+        now: datetime,
+    ) -> bool:
+        """Return whether the latest retryable recovery failure is cooling down."""
+        result = await self.db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                AuditLog.event_type == "verification_retry_recovery_failed",  # type: ignore[arg-type]
+            )
+            .order_by(AuditLog.__table__.c.timestamp.desc())  # type: ignore[attr-defined]
+        )
+        for entry in result.scalars().all():
+            if entry.payload.get("attempt") != attempt:
+                continue
+            retry_after = entry.payload.get("retry_after")
+            if not isinstance(retry_after, str):
+                continue
+            try:
+                retry_at = datetime.fromisoformat(retry_after)
+            except ValueError:
+                continue
+            return now < self._as_utc(retry_at)
+        return False
+
+    async def _record_retry_recovery_failure(
+        self,
+        task: Task,
+        marker: AuditLog,
+        attempt: int,
+        error: Exception,
+        retryable: bool,
+    ) -> None:
+        """Persist an isolated recovery failure without consuming the marker."""
+        payload: dict[str, Any] = {
+            "pending_event_id": marker.event_id,
+            "attempt": attempt,
+            "error": str(error),
+            "error_type": type(error).__name__,
+            "retryable": retryable,
+        }
+        if retryable:
+            payload["retry_after"] = (
+                datetime.now(UTC) + self._retry_recovery_backoff
+            ).isoformat()
+        await AuditService.log(
+            db=self.db,
+            event_type="verification_retry_recovery_failed",
+            task_id=task.id,
+            actor="system",
+            source="stuck_execution_poller",
+            payload=payload,
+        )
+        await self.db.commit()
+
+    async def _has_active_execution(self, task_id: str) -> bool:
+        """Return whether a task already has a READY/RUNNING execution row."""
+        execution = await self.db.scalar(
+            select(Execution.__table__.c.id)  # type: ignore[attr-defined]
+            .where(Execution.task_id == task_id)  # type: ignore[arg-type]
+            .where(
+                Execution.__table__.c.state.in_(  # type: ignore[attr-defined]
+                    [TaskState.READY.value, TaskState.RUNNING.value]
+                )
+            )
+            .limit(1)
+        )
+        return execution is not None
 
     async def _poll_retry_start(self) -> list[dict[str, Any]]:
         """Fail retry executions whose external start never completed (#289).
@@ -114,7 +701,7 @@ class StuckExecutionPoller:
         actions: list[dict[str, Any]] = []
         for task, execution in result.tuples().all():
             timeout = await self._task_timeout_minutes(task)
-            deadline = execution.started_at + timedelta(
+            deadline = self._as_utc(execution.started_at) + timedelta(
                 minutes=timeout * self._crash_timeout_factor()
             )
             if now < deadline:
@@ -160,13 +747,16 @@ class StuckExecutionPoller:
         actions: list[dict[str, Any]] = []
         for task, execution in tasks:
             timeout = await self._task_timeout_minutes(task)
-            deadline = execution.started_at + timedelta(
+            deadline = self._as_utc(execution.started_at) + timedelta(
                 minutes=timeout * self._timeout_factor()
             )
             if now < deadline:
                 continue
 
-            if await self._execution_is_still_alive(execution):
+            if await self._execution_is_still_alive(
+                execution,
+                record_errors=not self._dry_run,
+            ):
                 actions.append(
                     {
                         "task_id": task.id,
@@ -230,7 +820,7 @@ class StuckExecutionPoller:
         actions: list[dict[str, Any]] = []
         for task, execution in result.tuples().all():
             timeout = await self._task_timeout_minutes(task)
-            deadline = execution.started_at + timedelta(
+            deadline = self._as_utc(execution.started_at) + timedelta(
                 minutes=timeout * self._crash_timeout_factor()
             )
             if now < deadline:
@@ -274,6 +864,12 @@ class StuckExecutionPoller:
         ``conflict:resolved`` event (GAP-099) or manually intervene to unblock
         the task (#259).
         """
+        latest_marker = aliased(ProcessedEvent)
+        newer_marker_exists = exists().where(
+            latest_marker.task_id == ProcessedEvent.task_id,  # type: ignore[arg-type]
+            latest_marker.event_type == ProcessedEvent.event_type,  # type: ignore[arg-type]
+            latest_marker.id > ProcessedEvent.id,  # type: ignore[operator, arg-type]
+        )
         result = await self.db.execute(
             select(Task, ProcessedEvent)
             .join(
@@ -282,6 +878,7 @@ class StuckExecutionPoller:
             )
             .where(Task.state == TaskState.AGENT_REVIEW.value)  # type: ignore[arg-type]
             .where(ProcessedEvent.event_type == "landing:completed")  # type: ignore[arg-type]
+            .where(~newer_marker_exists)
             .limit(self._batch_size)
         )
 
@@ -290,7 +887,7 @@ class StuckExecutionPoller:
         for task, marker in result.tuples().all():
             # Use a separate, independent budget for verification crash
             # detection rather than the task's execution timeout (#264).
-            deadline = marker.processed_at + timedelta(
+            deadline = self._as_utc(marker.processed_at) + timedelta(
                 minutes=self._verification_crash_timeout_minutes()
             )
             if now < deadline:
@@ -380,7 +977,11 @@ class StuckExecutionPoller:
         # Fall back to the project profile default.
         return 60
 
-    async def _execution_is_still_alive(self, execution: Execution) -> bool:
+    async def _execution_is_still_alive(
+        self,
+        execution: Execution,
+        record_errors: bool = True,
+    ) -> bool:
         """Return True if the macro-agent run is actively progressing.
 
         A status check that succeeds and reports a terminal state is treated as
@@ -416,7 +1017,7 @@ class StuckExecutionPoller:
         # A genuine exception from the macro-agent service (timeout,
         # connection refused, 404 after a restart) is recorded so the audit
         # trail can distinguish a lost run from a merely slow one (#261).
-        if status_error is not None:
+        if status_error is not None and record_errors:
             execution.status_error = status_error
         return False
 

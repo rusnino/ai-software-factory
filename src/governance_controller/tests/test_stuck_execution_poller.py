@@ -3,19 +3,25 @@
 import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 import pytest_httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
+from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
+from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
+from governance_controller.schemas.project_profile import ProjectProfile
+from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.stuck_execution_poller import StuckExecutionPoller
 
@@ -78,6 +84,32 @@ class TestStuckExecutionPoller:
         assert actions == []
         state = await _fetch_task_state(db_session, task.id)
         assert state == TaskState.RUNNING
+
+    async def test_dry_run_does_not_record_status_error(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Dry-run status checks must not dirty the execution row."""
+        task, execution = await _running_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=300),
+            macro_agent_run_id="run-dry-status-error",
+        )
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            client=_FailingMacroAgentClient(),
+            dry_run=True,
+        ).poll()
+
+        assert actions[0]["action"] == "would_block"
+        assert execution.status_error is None
+        refreshed = await db_session.scalar(
+            select(Execution).where(Execution.id == execution.id)
+        )
+        assert refreshed is not None
+        assert refreshed.status_error is None
+        assert task.state == TaskState.RUNNING
 
     async def test_stuck_execution_transitions_to_blocked(
         self,
@@ -291,6 +323,535 @@ class TestStuckExecutionPoller:
             )
 
 
+class TestPendingRecovery:
+    async def test_dry_run_does_not_retry_pending_cancellation(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Dry-run polling must not call the external cancellation endpoint."""
+        task, run_id = await _pending_cancel_task(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            dry_run=True,
+        ).poll()
+
+        assert [action["action"] for action in actions] == [
+            "would_cancel_pending_execution"
+        ]
+        executor.cancel.assert_not_awaited()
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.latest_macro_agent_run_id is None
+        audits = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task.id)
+            )
+        ).scalars().all()
+        assert not any(
+            row.event_type == "execution_cancel_completed"
+            and row.payload.get("macro_agent_run_id") == run_id
+            for row in audits
+        )
+
+    async def test_dry_run_does_not_resume_pending_approved_start(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Dry-run polling must not resume an approved execution handoff."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        task, _contract = await _approved_task_with_pending_start(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            dry_run=True,
+        ).poll()
+
+        assert [action["action"] for action in actions] == [
+            "would_start_execution"
+        ]
+        executor.start.assert_not_awaited()
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.EXEC_APPROVED
+
+    async def test_dry_run_does_not_resume_pending_verification_retry(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Dry-run polling must not create a verification retry execution."""
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            dry_run=True,
+        ).poll()
+
+        assert [action["action"] for action in actions] == [
+            "would_start_verification_retry"
+        ]
+        executor.start.assert_not_awaited()
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.FAILED
+        assert refreshed.execution_attempts == 0
+        executions = (
+            await db_session.execute(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+        ).scalars().all()
+        assert executions == []
+
+    async def test_dry_run_missing_retry_profile_does_not_write_failure_audit(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Dry-run must not audit or commit a missing recovery dependency."""
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        profile = await db_session.scalar(
+            select(ProjectProfileModel).where(
+                ProjectProfileModel.project_id == task.project_id
+            )
+        )
+        assert profile is not None
+        await db_session.delete(profile)
+        await db_session.commit()
+        before = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task.id)
+            )
+        ).scalars().all()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            dry_run=True,
+        ).poll()
+
+        assert [action["action"] for action in actions] == [
+            "would_start_verification_retry"
+        ]
+        executor.start.assert_not_awaited()
+        after = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task.id)
+            )
+        ).scalars().all()
+        assert len(after) == len(before)
+
+    async def test_missing_retry_profile_does_not_resurrect_failed_task(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A missing profile must be checked before FAILED -> RUNNING CAS."""
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        profile = await db_session.scalar(
+            select(ProjectProfileModel).where(
+                ProjectProfileModel.project_id == task.project_id
+            )
+        )
+        assert profile is not None
+        await db_session.delete(profile)
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        actions = await StuckExecutionPoller(db_session, executor=executor).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            for action in actions
+        )
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.FAILED
+        assert refreshed.execution_attempts == 0
+        executor.start.assert_not_awaited()
+
+    async def test_retry_recovery_failure_remains_pending(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A transient recovery failure must not consume the retry marker."""
+        monkeypatch.setattr(
+            StuckExecutionPoller,
+            "_retry_recovery_backoff",
+            timedelta(0),
+            raising=False,
+        )
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        profile = await db_session.scalar(
+            select(ProjectProfileModel).where(
+                ProjectProfileModel.project_id == task.project_id
+            )
+        )
+        assert profile is not None
+        profile_json = profile.profile_json
+        await db_session.delete(profile)
+        await db_session.commit()
+
+        first_actions = await StuckExecutionPoller(db_session).poll()
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            for action in first_actions
+        )
+        db_session.add(
+            ProjectProfileModel(
+                project_id=task.project_id,
+                profile_json=profile_json,
+            )
+        )
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-retry-after-failure"}
+        second_actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovered"
+            for action in second_actions
+        )
+        executor.start.assert_awaited_once()
+
+    async def test_retry_start_failure_can_recover_same_attempt(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed external start must leave the same retry marker recoverable."""
+        monkeypatch.setattr(
+            StuckExecutionPoller,
+            "_retry_recovery_backoff",
+            timedelta(0),
+            raising=False,
+        )
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.side_effect = RuntimeError("macro-agent unavailable")
+
+        first_actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            for action in first_actions
+        )
+        failed = await _fetch_task(db_session, task.id)
+        assert failed.state == TaskState.FAILED
+        assert failed.execution_attempts == 1
+
+        executor.start.side_effect = None
+        executor.start.return_value = {"run_id": "run-after-start-failure"}
+        second_actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovered"
+            for action in second_actions
+        )
+        assert executor.start.await_count == 2
+
+    async def test_dry_run_malformed_retry_contract_does_not_write_audit(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Dry-run must remain observational even for invalid persisted data."""
+        internal_id = str(uuid4())
+        task_id = f"task-dry-malformed-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-dry-malformed",
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+                task_contract_json={"execution": "not-a-mapping"},
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-dry-malformed-{internal_id[:8]}",
+                event_type="verification_retry_pending",
+                task_id=task_id,
+                actor="system",
+                source="verification_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                payload={"attempt": 1, "verification_report": {"passed": False}},
+            )
+        )
+        await db_session.commit()
+        before = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+        ).scalars().all()
+
+        actions = await StuckExecutionPoller(db_session, dry_run=True).poll()
+
+        assert [action["action"] for action in actions] == [
+            "would_skip_malformed_retry_contract"
+        ]
+        after = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+        ).scalars().all()
+        assert len(after) == len(before)
+
+    async def test_completed_retry_marker_does_not_starve_newer_recovery(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A completed old marker must not consume the recovery batch."""
+        completed_task, _contract = await _failed_task_with_pending_retry(db_session)
+        marker = await db_session.scalar(
+            select(AuditLog).where(
+                AuditLog.task_id == completed_task.id,
+                AuditLog.event_type == "verification_retry_pending",
+            )
+        )
+        assert marker is not None
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-retry-completed-{uuid4()}",
+                event_type="verification_retry_recovered",
+                task_id=completed_task.id,
+                actor="system",
+                source="stuck_execution_poller",
+                payload={"pending_event_id": marker.event_id, "attempt": 1},
+            )
+        )
+        newer_task, _contract = await _failed_task_with_pending_retry(
+            db_session,
+            project_id="proj-newer-retry",
+        )
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-newer-retry"}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            batch_size=1,
+        ).poll()
+
+        recovered = [
+            action
+            for action in actions
+            if action["action"] == "verification_retry_recovered"
+        ]
+        assert len(recovered) == 1
+        assert recovered[0]["task_id"] == newer_task.id
+        executor.start.assert_awaited_once()
+
+    async def test_malformed_retry_contract_does_not_abort_other_recovery(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """One invalid persisted contract must not stop the poller batch."""
+        internal_id = str(uuid4())
+        malformed_task_id = f"task-malformed-retry-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=malformed_task_id,
+                project_id="proj-malformed-retry",
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+                task_contract_json={"execution": "not-a-mapping"},
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-malformed-retry-{internal_id[:8]}",
+                event_type="verification_retry_pending",
+                task_id=malformed_task_id,
+                actor="system",
+                source="verification_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                payload={"attempt": 1, "verification_report": {"passed": False}},
+            )
+        )
+        valid_task, _contract = await _failed_task_with_pending_retry(db_session)
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-valid-after-malformed"}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            and action["task_id"] == malformed_task_id
+            for action in actions
+        )
+        assert any(
+            action["action"] == "verification_retry_recovered"
+            and action["task_id"] == valid_task.id
+            for action in actions
+        )
+        malformed = await _fetch_task(db_session, malformed_task_id)
+        assert malformed.state == TaskState.FAILED
+        executor.start.assert_awaited_once()
+
+    async def test_stale_approved_start_marker_restarts_execution(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An interrupted approval handoff is resumed by the poller."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        task, _contract = await _approved_task_with_pending_start(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-approved-recovery"}
+
+        actions = await StuckExecutionPoller(db_session, executor=executor).poll()
+
+        assert any(
+            action["action"] == "execution_start_recovered" for action in actions
+        )
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.RUNNING
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == "run-approved-recovery"
+        executor.start.assert_awaited_once()
+
+    async def test_pending_cancellation_is_retried_and_completed(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """The poller retries an external cancellation after a prior failure."""
+        _task, run_id = await _pending_cancel_task(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.return_value = {}
+
+        actions = await StuckExecutionPoller(db_session, executor=executor).poll()
+
+        assert any(
+            action["action"] == "execution_cancel_completed" for action in actions
+        )
+        executor.cancel.assert_awaited_once_with(run_id)
+        audit_rows = (
+            await db_session.execute(select(AuditLog))
+        ).scalars().all()
+        assert any(row.event_type == "execution_cancel_completed" for row in audit_rows)
+
+    async def test_missing_cancel_run_is_treated_as_completed(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A missing external run is already in the desired cancelled state."""
+        task, run_id = await _pending_cancel_task(db_session)
+        request = httpx.Request("POST", f"https://macro.example/runs/{run_id}/cancel")
+        response = httpx.Response(404, request=request)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.side_effect = httpx.HTTPStatusError(
+            "run not found",
+            request=request,
+            response=response,
+        )
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert [action["action"] for action in actions] == [
+            "execution_cancel_completed"
+        ]
+        audit_rows = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task.id)
+            )
+        ).scalars().all()
+        completed = [
+            row for row in audit_rows if row.event_type == "execution_cancel_completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0].payload["reason"] == "run_not_found"
+
+        await StuckExecutionPoller(db_session, executor=executor).poll()
+        executor.cancel.assert_awaited_once_with(run_id)
+
+    async def test_pending_cancellation_batch_excludes_completed_history(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Cancellation recovery honors batch_size without scanning old outcomes."""
+        _completed_task, completed_run_id = await _pending_cancel_task(db_session)
+        completed_task = await _fetch_task(db_session, _completed_task.id)
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-cancel-completed-{uuid4()}",
+                event_type="execution_cancel_completed",
+                task_id=completed_task.id,
+                actor="system",
+                source="stuck_execution_poller",
+                payload={"macro_agent_run_id": completed_run_id},
+            )
+        )
+        _pending_task, pending_run_id = await _pending_cancel_task(db_session)
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.return_value = {}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            batch_size=1,
+        ).poll()
+
+        assert [action["macro_agent_run_id"] for action in actions] == [
+            pending_run_id
+        ]
+        executor.cancel.assert_awaited_once_with(pending_run_id)
+
+    async def test_stale_verification_retry_marker_restarts_execution(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An interrupted verification retry is resumed by the poller."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-retry-recovery"}
+
+        actions = await StuckExecutionPoller(db_session, executor=executor).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovered" for action in actions
+        )
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.RUNNING
+        assert refreshed.execution_attempts == 1
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == "run-retry-recovery"
+        executor.start.assert_awaited_once()
+
+
 async def _ready_task_with_execution(
     db_session: Any,
     started_at: datetime,
@@ -342,6 +903,148 @@ async def _agent_review_task_with_marker(
     db_session.add(marker)
     await db_session.flush()
     return task, marker
+
+
+async def _approved_task_with_pending_start(
+    db_session: AsyncSession,
+) -> tuple[Task, TaskContract]:
+    """Seed an approved task whose execution handoff was interrupted."""
+    internal_id = str(uuid4())
+    task_id = f"task-approved-recovery-{internal_id[:8]}"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="proj-approved-recovery",
+        proposed_by="agent-1",
+        objective="Recover an approved execution",
+        acceptance=["the execution starts exactly once"],
+        execution={"timeout_minutes": 1, "harness": "opencode", "role": "worker"},
+    )
+    profile = ProjectProfile(
+        project_id=contract.project_id,
+        repository={"path": "/tmp/recovery-repo"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+    task = Task(
+        id=task_id,
+        project_id=contract.project_id,
+        proposed_by=contract.proposed_by,
+        state=TaskState.EXEC_APPROVED,
+        task_contract_json=contract.model_dump(mode="json"),
+    )
+    db_session.add(task)
+    db_session.add(
+        ProjectProfileModel(
+            project_id=profile.project_id,
+            profile_json=profile.model_dump(mode="json"),
+        )
+    )
+    db_session.add(
+        AuditLog(
+            event_id=f"evt-approved-recovery-{internal_id[:8]}",
+            event_type="execution_start_pending",
+            task_id=task_id,
+            actor="system",
+            source="approval_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=3),
+            payload={"operation": "execution_start", "timeout_minutes": 1},
+        )
+    )
+    await db_session.commit()
+    return task, contract
+
+
+async def _pending_cancel_task(
+    db_session: AsyncSession,
+) -> tuple[Task, str]:
+    """Seed a task with an unresolved external-run cancellation marker."""
+    internal_id = str(uuid4())
+    task_id = f"task-cancel-recovery-{internal_id[:8]}"
+    run_id = f"run-cancel-recovery-{internal_id[:8]}"
+    db_session.add(
+        Task(
+            id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            state=TaskState.FAILED,
+            latest_macro_agent_run_id=None,
+        )
+    )
+    db_session.add(
+        AuditLog(
+            event_id=f"evt-cancel-recovery-{internal_id[:8]}",
+            event_type="execution_cancel_pending",
+            task_id=task_id,
+            actor="system",
+            source="approval_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+            payload={
+                "execution_id": f"execution-{internal_id[:8]}",
+                "macro_agent_run_id": run_id,
+            },
+        )
+    )
+    await db_session.commit()
+    return await _fetch_task(db_session, task_id), run_id
+
+
+async def _failed_task_with_pending_retry(
+    db_session: AsyncSession,
+    project_id: str = "proj-retry-recovery",
+) -> tuple[Task, TaskContract]:
+    """Seed a failed task whose verification retry handoff was interrupted."""
+    internal_id = str(uuid4())
+    task_id = f"task-retry-recovery-{internal_id[:8]}"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id=project_id,
+        proposed_by="agent-1",
+        objective="Recover a verification retry",
+        acceptance=["the retry execution starts"],
+        execution={"timeout_minutes": 1, "max_retries": 2},
+    )
+    profile = ProjectProfile(
+        project_id=contract.project_id,
+        repository={"path": "/tmp/recovery-repo"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+    task = Task(
+        id=task_id,
+        project_id=contract.project_id,
+        proposed_by=contract.proposed_by,
+        state=TaskState.FAILED,
+        execution_attempts=0,
+        task_contract_json=contract.model_dump(mode="json"),
+    )
+    db_session.add(task)
+    db_session.add(
+        ProjectProfileModel(
+            project_id=profile.project_id,
+            profile_json=profile.model_dump(mode="json"),
+        )
+    )
+    db_session.add(
+        AuditLog(
+            event_id=f"evt-retry-recovery-{internal_id[:8]}",
+            event_type="verification_retry_pending",
+            task_id=task_id,
+            actor="system",
+            source="verification_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=2),
+            payload={
+                "attempt": 1,
+                "max_retries": 2,
+                "verification_report": {"passed": False},
+            },
+        )
+    )
+    await db_session.commit()
+    return task, contract
+
+
+async def _fetch_task(db_session: AsyncSession, task_id: str) -> Task:
+    task = await db_session.scalar(select(Task).where(Task.id == task_id))
+    assert task is not None
+    return task
 
 
 class TestPollReady:
@@ -416,6 +1119,51 @@ class TestPollReady:
 
 class TestPollAgentReview:
     """#254: AGENT_REVIEW tasks abandoned by a crash during verification."""
+
+    async def test_stale_marker_cannot_block_behind_a_fresh_marker(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Only the latest verification marker may drive stale recovery."""
+        internal_id = str(uuid4())
+        task_id = f"task-review-markers-{internal_id[:8]}"
+        now = datetime.now(UTC)
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.AGENT_REVIEW,
+            )
+        )
+        db_session.add(
+            ProcessedEvent(
+                task_id=task_id,
+                event_type="landing:completed",
+                event_timestamp=now - timedelta(hours=2),
+                event_id=f"evt-old-review-{internal_id[:8]}",
+                processed_at=now - timedelta(hours=1),
+            )
+        )
+        db_session.add(
+            ProcessedEvent(
+                task_id=task_id,
+                event_type="landing:completed",
+                event_timestamp=now,
+                event_id=f"evt-fresh-review-{internal_id[:8]}",
+                processed_at=now - timedelta(minutes=1),
+            )
+        )
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+
+        assert [
+            action
+            for action in actions
+            if action["action"] == "unblocked_agent_review"
+        ] == []
+        assert await _fetch_task_state(db_session, task_id) == TaskState.AGENT_REVIEW
 
     async def test_stale_marker_transitions_to_blocked_and_deletes_marker(
         self,

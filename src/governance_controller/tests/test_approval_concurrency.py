@@ -62,6 +62,62 @@ async def _seed_task(db: AsyncSession, task_id: str) -> None:
 
 
 class TestApprovalConcurrency:
+    async def test_cancelled_execution_handoff_leaves_recoverable_marker(
+        self,
+        isolated_db: tuple,
+        patched_db,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A cancellation after approval must leave a durable start intent."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        _engine, local_session = isolated_db
+        task_id = "task-cancelled-execution-start"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+
+        async def _cancel_before_start(*_args: object, **_kwargs: object) -> Task:
+            raise asyncio.CancelledError
+
+        service._trigger_execution = _cancel_before_start  # type: ignore[method-assign]
+
+        with pytest.raises(asyncio.CancelledError):
+            async with asynccontextmanager(get_db)() as db:
+                service.db = db
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-cancelled-execution-start",
+                )
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.EXEC_APPROVED
+            approval = await check.scalar(
+                select(Approval).where(Approval.task_id == task_id)
+            )
+            assert approval is not None
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "execution_start_pending" for row in audits
+            )
+
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
@@ -944,3 +1000,66 @@ class TestApprovalConcurrency:
             ]
             assert concurrent
             assert concurrent[-1].payload["macro_agent_run_id"] == "run-orphan-293"
+
+    async def test_failed_cas_cleanup_leaves_pending_cancellation(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed orphan cleanup must be durable for the poller to retry."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        _engine, local_session = isolated_db
+        task_id = "task-cancel-pending"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.EXEC_APPROVED,
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-cancel-pending"}
+        fake_executor.cancel.side_effect = RuntimeError("macro-agent unavailable")
+
+        original = StateMachine.atomic_transition
+
+        async def _lose_running_cas(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine, "atomic_transition", staticmethod(_lose_running_cas)
+        )
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await ApprovalService(db=db, executor=fake_executor)._trigger_execution(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    actor="system",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+
+        async with local_session() as check:
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "execution_cancel_pending" for row in audits
+            )

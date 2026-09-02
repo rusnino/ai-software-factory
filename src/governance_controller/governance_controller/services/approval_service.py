@@ -301,17 +301,32 @@ class ApprovalService:
             },
         )
 
+        if approval_type == ApprovalType.EXECUTION:
+            # Persist the handoff intent before any cancellable work. The poller
+            # can resume this approval if the request is cancelled after the
+            # approval commit but before _trigger_execution begins.
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_start_pending",
+                task_id=task.id,
+                actor="system",
+                source="approval_service",
+                payload={
+                    "approval_type": approval_type.value,
+                    "state": target_state.value,
+                },
+            )
+            await self.db.commit()
+            return await self._trigger_execution(
+                task, contract, profile, actor, source, previous_state
+            )
+
         await self._project_state_to_plane(
             task=task,
             state=target_state,
             approval_type=approval_type,
             opentasks_id=None,
         )
-
-        if approval_type == ApprovalType.EXECUTION:
-            return await self._trigger_execution(
-                task, contract, profile, actor, source, previous_state
-            )
 
         return task
 
@@ -628,6 +643,19 @@ class ApprovalService:
             if fresh_task is None or (
                 fresh_task.latest_macro_agent_run_id != macro_agent_run_id
             ):
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_cancel_pending",
+                    task_id=task.id,
+                    actor=actor,
+                    source=source,
+                    execution_id=execution.id,
+                    payload={
+                        "macro_agent_run_id": macro_agent_run_id,
+                        "reason": "execution_start_cas_lost",
+                    },
+                )
+                await self.db.commit()
                 try:
                     await self.executor.cancel(macro_agent_run_id)
                 except Exception as cleanup_exc:  # pragma: no cover - boundary shield
@@ -643,6 +671,17 @@ class ApprovalService:
                             "error": str(cleanup_exc),
                             "error_type": type(cleanup_exc).__name__,
                         },
+                    )
+                    await self.db.commit()
+                else:
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="execution_cancel_completed",
+                        task_id=task.id,
+                        actor=actor,
+                        source=source,
+                        execution_id=execution.id,
+                        payload={"macro_agent_run_id": macro_agent_run_id},
                     )
                     await self.db.commit()
             raise ValueError(

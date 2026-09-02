@@ -2,15 +2,18 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import Settings
+from governance_controller.constants import TaskState
 from governance_controller.db import get_db
 from governance_controller.models.audit_log import AuditLog
+from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
 from governance_controller.schemas import (
     Check,
@@ -1029,8 +1032,205 @@ async def test_verify_and_advance_finalizes_execution_to_failed(
     assert refreshed.ended_at is not None
 
 
+async def test_cancelled_retry_transition_leaves_recoverable_marker(
+    isolated_db,
+    patched_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled retry handoff must leave a durable recovery marker."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    _engine, session_local = isolated_db
+    task_id = "task-cancelled-retry-transition"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="proj-cancelled-retry",
+        proposed_by="agent-1",
+        objective="Recover a cancelled verification retry",
+        acceptance=["the retry starts after recovery"],
+        execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+        verification={"commands": ["false"]},
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                state=TaskState.AGENT_REVIEW,
+                proposed_by=contract.proposed_by,
+                latest_macro_agent_run_id="run-original-cancelled-retry",
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            Execution(
+                id="exec-original-cancelled-retry",
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                macro_agent_run_id="run-original-cancelled-retry",
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    async def _cancel_retry_transition(
+        _db: AsyncSession,
+        _task: Task,
+        execution_attempts: int,
+    ) -> bool:
+        del execution_attempts
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        StateMachine,
+        "atomic_transition_from_failed_to_running",
+        staticmethod(_cancel_retry_transition),
+    )
+    fake_executor = AsyncMock(spec=MacroAgentExecutor)
+    service = VerificationService(executor=fake_executor)
+
+    with pytest.raises(asyncio.CancelledError):
+        async with asynccontextmanager(get_db)() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            await service.verify_and_advance(db, task, contract)
+
+    async with session_local() as check:
+        task = await check.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        assert task.state == TaskState.FAILED
+        audits = (
+            await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+        ).scalars().all()
+        assert any(row.event_type == "verification_retry_pending" for row in audits)
+
+
 class TestVerificationConcurrency:
     """Regression tests for verification CAS and audit durability."""
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_concurrent_retry_starts_have_one_external_claim(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """Two retry starters must not both call macro-agent start."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-single-flight"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Claim one retry",
+            acceptance=["only one external run starts"],
+        )
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id=contract.project_id,
+                    proposed_by=contract.proposed_by,
+                    state=TaskState.RUNNING,
+                    execution_attempts=1,
+                )
+            )
+            await seed.commit()
+
+        async def _start(*args: object, **_kwargs: object) -> dict[str, str]:
+            await asyncio.sleep(0.05)
+            assert len(args) > 1
+            return {"run_id": f"run-{args[1]}"}
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.side_effect = _start
+
+        async def _invoke() -> bool:
+            async with local_session() as db:
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                result = await VerificationService(
+                    executor=executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+                await db.commit()
+                return result
+
+        results = await asyncio.gather(_invoke(), _invoke(), return_exceptions=True)
+
+        assert results.count(True) == 1
+        assert all(result in {True, False} for result in results)
+        executor.start.assert_awaited_once()
+
+        async with local_session() as check:
+            executions = (
+                await check.execute(
+                    select(Execution).where(Execution.task_id == task_id)
+                )
+            ).scalars().all()
+            assert len(executions) == 1
+            assert executions[0].macro_agent_run_id is not None
+
+    async def test_retry_attachment_increments_task_version(
+        self,
+        isolated_db,
+    ) -> None:
+        """A retry run attachment must invalidate stale poller reads."""
+        from unittest.mock import AsyncMock
+
+        _engine, session_local = isolated_db
+        task_id = "task-retry-version"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-retry-version",
+            proposed_by="agent-1",
+            objective="Advance retry version",
+            acceptance=["the task version changes with run attachment"],
+        )
+
+        async with session_local() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id=contract.project_id,
+                    proposed_by=contract.proposed_by,
+                    state=TaskState.RUNNING,
+                    execution_attempts=1,
+                )
+            )
+            await seed.commit()
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(return_value={"run_id": "run-version"})
+
+        async with session_local() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            await VerificationService(executor=fake_executor)._start_retry_execution(
+                db=db,
+                task=task,
+                contract=contract,
+                profile=None,
+                report={"passed": False},
+            )
+            await db.commit()
+
+        async with session_local() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            # The durable single-flight claim and the later external run-ID
+            # attachment are separate authoritative task updates.
+            assert task.version == 2
+            assert task.latest_macro_agent_run_id == "run-version"
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
@@ -1205,17 +1405,14 @@ class TestVerificationConcurrency:
         self,
         isolated_db: tuple,
     ) -> None:
-        """#266: a lost retry-failure CAS must not leave a stale Execution write.
+        """#266/#303: a failed retry start must finalize after a lost task CAS.
 
         ``_start_retry_execution`` commits the new RUNNING ``Execution`` row and
         releases the task row lock before the outbound ``executor.start()``
-        call. If that call raises, the exception handler used to set
-        ``execution.state = FAILED`` and commit it *before* attempting its own
-        CAS to FAILED — so a lost CAS (because a concurrent session, e.g. the
-        stuck-execution poller, already moved the task elsewhere) still left a
-        stale FAILED write on the Execution row. The fix reorders this so the
-        Execution write only happens after the CAS wins. Here the concurrent
-        winner is a real, separate session that commits BLOCKED first.
+        call. If that call raises, the local Execution must be finalized even
+        when a concurrent session, e.g. the stuck-execution poller, already
+        moved the task elsewhere. Here the concurrent winner is a real,
+        separate session that commits BLOCKED first.
         """
         from unittest.mock import AsyncMock
 
@@ -1298,6 +1495,7 @@ class TestVerificationConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            # Must NOT be stomped to FAILED by the loser's stale pre-CAS write.
-            assert rows[0].state == TaskState.RUNNING
-            assert rows[0].ended_at is None
+            # A failed external start must not leave an unowned active row after
+            # the task CAS is lost.
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
