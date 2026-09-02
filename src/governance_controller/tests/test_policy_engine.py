@@ -831,6 +831,11 @@ class TestPolicyEngineCommandExecutionPrimitives:
         "command",
         [
             "sed '1e touch /tmp/pwned' /etc/hostname",
+            "sed '/./e touch /tmp/pwned' /etc/hostname",
+            "sed -ne's/foo/bar/e' file.txt",
+            "sed -nf script.sed file.txt",
+            "sed --expr='s/foo/bar/e' file.txt",
+            "sed --expr 's/foo/bar/e' file.txt",
             'sed -e "s/line/id/e" file.txt',
             "sed s/foo/bar/e file.txt",
         ],
@@ -851,6 +856,75 @@ class TestPolicyEngineCommandExecutionPrimitives:
 
         assert result.allowed is False
         assert any("command-execution primitive" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        ("command", "allowed"),
+        [
+            ("sed -e 's/foo/bar/g' file.txt", True),
+            ("sed 's/foo/bar/e' file.txt", False),
+             ("sed --expression 's/foo/bar/e' file.txt", False),
+             ("sed --expression='s/foo/bar/e' file.txt", False),
+             ("sed --e 's/foo/bar/e' file.txt", False),
+             ("sed --e='s/foo/bar/e' file.txt", False),
+             ("sed -e's/foo/bar/e' file.txt", False),
+            ("sed 's/foo/bar/ep' file.txt", False),
+             ("sed '1,2s/foo/bar/e' file.txt", False),
+             ("sed '1,2e touch /tmp/pwned' file.txt", False),
+             ("sed -f script.sed file.txt", False),
+             ("sed -n '1,10p' source", True),
+             ("rm --recursive /tmp/work", True),
+             ("rm -R -F /tmp/work", False),
+             ("rm -r -f /tmp/work", False),
+              ("git -C /tmp/repo clean -fdx", False),
+              ("git -C /tmp/repo clean -FDX", False),
+             ("tar --checkpoint-action=exec=touch -xf archive.tar", False),
+             ("tar --checkpoint-a=exec=touch -xf archive.tar", False),
+             ("tar -xIcat archive.tar", False),
+             ("tar --use=touch -xf archive.tar", False),
+             ("tar --info=touch -xf archive.tar", False),
+             ("tar --info-script=touch -xf archive.tar", False),
+             ("tar --new-v=touch -xf archive.tar", False),
+             ("tar --new-volume-script=touch -xf archive.tar", False),
+             ("tar --rmt=touch -xf archive.tar", False),
+             ("tar --rsh=touch -xf archive.tar", False),
+             ("tar --remove -cf archive.tar file.txt", False),
+             ("tar --use-compress-program=touch -xf archive.tar", False),
+           ],
+    )
+    def test_embedded_command_parity_matrix(
+        self, command: str, allowed: bool
+    ) -> None:
+        """The embedded command policy has explicit edge-case coverage."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="policy parity matrix"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is allowed
+
+    def test_path_qualified_allowlisted_command_is_rejected(self) -> None:
+        """A worktree executable must not masquerade as an allowlisted tool."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command="./sed file.txt")],
+                scope_check=ScopeCheck(description="path-qualified command"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("verification allowlist" in v for v in result.violations)
 
 
 class TestPolicyEngineForbiddenPathsInCommands:

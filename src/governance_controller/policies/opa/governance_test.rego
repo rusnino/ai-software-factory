@@ -40,6 +40,17 @@ test_unallowlisted_command_is_denied if {
     contains(lower(violation), "allowlist")
 }
 
+test_path_qualified_allowlisted_command_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["./sed file.txt"]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "allowlist")
+}
+
 test_mkfs_command_is_denied if {
     decision := data.governance.approve with input as object.union(
         _base_input,
@@ -62,6 +73,56 @@ test_sed_execution_command_is_denied if {
     contains(lower(violation), "execution")
 }
 
+test_sed_range_execution_command_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["sed '1,2e touch /tmp/pwned' file.txt"]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "execution")
+}
+
+test_sed_regex_address_execution_command_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["sed '/./e touch /tmp/pwned' file.txt"]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "execution")
+}
+
+test_sed_attached_and_abbreviated_options_are_denied if {
+    cases := [
+        "sed -ne's/foo/bar/e' file.txt",
+        "sed -nf script.sed file.txt",
+        "sed --expr='s/foo/bar/e' file.txt",
+        "sed --expr 's/foo/bar/e' file.txt",
+        "sed --e='s/foo/bar/e' file.txt",
+        "sed --e 's/foo/bar/e' file.txt",
+    ]
+    every command in cases {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_sed_abbreviated_expression_without_equals_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["sed --expr 's/foo/bar/e' file.txt"]},
+    )
+
+    decision.allow == false
+}
+
 test_sed_substitution_execution_command_is_denied if {
     decision := data.governance.approve with input as object.union(
         _base_input,
@@ -71,6 +132,231 @@ test_sed_substitution_execution_command_is_denied if {
     decision.allow == false
     some violation in decision.violations
     contains(lower(violation), "execution")
+}
+
+test_parsed_safe_sed_expression_is_allowed if {
+    command := "sed -e 's/foo/bar/g' file.txt"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-e", "s/foo/bar/g", "file.txt"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == true
+}
+
+test_parsed_safe_sed_filename_is_allowed if {
+    command := "sed -n '1,10p' source"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "1,10p", "source"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == true
+}
+
+test_parsed_sed_substitution_execution_is_denied if {
+    command := "sed 's/foo/bar/e' file.txt"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "s/foo/bar/e", "file.txt"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "execution")
+}
+
+test_parsed_sed_extended_execution_forms_are_denied if {
+    command := "sed '1,2s/foo/bar/ep' file.txt"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "1,2s/foo/bar/ep", "file.txt"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "execution")
+}
+
+test_parsed_sed_file_script_is_denied if {
+    command := "sed -f script.sed file.txt"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-f", "script.sed", "file.txt"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "execution")
+}
+
+test_parsed_uppercase_split_rm_flags_are_denied if {
+    command := "rm -R -F /tmp/work"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["rm", "-R", "-F", "/tmp/work"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "destructive")
+}
+
+test_parsed_long_recursive_rm_matches_embedded_policy if {
+    command := "rm --recursive /tmp/work"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["rm", "--recursive", "/tmp/work"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == true
+}
+
+test_parsed_git_global_option_clean_is_denied if {
+    command := "git -C /tmp/repo clean -fdx"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["git", "-C", "/tmp/repo", "clean", "-fdx"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "git clean")
+}
+
+test_parsed_git_uppercase_compact_clean_is_denied if {
+    command := "git -C /tmp/repo clean -FDX"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["git", "-C", "/tmp/repo", "clean", "-FDX"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "git clean")
+}
+
+test_parsed_hardened_commands_are_denied if {
+    cases := [
+        {
+            "command": "rm -Rf /tmp/work",
+            "argv": ["rm", "-R", "-f", "/tmp/work"],
+        },
+        {
+            "command": "tar --REMOVE-FILES archive.tar",
+            "argv": ["tar", "--REMOVE-FILES", "archive.tar"],
+        },
+        {
+            "command": "find . -DELETE",
+            "argv": ["find", ".", "-DELETE"],
+        },
+        {
+            "command": "git -c core.sshCommand=touch status",
+            "argv": ["git", "-c", "core.sshCommand=touch", "status"],
+        },
+    ]
+    some test_case in cases
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [test_case.command],
+            "parsed_commands": [{
+                "raw": test_case.command,
+                "argv": test_case.argv,
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_tar_execution_hook_options_are_denied if {
+    cases := [
+        "tar --checkpoint-action=exec=touch -xf archive.tar",
+        "tar --checkpoint-a=exec=touch -xf archive.tar",
+        "tar -xIcat archive.tar",
+        "tar --use=touch -xf archive.tar",
+        "tar --use-compress-program=touch -xf archive.tar",
+        "tar --info=touch -xf archive.tar",
+        "tar --info-script=touch -xf archive.tar",
+        "tar --new-v=touch -xf archive.tar",
+        "tar --new-volume-script=touch -xf archive.tar",
+        "tar --rmt=touch -xf archive.tar",
+        "tar --rsh=touch -xf archive.tar",
+        "tar --remove -cf archive.tar file.txt",
+    ]
+    every command in cases {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
 }
 
 test_nul_command_is_denied if {

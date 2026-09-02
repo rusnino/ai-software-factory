@@ -103,7 +103,7 @@ _command_allowlist_violation contains msg if {
     some cmd in _commands
     argv := _command_argv(cmd)
     count(argv) > 0
-    not _base_command(argv[0]) in _allowed_commands
+    not _bare_allowed_command(argv[0])
     msg := sprintf("Command argv[0] is not in the verification allowlist: %s", [cmd])
 }
 
@@ -181,8 +181,8 @@ _destructive_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "rm"
-    _short_flag_present(argv, "r")
-    _short_flag_present(argv, "f")
+    _rm_flag_present(argv, "r")
+    _rm_flag_present(argv, "f")
     msg := sprintf("Destructive rm flags in command: %s", [cmd])
 }
 
@@ -192,19 +192,7 @@ _destructive_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "rm"
     some arg in argv
-    startswith(arg, "-")
-    contains(lower(arg), "r")
-    contains(lower(arg), "f")
-    msg := sprintf("Destructive rm flags in command: %s", [cmd])
-}
-
-_destructive_violation contains msg if {
-    some cmd in _commands
-    argv := _command_argv(cmd)
-    count(argv) > 0
-    _base_command(argv[0]) == "rm"
-    some arg in argv
-    arg in {"--recursive", "--force", "--no-preserve-root"}
+    arg == "--no-preserve-root"
     msg := sprintf("Destructive rm flags in command: %s", [cmd])
 }
 
@@ -221,8 +209,8 @@ _command_execution_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "sed"
-    regex.match(`(?i).*([^[:alnum:]]|^)([0-9]+|\$|%)?e[[:space:]].*`, cmd)
-    msg := sprintf("Sed command-execution primitive: %s", [cmd])
+    _sed_file_script(argv)
+    msg := sprintf("Sed file script execution cannot be inspected safely: %s", [cmd])
 }
 
 _command_execution_violation contains msg if {
@@ -230,7 +218,9 @@ _command_execution_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "sed"
-    regex.match(`(?i).*(^|[[:space:]])s[^[:space:]]*e([[:space:]]|$).*`, cmd)
+    some index, arg in argv
+    script := _sed_script(argv, index)
+    _sed_script_executes(script)
     msg := sprintf("Sed command-execution primitive: %s", [cmd])
 }
 
@@ -262,8 +252,8 @@ _destructive_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "tar"
     some arg in argv
-    some flag in {"--to-command", "--remove-files", "--remove-file"}
-    lower(arg) == flag
+    some flag in _tar_dangerous_flags
+    startswith(lower(arg), flag)
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
@@ -273,8 +263,7 @@ _destructive_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "tar"
     some arg in argv
-    some flag in {"--to-command", "--remove-files", "--remove-file"}
-    startswith(lower(arg), sprintf("%s=", [flag]))
+    _tar_short_dangerous_flag(arg)
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
@@ -283,12 +272,12 @@ _destructive_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "git"
-    count(argv) > 1
-    argv[1] == "clean"
-    some index
-    index >= 2
-    arg := argv[index]
-    _git_clean_dangerous_flag(arg)
+    some subcommand_index, subcommand in argv
+    subcommand_index > 0
+    subcommand == "clean"
+    some flag_index, flag in argv
+    flag_index > subcommand_index
+    _git_clean_dangerous_flag(flag)
     msg := sprintf("Dangerous git clean flags in command: %s", [cmd])
 }
 
@@ -480,15 +469,76 @@ _approval_type_violation contains msg if {
 _commands := object.get(input, "commands", [])
 _parsed_commands := object.get(input, "parsed_commands", [])
 
+_has_parsed_command(cmd) if {
+    some record in _parsed_commands
+    object.get(record, "raw", "") == cmd
+}
+
 _git_clean_dangerous_flag(arg) if {
-    arg in {"-f", "--force", "-x", "-d"}
+    lower(arg) in {"-f", "--force", "-x", "-d"}
+}
+
+_tar_dangerous_flags := {
+    "--to-c",
+    "--checkpoint-a",
+    "--use",
+    "--info",
+    "--new-v",
+    "--rmt",
+    "--rsh",
+    "--remove",
+}
+
+_tar_short_dangerous_flag(arg) if {
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(arg, "F")
+}
+
+_tar_short_dangerous_flag(arg) if {
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(arg, "I")
 }
 
 _git_clean_dangerous_flag(arg) if {
     startswith(arg, "-")
     not startswith(arg, "--")
     some flag in {"f", "x", "d"}
-    contains(arg, flag)
+    contains(lower(arg), flag)
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    arg == "-f"
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    arg == "--file"
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    startswith(arg, "-f")
+    arg != "-f"
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    startswith(arg, "--file=")
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    startswith(arg, "--fi")
+}
+
+_sed_file_script(argv) if {
+    some arg in argv
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(arg, "f")
 }
 
 _git_config_key(argv, index) := key if {
@@ -513,6 +563,10 @@ _base_command(token) := base if {
     base := parts[count(parts) - 1]
 }
 
+_bare_allowed_command(token) if {
+    lower(token) in _allowed_commands
+}
+
 _command_argv(cmd) := argv if {
     some record in _parsed_commands
     object.get(record, "raw", "") == cmd
@@ -533,11 +587,138 @@ _command_parse_violation contains msg if {
     msg := sprintf("Command is empty after parsing: %s", [cmd])
 }
 
-_short_flag_present(argv, flag) if {
+_rm_flag_present(argv, flag) if {
     some arg in argv
     startswith(arg, "-")
-    not startswith(arg, "--")
-    contains(arg, flag)
+    contains(lower(arg), flag)
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    argv[index] in {"-e", "--expression"}
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    argv[index] == "--expr"
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    startswith(argv[index], "--expression=")
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    startswith(argv[index], "--expr=")
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    startswith(argv[index], "--e")
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    startswith(argv[index], "-e")
+    not argv[index] == "-e"
+    not startswith(argv[index], "--")
+}
+
+_sed_has_explicit_expression(argv) if {
+    some index
+    index >= 1
+    startswith(argv[index], "-")
+    not startswith(argv[index], "--")
+    contains(argv[index], "e")
+}
+
+_sed_has_prior_bare_argument(argv, index) if {
+    some prior_index, prior_arg in argv
+    prior_index >= 1
+    prior_index < index
+    not startswith(prior_arg, "-")
+}
+
+_sed_bare_script(argv, index) if {
+    index >= 1
+    not startswith(argv[index], "-")
+    not _sed_has_explicit_expression(argv)
+    not _sed_has_prior_bare_argument(argv, index)
+}
+
+_sed_script(argv, index) := script if {
+    argv[index] in {"-e", "--expression", "--expr", "-f", "--file"}
+    script := argv[index + 1]
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "--expression=")
+    script := substring(argv[index], 13, -1)
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "-")
+    not startswith(argv[index], "--")
+    contains(argv[index], "e")
+    attached := substring(argv[index], indexof(argv[index], "e") + 1, -1)
+    attached != ""
+    script := attached
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "-")
+    not startswith(argv[index], "--")
+    contains(argv[index], "e")
+    attached := substring(argv[index], indexof(argv[index], "e") + 1, -1)
+    attached == ""
+    script := argv[index + 1]
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "--expr=")
+    script := substring(argv[index], 7, -1)
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "--e")
+    not contains(argv[index], "=")
+    script := argv[index + 1]
+}
+
+_sed_script(argv, index) := script if {
+    startswith(argv[index], "--e")
+    contains(argv[index], "=")
+    equals_index := indexof(argv[index], "=")
+    script := substring(argv[index], equals_index + 1, -1)
+}
+
+_sed_script(argv, index) := script if {
+    _sed_bare_script(argv, index)
+    script := argv[index]
+}
+
+_sed_script_executes(script) if {
+    regex.match(`(?i)(^|[;\n])[[:space:]]*[^;\n]*e([[:space:]]|$|;)`, script)
+}
+
+_sed_script_executes(script) if {
+    substitution_index := indexof(lower(script), "s")
+    substitution_index >= 0
+    substitution := substring(script, substitution_index, -1)
+    count(substitution) > 2
+    delimiter := substring(substitution, 1, 1)
+    delimiter != ""
+    parts := split(substitution, delimiter)
+    count(parts) >= 3
+    flags := parts[count(parts) - 1]
+    contains(lower(flags), "e")
 }
 
 _shlex_split(cmd) := argv if {

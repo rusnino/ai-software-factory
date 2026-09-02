@@ -60,6 +60,7 @@ the project profile before they can pass policy.
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass
 
@@ -301,13 +302,20 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
 )
 
 # Dangerous tar flags that execute arbitrary commands or delete files.
-# #140: --to-command runs an arbitrary shell command per extracted member.
+# #140: these options invoke shell commands or remove files outside the
+# verification process's auditable argv subset.
 _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
     {
-        "--to-command",
-        "--to-command=",
-        "--remove-files",
-        "--remove-file",
+        # Use the shortest unambiguous GNU long-option prefixes so getopt
+        # abbreviations cannot select an execution hook.
+        "--to-c",
+        "--checkpoint-a",
+        "--use",
+        "--info",
+        "--new-v",
+        "--rmt",
+        "--rsh",
+        "--remove",
     }
 )
 
@@ -429,7 +437,7 @@ def _base_command(token: str) -> str:
 
 def _is_allowed_argv0(argv: list[str]) -> bool:
     """Return True if argv[0] is in the explicit allowlist."""
-    return _base_command(argv[0]) in _ALLOWED_VERIFICATION_COMMANDS
+    return argv[0].lower() in _ALLOWED_VERIFICATION_COMMANDS
 
 
 def _is_forbidden_wrapper(argv: list[str]) -> bool:
@@ -490,10 +498,13 @@ def _has_tar_dangerous_flag(argv: list[str]) -> bool:
     if _base_command(argv[0]) != "tar":
         return False
     for token in argv[1:]:
-        lowered = token.lower()
-        if any(
-            lowered == flag or lowered.startswith(flag + "=")
-            for flag in _FORBIDDEN_TAR_FLAGS
+        for flag in _FORBIDDEN_TAR_FLAGS:
+            if token.lower().split("=", 1)[0].startswith(flag):
+                return True
+        # GNU tar's short aliases for --info-script and
+        # --use-compress-program are -F and -I, including attached values.
+        if token.startswith("-") and not token.startswith("--") and any(
+            option in token[1:] for option in ("F", "I")
         ):
             return True
     return False
@@ -526,17 +537,18 @@ def _has_git_clean_destructive(argv: list[str]) -> bool:
     """Return True if git clean is invoked with force/remove flags."""
     if _base_command(argv[0]) != "git":
         return False
-    if len(argv) < 2 or argv[1] != "clean":
-        return False
-    for token in argv[2:]:
-        if token in {"-f", "--force", "-x", "-d"}:
-            return True
-        if (
-            token.startswith("-")
-            and len(token) > 1
-            and any(ch in token for ch in "fxd")
-        ):
-            return True
+    for i, token in enumerate(argv[1:], start=1):
+        if token != "clean":
+            continue
+        for flag in argv[i + 1 :]:
+            if flag in {"-f", "--force", "-x", "-d"}:
+                return True
+            if (
+                flag.startswith("-")
+                and len(flag) > 1
+                and any(ch in flag.lower() for ch in "fxd")
+            ):
+                return True
     return False
 
 
@@ -550,32 +562,90 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
     if _base_command(argv[0]) != "sed":
         return False
     script_tokens: list[str] = []
+    explicit_script = False
+    bare_script_seen = False
     i = 1
     while i < len(argv):
         token = argv[i]
         if token in ("-e", "--expression", "-f", "--file"):
+            if token in ("-f", "--file"):
+                return True
+            explicit_script = True
             i += 1
             if i < len(argv):
                 script_tokens.append(argv[i])
+        elif token.startswith("--file=") or token.startswith("--fi") or (
+            token.startswith("-f") and token != "-f"
+        ):
+            return True
+        elif token.startswith("--expression=") or token.startswith("--expr="):
+            explicit_script = True
+            script_tokens.append(token.split("=", 1)[1])
+        elif token.startswith("--e"):
+            explicit_script = True
+            if "=" in token:
+                script_tokens.append(token.split("=", 1)[1])
+            else:
+                i += 1
+                if i < len(argv):
+                    script_tokens.append(argv[i])
         elif token.startswith("-e"):
+            explicit_script = True
             script_tokens.append(token[2:])
-        elif not token.startswith("-"):
+        elif token.startswith("-") and not token.startswith("--"):
+            short_options = token[1:]
+            if "f" in short_options:
+                return True
+            if "e" in short_options:
+                explicit_script = True
+                expression = short_options[short_options.index("e") + 1 :]
+                if expression:
+                    script_tokens.append(expression)
+                else:
+                    i += 1
+                    if i < len(argv):
+                        script_tokens.append(argv[i])
+        elif (
+            not token.startswith("-")
+            and not explicit_script
+            and not bare_script_seen
+        ):
             script_tokens.append(token)
+            bare_script_seen = True
         i += 1
     for script in script_tokens:
         # Detect s///e, s/.../.../e, and s@...@...@e etc.
         # The flag 'e' must appear after the final delimiter; for safety we
         # reject any substitution followed by 'e' as a trailing flag.
-        if script.startswith("s"):
-            delim = script[1:2]
-            if delim and script.rstrip(delim).endswith("e"):
-                return True
-        # Detect the bare 'e' command, e.g. '1e id', '$e touch /tmp/x'.
-        # Look for an address prefix (line number, '$', or '%') immediately
-        # followed by 'e ' as the sed command.
-        import re
-
-        if re.search(r"(^|[;\n\s])([0-9]+|\$|%)?e\s", script):
+        for substitution_index, character in enumerate(script):
+            if character != "s" or substitution_index + 1 >= len(script):
+                continue
+            delim = script[substitution_index + 1]
+            if delim.isspace():
+                continue
+            delimiter_positions: list[int] = []
+            escaped = False
+            for position in range(substitution_index + 2, len(script)):
+                current = script[position]
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == delim:
+                    delimiter_positions.append(position)
+                    if len(delimiter_positions) == 2:
+                        flags = script[position + 1 :]
+                        if "e" in flags.lower():
+                            return True
+                        break
+        # Detect the bare 'e' command, e.g. '1e id', '$e touch /tmp/x', or
+        # '/pattern/e touch /tmp/x'. A regex address can contain any text, so
+        # the command boundary is the reliable part to match.
+        if re.search(
+            r"(^|[;\n])\s*[^;\n]*?e(?=\s|$|;)",
+            script,
+            re.IGNORECASE,
+        ):
             return True
     return False
 
