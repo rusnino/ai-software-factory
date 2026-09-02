@@ -56,8 +56,12 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-08-31): implemented, GATE-CLEAN by this project's tracked severity bar — 4 open
-issues (0 CRITICAL, 0 HIGH, 2 MEDIUM, 2 LOW).** Sixteen review rounds have run. Rounds 1-4
+**Status (2026-09-02): Controller-side hardening is implemented and freshly verified, but Phase 2
+is NOT gate-clean because HIGH issue `#301` remains open. MEDIUM issue `#297` and LOW issue `#298`
+also remain open; LOW issue `#308` remains open for cancellation-history scan cost. Working-tree
+fixes for `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and `#302`-`#307` require push/issue-status
+confirmation.**
+Sixteen review rounds have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —
@@ -99,12 +103,12 @@ task creation, no server-side filter, the same "new fix, new cost" shape as `#28
 `#300` (MEDIUM — intake's per-IP rate limiter and per-sender duplicate guard interact badly, letting
 ordinary duplicate-retry traffic starve legitimate new submissions with misleading `429`s), `#298`
 (LOW — `#283`'s early-commit fix leaves a narrow crash-timing-only window with zero audit trail that
-Plane was never told), and `#299` (LOW — the OPA Rego policy has drifted behind the embedded engine
-across 16 rounds of the latter's fixes, though the embedded-engine-authoritative guarantee itself
-was live-proven to hold: a real OPA server allowed `sudo whoami`, the full backend correctly denied
-it without even consulting OPA).** By this project's own tracked severity bar (zero open
-`severity:critical`/`severity:high`), Phase 2 genuinely IS gate-clean for the first time surviving
-independent re-verification rather than being declared and later found wrong — but the `#283`→`#297`
+Plane was never told), and `#299` (LOW — the OPA Rego policy had drifted behind the embedded engine
+across 16 rounds, though the embedded-engine-authoritative guarantee itself was live-proven to hold:
+a real OPA server allowed `sudo whoami`, the full backend correctly denied it without even consulting
+OPA).** By this project's own tracked severity bar (zero open
+`severity:critical`/`severity:high`), Phase 2 was described as gate-clean at that historical
+checkpoint — but the `#283`→`#297`
 pattern (a fix introducing a new, differently-shaped regression, now recurring a THIRD time within
 one fix's own aftermath) means the next round should keep adversarially reviewing every fix, not
 treat this milestone as license to relax. This project's own history means this status line should

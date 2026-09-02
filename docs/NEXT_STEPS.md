@@ -2,12 +2,16 @@
 
 ## Current State
 
-**Neither phase has ever been declared gate-clean by the reviewer's own independent verification
-until this round. Do not trust a "gate-clean" claim in this file's own history — it has been
-declared prematurely at least three times before (each by the reviewer, later found wrong), and
-this round adds a FOURTH self-declaration to be skeptical of: opencode itself wrote a docs update
-claiming "gate-clean" after this round's fix batch, before any independent re-verification
-happened.** As of 2026-08-31, sixteen review rounds have run. Rounds 1-15 (`#154`-`#286`) landed and
+**Current status (2026-09-02): this file's 2026-08-31 gate-clean narrative is historical and
+superseded.** The current hardening pass fixes `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and
+`#302`-`#307` in the working tree and adds recovery-marker, dry-run, policy-bypass, and PostgreSQL
+single-flight coverage. `#297` and `#308` remain open performance follow-ups.
+Independent verification found one new HIGH blocker, `#301`: the macro-agent `/runs` contract is
+not idempotent when the Controller loses an accepted response. Since this requires a macro-agent
+API/internal change prohibited by the current Phase 2 plan, **Phase 2 must not be declared gate-clean
+until that contract is resolved or explicitly re-scoped by a human.** Do not trust a "gate-clean"
+claim in this file's history — it has been declared prematurely at least three times before (each
+by the reviewer, later found wrong). As of 2026-08-31, sixteen review rounds have run. Rounds 1-15 (`#154`-`#286`) landed and
 hold up on re-verification; three recurring defect classes were established along the way —
 `RISK-16` (write before CAS, committed regardless of outcome, 3 confirmed instances), `RISK-19`
 (identity-map staleness, 5 confirmed instances), and a third, unnamed pattern where a fix for one
@@ -61,18 +65,13 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of this writing: **4 open issues (0 CRITICAL, 0 HIGH, 2 MEDIUM, 2 LOW)** — `#297` (MEDIUM,
-unbounded Plane-issue scan on task creation), `#300` (MEDIUM, intake rate-limit/duplicate-guard
-starvation), `#298` (LOW, narrow crash-timing audit-trail gap in `#283`'s fix), `#299` (LOW, OPA
-Rego policy drift, not exploitable). **By this project's own established definition of gate-clean —
-zero open `severity:critical`/`severity:high` — Phase 2 genuinely IS gate-clean as of this round,
-for the first time in this project's history where that claim has survived independent
-re-verification rather than being made and then found wrong.** This should still be read as "clean
-by the severity bar that's been tracked," not "flawless" — 4 real, live-reproduced MEDIUM/LOW gaps
-remain open, and this project's history of premature declarations means the next round should keep
-verifying rather than treating this milestone as a reason to relax scrutiny. Every prior round's
-findings (`#151`-`#296`) are closed and independently re-verified — the fifth consecutive round with
-none reopened.
+After the current change set is pushed, the expected open set is **4 issues: `#301` (HIGH,
+macro-agent start idempotency), `#297` (MEDIUM, Plane issue-scan cost), `#298` (LOW, pending
+Plane-projection auditability), and `#308` (LOW, cancellation-history scan cost)**. The working-tree
+fixes for `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and `#302`-`#307` must be confirmed closed
+after push.
+**Phase 2 is not gate-clean while `#301` remains open.** The Controller-side recovery and policy
+hardening is verified, but the macro-agent API contract remains an explicit blocker.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -96,11 +95,13 @@ task-scoped projection lock as the approval path (`#287`); authenticated intake 
 HTML-escaped Plane drafts, and a Telegram-approval path now authenticated the same way the CLI is
 (`#284`); verification failure feedback to macro-agent and terminal alerting; optional OPA policy
 backend that runs only after the embedded PolicyEngine passes and receives a minimized, optionally
-bearer-token-authenticated input document (the embedded-engine-authoritative guarantee live-proven
-this round, though the Rego policy itself has drifted — `#299`).
+   bearer-token-authenticated input document (the embedded-engine-authoritative guarantee live-proven
+   this round, with the Rego policy brought back to parity and covered by the latest 34-case OPA
+   suite).
 
-Test status (2026-08-31): **464 passed / 20 skipped** on SQLite, **482 passed / 2 skipped** on
-PostgreSQL, `ruff` clean, `mypy governance_controller` clean (69 source files); `macro_agent_service`
+Test status (2026-09-02): **534 passed / 23 skipped** on SQLite, **555 passed / 2 skipped** on
+PostgreSQL, OPA **34/34**, `ruff` clean, `mypy governance_controller` clean (69 source files);
+`macro_agent_service`
 has **10 passed**, `ruff`/`mypy` clean — all independently re-run and confirmed by the reviewer, not
 just taken from opencode's own claim. The two live Plane contract tests are skipped because
 `GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured in
@@ -156,7 +157,11 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-All 10 Phase 2 SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Sixteen review
+**Current status (2026-09-02): Controller-side recovery, intake, and policy hardening is implemented
+and freshly verified, but Phase 2 is NOT gate-clean because HIGH issue `#301` remains open. MEDIUM
+issue `#297` and LOW issue `#298` also remain open; fixes for `#256`, `#299`, `#300`, and `#302`-`#307`
+are in the current change set and require push/issue-status confirmation.** All 10 Phase 2 SDD tasks landed in `main`
+between commits `7c0bd5c` and `4715c22`. Sixteen review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -208,21 +213,14 @@ project's history — a fix introducing a new, different-shaped regression (`#28
 just recurred a third time within a single fix's own aftermath (`#283`→`#297`/`#298`), so the next
 round should keep adversarially reviewing every fix, not just confirm it closes its reported bug.**
 
-## Immediate Next Step: Clear the 4 Open MEDIUM/LOW Issues, Then Phase 3 Prep
+## Immediate Next Step: Resolve the Remaining Blocker, Then Reassess Phase 2
 
-Prioritize `#297` and `#300` (both MEDIUM — real, live-reproduced availability/scalability defects,
-not security bypasses) before the two LOWs. `#297`: give `find_issue_by_controller_task_id` a
-server-side filter if Plane's API supports one, or restrict the full-project scan to the actual
-crash-recovery case (`plane_issue_id IS NULL`) rather than running it on every ordinary task
-creation. `#300`: scope `InMemoryRateLimitMiddleware`'s budget separately per endpoint class (or key
-it by IP+sender for `/intake/*`) so a burst of expected duplicate-retry traffic can't exhaust budget
-for legitimate new submissions from the same source. Then `#298` (narrow the audit-trail gap around
-`#283`'s early commit) and `#299` (bring `governance.rego` back to parity with the embedded engine,
-or explicitly document/deprecate the gap). Phase 2 is gate-clean by the tracked severity bar — before
-starting Phase 3, still confirm the live `severity:critical`/`severity:high` queries are empty (per
-the standing practice, never trust this file's own claim without re-running them), and decide
-whether provisioning a real Plane instance for the two skipped live-contract tests is worth doing
-before Phase 3 work begins, since Phase 3 will lean further on the Plane integration surface.
+`#301` requires a macro-agent API contract that makes `POST /runs` idempotent by
+`controller_execution_id` or provides a lookup endpoint after response loss. This is currently
+blocked by the Phase 2 constraint against modifying macro-agent internals. Reassess `#298`'s narrow
+pre-call-commit audit gap, confirm `#256`, `#299`, `#300`, and `#302`-`#307` close after the current
+commit is pushed, and rerun the live critical/high issue queries before any Phase 3 work. Keep
+`#297` open until the Plane API filtering/performance tradeoff is resolved.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
@@ -250,6 +248,8 @@ Before starting Phase 3, confirm the live issue list has no open `severity:criti
 ## Blockers to Watch
 
 - macro-agent API stability and `/runs` contract.
+- GitHub issue `#301`: response-loss recovery can create duplicate/orphaned macro-agent runs.
+- GitHub issue `#298`: narrow crash-timing window with no Plane-projection audit row.
 - OpenCode ACP compatibility with macro-agent MCP tools.
 - Plane CE self-hosted availability and API rate limits.
 

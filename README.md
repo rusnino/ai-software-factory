@@ -51,7 +51,8 @@ Start with:
 2. `specs/SPEC-02-architecture.md`
 3. `specs/SPEC-03-governance.md`
 4. `decisions/ADR-001-governance-controller-implementation.md`
-5. `requirements/REQUIREMENTS.md`
+5. `specs/SPEC-04-plane-integration.md` through `specs/SPEC-10-phase-plan.md`
+6. `requirements/REQUIREMENTS.md`
 
 ## Configuration
 
