@@ -1,10 +1,11 @@
 """Idea ingestion service: classify raw intake and create Plane drafts."""
 
+import hashlib
 import html
 import re
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +42,19 @@ class IdeaIngestionService:
 
     def __init__(self, plane_client: PlaneClient | None = None) -> None:
         self._client = plane_client
+
+    @staticmethod
+    def _normalize_sender(sender: str) -> str:
+        """Return the quota identity shared by case/whitespace variants."""
+        return sender.strip().casefold()
+
+    @staticmethod
+    def _sender_lock_key(sender: str) -> int:
+        """Return a stable signed 64-bit PostgreSQL advisory-lock key."""
+        digest = hashlib.sha256(
+            b"intake-sender:" + sender.encode("utf-8")
+        ).digest()
+        return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
     def classify(self, idea: RawIdea) -> ClassifiedIdea:
         """Return a classified idea.
@@ -95,11 +109,12 @@ class IdeaIngestionService:
             return None
 
         if db is not None:
+            sender = self._normalize_sender(classified.idea.sender)
             await self._guard_duplicate_and_rate_limit(
                 db,
                 classified.idea.source,
                 classified.idea.source_id,
-                classified.idea.sender,
+                sender,
             )
             # Persist the submission unconditionally. The row must exist for
             # duplicate/rate-limit enforcement even if Plane is disabled or its
@@ -111,7 +126,7 @@ class IdeaIngestionService:
                 IntakeSubmission(
                     source=classified.idea.source,
                     source_id=classified.idea.source_id,
-                    sender=classified.idea.sender,
+                    sender=sender,
                 )
             )
             try:
@@ -157,6 +172,13 @@ class IdeaIngestionService:
         sender: str,
     ) -> None:
         """Raise RuntimeError if the intake request is a duplicate or over limit."""
+        bind = db.bind
+        if bind is not None and bind.dialect.name == "postgresql":
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": self._sender_lock_key(sender)},
+            )
+
         existing = await db.scalar(
             select(IntakeSubmission).where(
                 IntakeSubmission.source == source,  # type: ignore[arg-type]

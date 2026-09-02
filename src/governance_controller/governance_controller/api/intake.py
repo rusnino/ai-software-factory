@@ -29,7 +29,7 @@ class IntakeAuthError(Exception):
     """Raised when an intake request fails authentication."""
 
 
-def _require_intake_secret(
+def _validate_intake_secret(
     request: Request,
     x_intake_secret: str | None = Header(default=None, alias="X-Intake-Secret"),
     x_intake_signature: str | None = Header(
@@ -59,6 +59,36 @@ def _require_intake_secret(
 
     if not hmac.compare_digest(x_intake_secret or "", configured):
         raise IntakeAuthError("Invalid or missing intake secret")
+
+
+def _release_intake_admission(request: Request) -> None:
+    """Release the middleware token after endpoint authentication succeeds."""
+    release = getattr(request.state, "release_intake_rate_limit", None)
+    if callable(release):
+        release()
+
+
+def _require_intake_secret(
+    request: Request,
+    x_intake_secret: str | None = Header(default=None, alias="X-Intake-Secret"),
+    x_intake_signature: str | None = Header(
+        default=None, alias="X-Intake-Signature"
+    ),
+) -> None:
+    """Validate shared intake authentication and release the IP token."""
+    _validate_intake_secret(request, x_intake_secret, x_intake_signature)
+    _release_intake_admission(request)
+
+
+def _require_telegram_intake_secret(
+    request: Request,
+    x_intake_secret: str | None = Header(default=None, alias="X-Intake-Secret"),
+    x_intake_signature: str | None = Header(
+        default=None, alias="X-Intake-Signature"
+    ),
+) -> None:
+    """Validate shared auth without releasing before Telegram auth runs."""
+    _validate_intake_secret(request, x_intake_secret, x_intake_signature)
 
 
 class _ServiceContainer:
@@ -119,10 +149,11 @@ async def _log_spam(
 @router.post("/telegram", status_code=status.HTTP_200_OK)
 async def telegram_intake(
     update: dict[str, Any],
+    request: Request,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
     ingestion: IdeaIngestionService = Depends(get_idea_ingestion_service),
     db: AsyncSession = Depends(get_db),
-    _authenticated: None = Depends(_require_intake_secret),
+    _authenticated: None = Depends(_require_telegram_intake_secret),
 ) -> dict[str, Any]:
     """Receive a Telegram update.
 
@@ -138,6 +169,7 @@ async def telegram_intake(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
+    _release_intake_admission(request)
 
     message = TelegramAdapter._extract_message(update)
     text = TelegramAdapter._extract_text(message)

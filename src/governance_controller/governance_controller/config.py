@@ -99,7 +99,8 @@ class Settings(BaseSettings):
     intake_rate_limit_per_minute: int = 10
 
     # Global API rate limiting: maximum requests per originating IP per minute
-    # for all Controller endpoints except /health. Set to 0 to disable.
+    # for all Controller endpoints except /health and successfully authenticated
+    # intake requests. Invalid intake attempts still consume this budget.
     rate_limit_per_minute: int = 120
     # Maximum distinct source IPs tracked simultaneously by the in-memory rate
     # limiter. Prevents unbounded growth when clients vary forwarded headers.

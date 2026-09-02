@@ -1,5 +1,7 @@
 """Direct tests for IdeaIngestionService classify/create_draft logic."""
 
+import asyncio
+import os
 import uuid
 from typing import Any
 
@@ -12,6 +14,7 @@ from governance_controller.schemas.intake import RawIdea
 from governance_controller.services.idea_ingestion_service import (
     DuplicateIntakeError,
     IdeaIngestionService,
+    IntakeRateLimitError,
 )
 
 
@@ -218,3 +221,120 @@ async def test_create_draft_translates_race_lost_integrity_error_to_duplicate(
         )
     )
     assert len(rows.scalars().all()) == 1
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="sender quota race requires independent PostgreSQL sessions",
+)
+async def test_sender_quota_serializes_independent_sessions(
+    isolated_db: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent distinct submissions cannot both pass the sender quota."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "intake_rate_limit_per_minute", 1)
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    _engine, session_local = isolated_db
+    sender = "quota-race@example.com"
+    first_guard_returned = asyncio.Event()
+    second_guard_started = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+
+    class _PauseAfterGuardService(IdeaIngestionService):
+        def __init__(
+            self,
+            guard_returned: asyncio.Event,
+            release: asyncio.Event,
+            guard_started: asyncio.Event | None = None,
+        ) -> None:
+            super().__init__(plane_client=_FakePlaneClient())
+            self._guard_returned = guard_returned
+            self._release = release
+            self._guard_started = guard_started
+
+        async def _guard_duplicate_and_rate_limit(
+            self,
+            db: AsyncSession,
+            source: str,
+            source_id: str,
+            sender_value: str,
+        ) -> None:
+            if self._guard_started is not None:
+                self._guard_started.set()
+            await super()._guard_duplicate_and_rate_limit(
+                db, source, source_id, sender_value
+            )
+            self._guard_returned.set()
+            await self._release.wait()
+
+    first_service = _PauseAfterGuardService(first_guard_returned, release_first)
+    second_service = _PauseAfterGuardService(
+        first_guard_returned,
+        release_second,
+        guard_started=second_guard_started,
+    )
+    first_classified = first_service.classify(
+        _idea(source_id="quota-race-1", sender=sender)
+    )
+    second_classified = second_service.classify(
+        _idea(source_id="quota-race-2", sender=sender)
+    )
+
+    async with session_local() as first_db, session_local() as second_db:
+        first_task = asyncio.create_task(
+            first_service.create_draft(
+                first_classified, project_id="proj-1", db=first_db
+            )
+        )
+        await asyncio.wait_for(first_guard_returned.wait(), timeout=5)
+
+        second_task = asyncio.create_task(
+            second_service.create_draft(
+                second_classified, project_id="proj-1", db=second_db
+            )
+        )
+        await asyncio.wait_for(second_guard_started.wait(), timeout=5)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(second_task), timeout=0.2)
+
+        # The advisory lock keeps the second guard behind the first transaction
+        # until its insert and commit complete.
+        release_first.set()
+
+        release_second.set()
+        first_result, second_result = await asyncio.gather(
+            first_task, second_task, return_exceptions=True
+        )
+
+    assert isinstance(first_result, dict)
+    assert isinstance(second_result, IntakeRateLimitError)
+
+
+async def test_duplicate_wins_over_sender_quota_at_limit(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate remains 409 even when its sender is already at quota."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "intake_rate_limit_per_minute", 1)
+    sender = "duplicate-at-limit@example.com"
+    db_session.add(
+        IntakeSubmission(
+            source="email",
+            source_id="duplicate-at-limit",
+            sender=sender,
+        )
+    )
+    await db_session.commit()
+
+    service = IdeaIngestionService(plane_client=_FakePlaneClient())
+    classified = service.classify(
+        _idea(source_id="duplicate-at-limit", sender=sender)
+    )
+
+    with pytest.raises(DuplicateIntakeError):
+        await service.create_draft(classified, project_id="proj-1", db=db_session)

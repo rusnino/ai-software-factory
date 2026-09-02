@@ -14,6 +14,7 @@ from governance_controller.config import settings
 from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.middleware import (
+    InMemoryRateLimitMiddleware,
     _requests_by_ip,
     _requests_last_access,
     reset_rate_limits,
@@ -178,6 +179,33 @@ async def test_duplicate_intake_does_not_consume_global_ip_budget(
     assert new_submission.status_code == 200
 
 
+async def test_unauthenticated_intake_requests_consume_global_ip_budget(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid intake attempts must not bypass the global IP limiter."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 2)
+    monkeypatch.setattr(settings, "intake_secret", "configured-secret")
+    reset_rate_limits()
+
+    def payload(source_id: str) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": source_id,
+            "sender": "unauthenticated@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    responses = [
+        await async_client.post("/intake/idea", json=payload("unauth-1")),
+        await async_client.post("/intake/idea", json=payload("unauth-2")),
+        await async_client.post("/intake/idea", json=payload("unauth-3")),
+    ]
+
+    assert [response.status_code for response in responses] == [401, 401, 429]
+
+
 async def test_inflight_duplicate_intake_burst_does_not_starve_new_submission(
     async_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -256,6 +284,55 @@ async def test_inflight_duplicate_intake_burst_does_not_starve_new_submission(
 
     assert [response.status_code for response in duplicate_responses] == [409] * 3
     assert new_submission.status_code == 200
+
+
+async def test_stale_intake_release_cannot_delete_replacement_ip_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An evicted request must not release a newer bucket for the same IP."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 10)
+    monkeypatch.setattr(settings, "rate_limit_max_ips", 1)
+    reset_rate_limits()
+
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def downstream(scope: dict[str, Any], _receive: Any, send: Any) -> None:
+        if scope["state"].get("name") == "first":
+            first_started.set()
+            await release_first.wait()
+            scope["state"]["release_intake_rate_limit"]()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = InMemoryRateLimitMiddleware(downstream)
+
+    async def invoke(name: str, path: str, ip: str) -> None:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "client": (ip, 1234),
+            "state": {"name": name},
+        }
+
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message: dict[str, object]) -> None:
+            return None
+
+        await middleware(scope, receive, send)
+
+    first = asyncio.create_task(invoke("first", "/intake/idea", "ip-1"))
+    await first_started.wait()
+    await invoke("evictor", "/tasks", "ip-2")
+    await invoke("replacement", "/tasks", "ip-1")
+    release_first.set()
+    await first
+
+    assert "ip-1" in _requests_by_ip
+    assert len(_requests_by_ip["ip-1"]) == 1
 
 
 @pytest.mark.skipif(

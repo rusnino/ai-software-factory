@@ -42,9 +42,10 @@ class InMemoryRateLimitMiddleware:
 
     Tracks request timestamps in memory per source IP. Requests beyond
     ``GC_RATE_LIMIT_PER_MINUTE`` within a rolling 60-second window receive
-    ``429 Too Many Requests``. ``/health`` and intake endpoints are exempt:
-    intake authentication and its durable sender/duplicate guard must run
-    before a retry can be classified without starving a new submission (#300).
+    ``429 Too Many Requests``. ``/health`` is exempt. Intake requests consume
+    a pre-auth admission token; successful authentication releases it so the
+    durable sender/duplicate guard can classify retries without starving a new
+    submission, while invalid attempts remain rate-limited (#300).
 
     # ponytail: in-memory only; multi-process deployments need a shared store
     # (Redis, memcached) once rate limits must be cluster-wide.
@@ -64,9 +65,12 @@ class InMemoryRateLimitMiddleware:
             return
 
         path = scope.get("path", "")
-        if path.rstrip("/") == "/health" or path.rstrip("/") in _INTAKE_PATHS:
+        normalized_path = path.rstrip("/")
+        if normalized_path == "/health":
             await self.app(scope, receive, send)
             return
+
+        is_intake = normalized_path in _INTAKE_PATHS
 
         limit = settings.rate_limit_per_minute
         if limit <= 0:
@@ -112,6 +116,29 @@ class InMemoryRateLimitMiddleware:
 
         window.append(now)
 
+        released = False
+
+        def release_admission() -> None:
+            """Release this request's token at most once."""
+            nonlocal released
+            if released:
+                return
+            released = True
+            if _requests_by_ip.get(ip) is not window:
+                return
+            try:
+                window.remove(now)
+            except ValueError:
+                return
+            if not window:
+                _requests_by_ip.pop(ip, None)
+                _requests_last_access.pop(ip, None)
+
+        if is_intake:
+            scope.setdefault("state", {})[
+                "release_intake_rate_limit"
+            ] = release_admission
+
         async def send_response(message: dict[str, Any]) -> None:
             """Release the admission token for duplicate intake responses."""
             await send(message)
@@ -121,13 +148,7 @@ class InMemoryRateLimitMiddleware:
                 and path.startswith("/intake/")
                 and scope.get("method") == "POST"
             ):
-                try:
-                    window.remove(now)
-                except ValueError:
-                    return
-                if not window:
-                    _requests_by_ip.pop(ip, None)
-                    _requests_last_access.pop(ip, None)
+                release_admission()
 
         await self.app(scope, receive, send_response)
 
