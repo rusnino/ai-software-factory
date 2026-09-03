@@ -56,11 +56,11 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-03): Phase 2 is NOT gate-clean. Round 17 closed 5 of 6 `phase-2` issues for
-real (`#256`, `#297`, `#298`, `#299`, `#300`) but reopened the 6th (`#308` — its fix commit never
-changed the code) and found 8 new issues, including `#309` (CRITICAL, live RCE via a git-config
-policy bypass) and `#311` (HIGH, an unbounded recovery-retry loop) — both `phase-2`-labeled and
-open.** Seventeen review rounds have run. Rounds 1-4
+**Status (2026-09-03): Phase 2 is NOT gate-clean — further from it than at any point since Round
+15. Round 18 closed 5 of 9 `phase-2` issues for real, left 3 more partially fixed, reopened `#308`
+a second time, and the fresh-angle work found 4 new CRITICALs (three more live-RCE policy-parser
+bypasses plus a non-functional OPA docker-compose service) and 2 new HIGHs.** Eighteen review rounds
+have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —
@@ -142,6 +142,52 @@ flag forms, miss one" shape recurring a fourth time) and, in `#308`'s case, as a
 commit that isn't actually a fix" — the sharpest instance yet of this project's standing lesson that
 a closed issue and a green test are not proof. This project's own history means this status line
 should never be trusted without re-running `gh issue list --label phase-2 --state open` first.
+
+**Round 18 closed all 9 `phase-2` issues Round 17 left open** (`#308`-`#316`, commits
+`6ff4674`-`37482c7`). 9 parallel live-verification agents plus 3 fresh angles (a `RISK-16`/`RISK-19`
+sweep, a round-2 adversarial policy-fuzzing pass specifically hunting for a fifth instance of the
+recurring bypass class, a full e2e run) found: **5 of 9 genuinely fixed** (`#309`, `#310`, `#312`,
+`#315`, `#316` items 3-5). **`#308` closed a third time, reopened a second time**: a real index +
+`FOR UPDATE SKIP LOCKED` this time (genuine progress over round 17's test-only non-fix), but a live
+`EXPLAIN ANALYZE` at 400k rows still shows a disk-sorting `Merge Left Join` (677-737ms, ~linear with
+history size), and the new regression test again doesn't exercise the actual failure mode — two
+rounds in a row, two different tests, the same "test runs green but doesn't reproduce the bug" defect
+class going uncaught both times. **`#311`/`#313`/`#314` each partially fixed**: real
+backoff/retryable classification, real CAS-gating, and a real orphan sweeper all shipped and were
+independently live-verified — but `#311`'s "exponential backoff" is a flat constant and macro-agent
+failures are never actually re-attempted (message-inaccurate, not a functional bug — `#325`);
+`#313`'s CAS-gating fix worsened the phase-1 `#305` into a permanently-stranded execution row no
+poller can reap, and its overlapping-poller-pass lock is NOT effective (`SKIP LOCKED` released by
+each per-marker `commit()` inside the loop — deterministically reproduced duplicate audit rows and
+duplicate `executor.cancel()` calls — `#323`); `#314`'s sweeper has inverted resolve logic for
+`terminal_failure_alert` markers, silently marking undelivered terminal-failure human-notification
+alerts as resolved (**HIGH**, `#322`) — defeating this project's governance purpose for exactly the
+case it exists to guarantee — and is missing the `reconciliation_state_fix` operation entirely, one
+of `#314`'s own four originally-named call sites (`#325`). `#316` item 2's OPA docker-compose service
+ships `openpolicyagent/opa:0.68.0`, which cannot parse this project's own `governance.rego` at all
+(128 parse errors — the file needs `future.keywords.contains`, which CI's separately-pinned `1.19.1`
+doesn't require); a verified one-line fix exists but wasn't shipped (**CRITICAL**, `#320`). **The
+fresh-angle work's most consequential result**: a dedicated round-2 adversarial policy-fuzzing pass
+found **three more live-RCE instances of the same recurring bypass class in one sitting** —
+`git --config-env=<key>=<envvar>` (`#317`, single-command RCE), writing `.git/config` directly via
+allowlisted non-git commands like `cp`/`tar -x` (`#318`, live RCE via `cp`+`git fetch`), and GNU
+sed's `w`/`W` commands as an unblocked arbitrary-file-write primitive that also evades the
+forbidden-path scanner (`#319`) — the FIFTH consecutive round finding a new instance of "enumerate
+the safe command/flag forms, miss one" (`#134`→`#140`/`#141`→`#309`/`#310`→`#317`/`#318`/`#319`). A
+separate RISK-16/RISK-19 sweep additionally found a TOCTOU race in the new per-IP intake limiter
+(**MEDIUM**, `#324`) — an in-memory check-then-append closure invoked from a FastAPI plain-`def`
+dependency, which Starlette dispatches via a real OS threadpool rather than the event loop the
+closure's atomicity assumes; live-reproduced 2x oversell under genuine thread concurrency.
+
+**Phase 2's `phase-2`-labeled open set went from 0 (Round 16's genuine milestone, lasting under 3
+days) to 12 (Round 18) via two intervening rounds that each closed everything asked of them and each
+introduced or uncovered more than they closed.** Closing every issue in a batch is not evidence
+Phase 2 is converging — only independent, adversarial, live re-verification from a fresh angle each
+round has ever told this project whether it's converging or just moving. Fix `#317`/`#318`/`#319`
+together as one pass over the policy parser's whole approach (not three independent patches, given
+five rounds of the same shape recurring); `#320` has a verified one-line fix; `#321`/`#322` need
+real fixes for their coordination/logic gaps; `#308` needs a bounded-cost fix verified at 100k+ rows
+via `EXPLAIN ANALYZE`, not just "faster than before."
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired

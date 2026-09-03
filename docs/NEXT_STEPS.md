@@ -2,7 +2,53 @@
 
 ## Current State
 
-**Current status (2026-09-03): Round 17 re-broke gate-clean.** opencode closed all 6 open
+**Current status (2026-09-03): Round 18 — Phase 2 is not gate-clean, and worse than Round 17 left
+it.** opencode closed all 9 `phase-2` issues Round 17 left open (`#308`-`#316`) across 5 pushed
+commits (`6ff4674`-`37482c7`). The reviewer ran 9 parallel live-verification agents — one per
+closed-issue cluster, plus 3 fresh angles (a `RISK-16`/`RISK-19` sweep of the batch, a round-2
+adversarial policy-fuzzing pass explicitly hunting for a fifth instance of the recurring
+"enumerate-the-safe-forms, miss one" bypass class, and a full live e2e run plus unexplored corners).
+**Result: only 5 of 9 closed issues hold up as genuinely, fully fixed** (`#309`, `#310`, `#312`,
+`#315`, `#316` items 3-5). **`#308` was closed a third time and is reopened a second time** — its
+new fix adds a real index and `SKIP LOCKED` (genuine progress) but still scales ~linearly at
+realistic history size (677ms→737ms at 400k rows via a disk-sorting `Merge Left Join`, not the
+claimed bounded cost), and its regression test again doesn't differentiate pre-fix from post-fix
+code — the second time in a row this specific pattern has recurred for this specific issue.
+**`#311`/`#313`/`#314` are each partially fixed**: the backoff/retryable classification, CAS-gating,
+and orphaned-marker sweeper mechanisms are all real and independently verified, but each has at
+least one live-reproduced residual gap (see below). **`#316` item 2 (OPA docker-compose) actively
+regressed**: the shipped image (`0.68.0`) cannot even parse this project's own `governance.rego`
+(128 parse errors) — the service as shipped cannot serve real policy at all, on top of two smaller
+gaps (no `profiles:` gate, broken healthcheck). The fresh-angle work found **10 new issues**,
+including **3 more CRITICAL live RCE findings in the policy-parser family** — this is now the FIFTH
+consecutive round to find a new instance of the "enumerate the safe command/flag forms, miss one"
+defect class (`#134`→`#140`/`#141`→`#309`/`#310`→this round's `#317`/`#318`/`#319`) — plus **2 more
+HIGH findings** in the new recovery-poller machinery, and confirmed that this round's own `#313` fix
+**worsened `#305`** (a phase-1 issue) into a permanently-unretryable stuck task. As of Round 18, the
+`phase-2`-labeled open set has grown from 0 (Round 16's genuine milestone) to 12. Query the live
+issue list before trusting anything else in this file — this file has now been wrong about
+"gate-clean" or "this issue is fixed" often enough that the query, not the narrative, is the source
+of truth:
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open --label severity:critical
+gh issue list --repo rusnino/ai-software-factory --state open --label severity:high
+gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
+```
+
+As of Round 18 (2026-09-03), the `phase-2`-labeled open set is **12 issues**: `#317`/`#318`/`#319`/`#320`
+(**CRITICAL** — three live-RCE policy-parser bypasses in the git-config/sed family, plus a
+completely non-functional OPA docker-compose deliverable), `#321`/`#322` (**HIGH** — two independent
+recovery-poller coordination/logic bugs, one of which silently drops the human-notification safety
+net for terminal task failures), `#323`/`#324` (**MEDIUM** — overlapping-poller-pass dedup still not
+fixed; a new TOCTOU race in the per-IP intake limiter), and `#308`/`#325`/`#326`/`#327` (**LOW** —
+cancellation-poll still not bounded at scale, reopened a second time; a missed sweeper operation
+type plus a commit-message accuracy gap; `gc verify-audit`'s unbounded memory use; two small
+usability nits). Additionally, `#305` (phase-1, HIGH) was worsened by this round's own `#313` fix —
+see its issue comment — and `#134`/`#301` (phase-1) remain open, unaffected by this round.
+**Phase 2 is further from gate-clean than at any point since Round 15.**
+
+Round 17's own summary (superseded, kept for continuity): opencode closed all 6 open
 `phase-2` issues (`#256`, `#297`, `#298`, `#299`, `#300`, `#308`) across 15 pushed commits
 (`595bbcd`-`70f4b92`). The reviewer ran 10 parallel live-verification agents — one per issue/commit
 cluster, plus 3 genuinely fresh angles (a dedicated `RISK-16`/`RISK-19` sweep of the whole batch, a
@@ -131,30 +177,46 @@ backend that runs only after the embedded PolicyEngine passes and receives a min
    clobbering (`6a98ad7`, both live-reproduced and closed); and closure of two of three
    `#134`-shaped policy-parser bypass classes (`#140`/`#141`, via `4b941d3`) — the third, `#134`
    itself, remains open, and a new fourth instance (`#309`, git config subcommand form) was found.
+   **Round 18 added**: a real index + `SKIP LOCKED` for cancellation-poll cost (`#308`, still not
+   sufficient — reopened again); backoff/retryable classification for execution-start recovery
+   (`#311`, partially real — see `#325`); a `plane_projection_pending` orphan sweeper (`#314`,
+   partially real — inverted logic for terminal-failure alerts found this round, `#322`); a
+   per-IP intake budget independent of sender rotation (`#312`, closed, but with a new TOCTOU race
+   found this round, `#324`); `gc verify-audit` and `gc approve --idempotency-key` (`#315`/`#316`
+   item 1, both genuinely closed); and closure of the `git config`-subcommand and `tar`/`find` flag
+   gaps (`#309`/`#310`, genuinely closed) — immediately followed by **three more instances of the
+   same bypass class** found this round (`#317` `--config-env=`, `#318` direct `.git/config` writes
+   via non-git commands, `#319` sed `w`/`W`), now five consecutive rounds finding a new instance.
 
-Test status (2026-09-03): **535 passed / 24 skipped** on SQLite, **557 passed / 2 skipped** on
-PostgreSQL, OPA **34/34**, `ruff` clean, `mypy governance_controller` clean (69 source files) — all
-independently re-run by the reviewer this round, not taken from opencode's own claim.
-`macro_agent_service`
-has **10 passed**, `ruff`/`mypy` clean — all independently re-run and confirmed by the reviewer, not
-just taken from opencode's own claim. The two live Plane contract tests are skipped because
-`GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not configured in
-this environment. **CI is green** (`.github/workflows/ci.yml`, added by `#223`, had failed on all 13
-runs since 2026-08-26 until Round 11's CI-infra fix) — confirmed via `gh run list`, current HEAD's
-run included. Green tests plus a self-declared "gate-clean" are still not sufficient evidence of
-correctness in this project — none of round 8's through round 17's findings, including every
-CRITICAL found across those rounds and Round 17's own `#309` and its reopening of `#308`, were caught
-by the test suite before their respective fixes/findings landed; they required killing a live
-process, adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely
-concurrent real HTTP/DB/multi-process load at a live server or real Postgres, running the full real
-pipeline end to end against real services, comparing a "fixed" query's `EXPLAIN ANALYZE` at a scale
-two orders of magnitude past its own regression test, or simply trying to actually exercise a
-documented workflow or a real (not mocked) network boundary that every existing test's fixture shape
-happened to sidestep. Round 17 specifically re-learned that **a closed GitHub issue with a named
-"regression test" commit is not proof either** — `#308`'s regression test passed identically against
-both the pre-fix and (claimed) post-fix commit because no code actually changed between them; only
-running the query at realistic scale, not just reading the diff or running the named test, surfaced
-that.
+Test status (2026-09-03): **558 passed / 26 skipped** on SQLite, **582 passed / 2 skipped** on
+PostgreSQL, OPA **38/38**, `ruff` clean — all independently re-run by the reviewer this round, not
+taken from opencode's own claim. **`mypy governance_controller` is NOT clean**: `cli.py:151` has a
+genuine (if trivial) type error in the new `verify_audit` command's `order_by(AuditLog.id)` call —
+contradicts what would otherwise be claimed here; not filed as a separate issue given its triviality,
+but noted so this file doesn't repeat the same "trust the claim" mistake at a smaller scale.
+`macro_agent_service` has **10 passed**, `ruff`/`mypy` clean. The two live Plane contract tests are
+skipped because `GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not
+configured in this environment. **CI is green** (`.github/workflows/ci.yml`, added by `#223`, had
+failed on all 13 runs since 2026-08-26 until Round 11's CI-infra fix) — confirmed via `gh run list`,
+current HEAD's run included. Green tests plus a self-declared "gate-clean" are still not sufficient
+evidence of correctness in this project — none of round 8's through round 18's findings, including
+every CRITICAL found across those rounds, Round 17's `#309` and its reopening of `#308`, or Round
+18's four new CRITICALs and `#308`'s second reopening, were caught by the test suite before their
+respective fixes/findings landed; they required killing a live process, adversarially re-reviewing
+the immediately preceding round's own fix, throwing genuinely concurrent real HTTP/DB/multi-process
+load at a live server or real Postgres, running the full real pipeline end to end against real
+services, comparing a "fixed" query's `EXPLAIN ANALYZE` at a scale two orders of magnitude past its
+own regression test, or simply trying to actually exercise a documented workflow or a real (not
+mocked) network boundary that every existing test's fixture shape happened to sidestep. Round 17
+first learned that **a closed GitHub issue with a named "regression test" commit is not proof
+either** — `#308`'s round-17 regression test passed identically against both the pre-fix and
+(claimed) post-fix commit because no code actually changed between them. **Round 18 re-learned the
+same lesson a second time on the same issue**: `#308`'s round-18 fix DID change the query (a real
+index, real `SKIP LOCKED`) and its regression test genuinely differs from round 17's, yet the test
+still doesn't reproduce the actual failure mode — it seeds rows that never enter the query's driving
+join at all, passing identically on pre-fix and post-fix code once again. Two rounds in a row, two
+different regression tests, the same defect class going uncaught both times: a test that runs and
+passes is not evidence it exercises the code path it claims to.
 
 Implemented components:
 
@@ -197,12 +259,16 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-**Current status (2026-09-03): Phase 2 is NOT gate-clean.** Round 17 closed 5 of 6 targeted
-`phase-2` issues for real (`#256`, `#297`, `#298`, `#299`, `#300` — independently live-reproduced
-fixed), reopened the 6th (`#308` — its "fix" never changed the code), and the fresh-angle pass found
-`#309` (CRITICAL, live RCE) and `#311` (HIGH, unbounded retry) newly open under `phase-2`, plus
-6 more MEDIUM/LOW gaps (`#310`, `#312`-`#316`). All 10 Phase 2 SDD tasks landed in `main`
-between commits `7c0bd5c` and `4715c22`. Seventeen review
+**Current status (2026-09-03): Phase 2 is NOT gate-clean — and further from it than at any point
+since Round 15.** Round 18 closed 5 of 9 targeted `phase-2` issues for real (`#309`, `#310`, `#312`,
+`#315`, `#316` items 3-5), left `#311`/`#313`/`#314` each only partially fixed (real mechanisms,
+live-reproduced residual gaps), reopened `#308` a second time (a real index + `SKIP LOCKED` this
+time, still not bounded at scale), and found the shipped OPA docker-compose service (`#316` item 2)
+cannot even parse this project's own policy file. The fresh-angle pass found 4 new CRITICALs
+(`#317`-`#320` — three more live RCEs in the policy-parser family, plus the OPA version mismatch)
+and 2 new HIGHs (`#321`/`#322`) in the recovery-poller machinery, on top of confirming this round's
+own `#313` fix worsened the phase-1 `#305` into a permanently-unretryable stuck task. All 10 Phase 2
+SDD tasks landed in `main` between commits `7c0bd5c` and `4715c22`. Eighteen review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -268,23 +334,87 @@ round). **Phase 2 is not gate-clean: `#309` and `#311` are open under `phase-2`,
 HIGH.** The pattern of "a fix introducing a new, different-shaped regression" (`#280`→`#283`→`#297`,
 now `#299`/`#134`'s policy-parser class → `#309`/`#310`) keeps recurring — the next round should
 keep adversarially reviewing every fix, including previously-"fixed" ones, not just confirm each
-closes its own reported bug.**
+closes its own reported bug.** **Round 18 confirms that advice was correct and didn't go far
+enough.** opencode closed all 9 `phase-2` issues Round 17 left open across 5 commits
+(`6ff4674`-`37482c7`). 9 parallel live-verification agents plus 3 fresh angles (a `RISK-16`/`RISK-19`
+sweep, a round-2 adversarial policy-fuzzing pass, a full e2e run) found: **5 of 9 genuinely fixed**
+(`#309`, `#310`, `#312`, `#315`, `#316` items 3-5 — including a live-reproduced sender-quota-style
+win: the original `#312` bypass went from 25/25-succeeding to exactly-bounded post-fix). **`#308`
+closed a third time, reopened a second time**: the new fix adds a real Postgres index and
+`FOR UPDATE SKIP LOCKED` — genuine engineering progress over round 17's test-only non-fix — but a
+live `EXPLAIN ANALYZE` at 400k rows still shows the planner falling back to a disk-sorting
+`Merge Left Join` (677-737ms, ~linear with history size), and the new regression test again doesn't
+exercise the actual failure mode (seeds rows that never enter the query's join). **`#311`/`#313`/
+`#314` each partially fixed**: `#311`'s retryable/backoff classification is real and live-verified,
+but the "exponential backoff" the commit message claims is a flat 1-minute constant, and a genuine
+macro-agent-start failure during recovery is never actually retried a second time at all (intentional
+per its own test, but message-inaccurate — `#325`); `#313`'s CAS-gating fix for the exception-handler
+write is real and live-differentiated against a genuine 3-writer race, but its own consequence is
+that CAS-loss now permanently strands the execution row in `RUNNING` with no poller able to reap it
+— worsening the phase-1 `#305` into a task that can never retry successfully again; `#313`'s
+overlapping-poller-pass lock is NOT actually effective — `FOR UPDATE SKIP LOCKED` is released by each
+individual per-marker `commit()` inside the processing loop, and a live forced interleave
+deterministically reproduces duplicate audit rows and duplicate `executor.cancel()` calls on every
+run (`#323`); `#314`'s orphaned-marker sweeper is real and live-verified for the `update_state`
+operation type, but is missing the `reconciliation_state_fix` operation entirely (one of the four
+call sites `#314` originally named) and has inverted resolve logic for `terminal_failure_alert` that
+silently marks undelivered human-notification alerts as resolved (**HIGH**, `#322`) — the exact
+governance guarantee this project exists to provide. `#316` item 2's OPA docker-compose service ships
+`openpolicyagent/opa:0.68.0`, which cannot parse this project's own `governance.rego` at all (128
+parse errors; the file needs `future.keywords.contains`, which CI's separately-pinned `1.19.1`
+doesn't require) — a verified one-line fix exists but wasn't applied — compounded by a missing
+`profiles:` gate and a healthcheck that can never pass on that image (**CRITICAL**, `#320`). The
+fresh-angle work's most consequential result: **a dedicated round-2 adversarial policy-fuzzing pass
+found THREE more live-RCE instances of the same recurring bypass class in one sitting** —
+`git --config-env=<key>=<envvar>` (`#317`, single-command RCE, no two-command chain even needed),
+writing `.git/config` directly via allowlisted non-git commands like `cp`/`tar -x` (`#318`, live RCE
+via `cp`+`git fetch`), and GNU sed's `w`/`W` commands as an unblocked arbitrary-file-write primitive
+that also evades the forbidden-path scanner (`#319`, live-proven overwrite of a file inside a
+declared-forbidden directory). This is now the FIFTH consecutive round to find a new instance of
+"enumerate the safe command/flag forms, miss one" (`#134`→`#140`/`#141`→`#309`/`#310`→`#317`/`#318`/
+`#319`). A separate RISK-16/RISK-19 sweep found two more live-reproduced bugs unrelated to the
+policy-parser family: the `terminal_failure_alert` sweeper inversion above, and a TOCTOU race in the
+new per-IP intake limiter (`#312`'s own fix) caused by invoking an in-memory check-then-append
+closure from a FastAPI plain-`def` dependency, which Starlette dispatches via a real OS threadpool
+rather than the event loop the closure's shape assumes — live-reproduced 2x oversell under genuine
+thread concurrency (**MEDIUM**, `#324`). **Phase 2's `phase-2`-labeled open set went from 0 (Round
+16's genuine milestone, lasting less than 3 days) to 12 (Round 18) via two intervening rounds that
+each closed everything they were asked to close and each introduced or uncovered more than they
+closed.** The lesson repeats, sharper each time: closing every issue in a batch is not evidence
+Phase 2 is healthier than before the batch — only independent, adversarial, live re-verification of
+the same code from a fresh angle each round has ever actually told this project whether it's
+converging or just moving.**
 
-## Immediate Next Step: Fix `#309` (CRITICAL) and `#311` (HIGH), Then Reassess Phase 2
+## Immediate Next Step: Fix the Four New CRITICALs (`#317`-`#320`) First, Then the Two HIGHs, Then Reassess
 
-`#309` (git config subcommand-form policy bypass, live RCE) and `#311` (execution-start recovery
-poller retries forever with no backoff) are the two `phase-2`-labeled blockers to gate-clean status
-and should be fixed first — `#309` especially, given its live-proven RCE shape matches this
-project's CRITICAL bar exactly. `#308` needs an actual query-level fix this time (not another
-test-only commit) verified at realistic scale (tens of thousands of rows), not just against its
-53-row regression test. `#301` (phase-1) requires a macro-agent API contract that makes `POST /runs`
-idempotent by `controller_execution_id` or provides a lookup endpoint after response loss — still
-blocked by the Phase 2 constraint against modifying macro-agent internals; two Controller-side
-refinements were added to its issue this round (exception-type classification, and reusing the
-original attempt's `Execution.id` on retry so a future macro-agent idempotency key would actually
-help). Rerun the live critical/high issue queries before any Phase 3 work, and re-verify each
-`#310`/`#312`-`#316` fix the same way this round verified `#256`/`#297`-`#300` — live reproduction,
-not diff-trust.
+`#317` (`--config-env=` bypass), `#318` (direct `.git/config` write via non-git commands), and `#319`
+(sed `w`/`W` unblocked write primitive) are three live-RCE-class findings — fix all three together as
+one pass over the policy-parser's whole approach, not as three independent patches, given this is now
+the fifth consecutive round finding a new instance of the same "enumerate and miss one" shape
+(`#134`→`#140`/`#141`→`#309`/`#310`→`#317`/`#318`/`#319`). Seriously consider whether continuing to
+patch individual flag/subcommand forms is the right strategy at this point, versus a structurally
+different approach (e.g. treating `.git/`, and any config file a later command reads, as always
+outside the writable scope of completion-contract checks, rather than enumerating which commands are
+allowed to touch it). `#320` (OPA docker-compose can't parse the real policy) has a verified one-line
+fix (`import future.keywords.contains`) plus two smaller sub-fixes (profiles gate, healthcheck) —
+should be quick. Then `#321`/`#322` (HIGH: recovery-poller coordination gap; inverted sweeper logic
+silently dropping human-notification alerts) — `#322` especially, since it defeats this project's
+core governance purpose for the specific case it's supposed to guarantee. `#308` needs an actual
+bounded-cost fix this time verified at realistic scale via `EXPLAIN ANALYZE` at 100k+ rows (not just
+a query that runs faster than before, and not just its own named regression test, which two rounds in
+a row has failed to exercise the real failure mode) — an index on `(event_type, id)` alone was not
+sufficient; the query itself likely needs restructuring so the planner can't fall back to a full
+disk-sort merge join. `#323` (overlapping-poller dedup) and `#324` (per-IP intake TOCTOU) are MEDIUM
+concurrency bugs needing a genuinely concurrent regression test each, matching the live reproduction
+techniques already documented in their issues. `#305` (phase-1, worsened this round) needs a third
+option beyond "write unconditionally" vs. "never write on CAS loss" for `_start_retry_execution`'s
+exception handler — finalize the orphaned execution to a distinct terminal state that's excluded from
+`active_execution_exists` without falsely claiming to have won the task transition. `#301` (phase-1)
+still requires a macro-agent API contract change, out of Phase 2's scope. Rerun the live critical/high
+issue queries before any Phase 3 work, and re-verify every fix in this batch the same way this round
+verified the round-17 batch — live reproduction, not diff-trust, and specifically re-run any "fixed"
+query's `EXPLAIN ANALYZE` at a scale meaningfully larger than its own regression test before trusting
+it — that specific gap has now let the same issue (`#308`) go uncaught twice in a row.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
@@ -312,16 +442,26 @@ Before starting Phase 3, confirm the live issue list has no open `severity:criti
 ## Blockers to Watch
 
 - macro-agent API stability and `/runs` contract.
-- GitHub issue `#309` (CRITICAL): `git config <key> <value>` subcommand form bypasses the
-  dangerous-config-key check on both policy backends — live RCE, blocks gate-clean.
-- GitHub issue `#311` (HIGH): execution-start recovery poller has no backoff, retries a permanently
-  failing recovery forever — blocks gate-clean.
+- GitHub issues `#317`/`#318`/`#319` (CRITICAL): three more live-RCE instances of the recurring
+  policy-parser bypass class (`--config-env=`; direct `.git/config` writes via non-git commands;
+  sed `w`/`W`) — block gate-clean, the fifth consecutive round finding a new instance of this shape.
+- GitHub issue `#320` (CRITICAL): OPA docker-compose service ships an OPA version that cannot parse
+  this project's own `governance.rego` at all — verified one-line fix exists, not yet applied.
+- GitHub issue `#321` (HIGH): two crash-recovery pollers don't share terminal-outcome state — a
+  crash correctly resolved by one gets silently reopened and re-attempted by the other.
+- GitHub issue `#322` (HIGH): the Plane-projection-marker sweeper silently marks undelivered
+  terminal-failure human-notification alerts as resolved — defeats this project's governance purpose
+  for the exact case it's meant to guarantee.
+- GitHub issue `#308` (reopened a second time): cancellation-recovery poll still scales ~linearly at
+  realistic history size despite a real index + `SKIP LOCKED` this round — two fixes in a row for
+  this issue have shipped with a regression test that doesn't exercise the actual failure mode.
+- GitHub issue `#305` (phase-1, worsened this round): CAS-loss in verification retry now leaves an
+  execution row permanently stranded in `RUNNING`, unreachable by any poller, and the task can never
+  successfully retry again through this path — a side effect of this round's own `#313` fix.
 - GitHub issue `#301`: response-loss recovery can create duplicate/orphaned macro-agent runs.
-- GitHub issue `#308` (reopened): cancellation-recovery poll query still scales ~linearly with audit
-  history at realistic scale — the prior "fix" only added a test, no code changed.
 - GitHub issue `#134`: forbidden-path command scanning still misses `--directory=`/`-C`-style
   option-glued path arguments — a live, full-stack-reproduced bypass, not yet fixed despite prior
-  docs claims.
+  docs claims, unaffected by this round.
 - OpenCode ACP compatibility with macro-agent MCP tools.
 - Plane CE self-hosted availability and API rate limits.
 
