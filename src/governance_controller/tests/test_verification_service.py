@@ -1405,14 +1405,14 @@ class TestVerificationConcurrency:
         self,
         isolated_db: tuple,
     ) -> None:
-        """#266/#303: a failed retry start must finalize after a lost task CAS.
+        """#266/#303/#313: a lost task CAS leaves the Execution row untouched.
 
         ``_start_retry_execution`` commits the new RUNNING ``Execution`` row and
         releases the task row lock before the outbound ``executor.start()``
-        call. If that call raises, the local Execution must be finalized even
-        when a concurrent session, e.g. the stuck-execution poller, already
-        moved the task elsewhere. Here the concurrent winner is a real,
-        separate session that commits BLOCKED first.
+        call. If that call raises and a concurrent session has already moved the
+        task elsewhere, the task CAS loses; the execution finalization is
+        gated behind the task transition so the local Execution is not mutated
+        under a lost CAS.
         """
         from unittest.mock import AsyncMock
 
@@ -1495,10 +1495,11 @@ class TestVerificationConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            # A failed external start must not leave an unowned active row after
-            # the task CAS is lost.
-            assert rows[0].state == TaskState.FAILED
-            assert rows[0].ended_at is not None
+            # Per #313 the execution row is only finalized when the task
+            # transition to FAILED actually wins; otherwise a concurrent winner
+            # owns the task state and the local execution must not be stomped.
+            assert rows[0].state == TaskState.RUNNING
+            assert rows[0].ended_at is None
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),

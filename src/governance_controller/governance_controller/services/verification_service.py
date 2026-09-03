@@ -821,46 +821,46 @@ class VerificationService:
             transitioned = await StateMachine.atomic_transition(
                 db, task, TaskState.FAILED
             )
-            execution.state = TaskState.FAILED
-            execution.ended_at = datetime.now(UTC)
-            await db.flush()
-            await AuditService.log(
-                db=db,
-                event_type="retry_execution_start_failed",
-                task_id=task.id,
-                actor="system",
-                source="verification_service",
-                execution_id=execution.id,
-                payload={
-                    "execution_id": execution.id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "verification_report": report,
-                },
-            )
-            if not transitioned:
+            if transitioned:
+                execution.state = TaskState.FAILED
+                execution.ended_at = datetime.now(UTC)
+                await db.flush()
                 await AuditService.log(
                     db=db,
-                    event_type="concurrent_modification",
+                    event_type="retry_execution_start_failed",
                     task_id=task.id,
                     actor="system",
                     source="verification_service",
+                    execution_id=execution.id,
                     payload={
-                        "expected_state": TaskState.FAILED.value,
-                        "target_state": TaskState.FAILED.value,
-                        "context": "retry_execution_start_failed",
+                        "execution_id": execution.id,
                         "error": str(exc),
+                        "error_type": type(exc).__name__,
                         "verification_report": report,
                     },
                 )
                 await db.commit()
-                raise ValueError(
-                    "Concurrent modification detected: "
-                    "task state changed during retry execution failure handling"
-                    ) from None
+                raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
+            await AuditService.log(
+                db=db,
+                event_type="concurrent_modification",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "expected_state": TaskState.FAILED.value,
+                    "target_state": TaskState.FAILED.value,
+                    "context": "retry_execution_start_failed",
+                    "error": str(exc),
+                    "verification_report": report,
+                },
+            )
             await db.commit()
-            raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
+            raise ValueError(
+                "Concurrent modification detected: "
+                "task state changed during retry execution failure handling"
+            ) from None
 
         execution.macro_agent_run_id = macro_agent_run_id
         await db.flush()

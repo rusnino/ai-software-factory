@@ -42,6 +42,9 @@ class AuditLog(SQLModel, table=True):
     __table_args__ = (
         Index("ix_audit_log_event_id", "event_id"),
         Index("ix_audit_log_task_id", "task_id"),
+        # Sargable index for stuck-execution pollers that order and filter
+        # ``execution_*`` / ``plane_projection_*`` audit markers by ``id``.
+        Index("ix_audit_log_event_type_id", "event_type", "id"),
     )
 
     id: int | None = Field(default=None, primary_key=True)

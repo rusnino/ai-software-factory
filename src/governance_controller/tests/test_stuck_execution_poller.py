@@ -1,6 +1,8 @@
 """Tests for the stuck-execution fallback poller (SPEC-05 §5.6)."""
 
+import asyncio
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -9,7 +11,7 @@ from uuid import uuid4
 import httpx
 import pytest
 import pytest_httpx
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
@@ -1343,6 +1345,386 @@ class _FakeMacroAgentClient:
 
     async def status(self, run_id: str) -> dict[str, Any]:
         return {"status": self._statuses.get(run_id, "completed")}
+
+
+class TestCancellationLargeHistory:
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="large-history bounded-cost test requires PostgreSQL",
+    )
+    async def test_pending_cancellation_query_is_bounded_with_large_history(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#308: the pending-cancellation query stays flat as history grows."""
+        _engine, local_session = isolated_db
+        n_completed = 10000
+        completed_task_ids = [
+            f"task-cancel-hist-{i}" for i in range(n_completed)
+        ]
+
+        async with local_session() as seed:
+            seed.add_all(
+                [
+                    Task(
+                        id=task_id,
+                        project_id="proj-1",
+                        proposed_by="agent-1",
+                        state=TaskState.FAILED,
+                    )
+                    for task_id in completed_task_ids
+                ]
+            )
+            await seed.flush()
+            timestamp = datetime.now(UTC) - timedelta(hours=2)
+            await seed.execute(
+                insert(AuditLog),
+                [
+                    {
+                        "event_id": f"evt-cancel-hist-{i}",
+                        "event_type": "execution_cancel_completed",
+                        "task_id": completed_task_ids[i],
+                        "actor": "system",
+                        "source": "stuck_execution_poller",
+                        "timestamp": timestamp,
+                        "payload": {"macro_agent_run_id": f"run-hist-{i}"},
+                    }
+                    for i in range(n_completed)
+                ],
+            )
+            pending_tasks: list[Task] = []
+            for _ in range(3):
+                task, _run_id = await _pending_cancel_task(seed)
+                pending_tasks.append(task)
+            await seed.commit()
+
+        async with local_session() as db:
+            executor = AsyncMock(spec=MacroAgentExecutor)
+            executor.cancel.return_value = {}
+            poller = StuckExecutionPoller(db, executor=executor, batch_size=2)
+            start = time.monotonic()
+            actions = await poller._poll_pending_cancellations()
+            elapsed = time.monotonic() - start
+
+        assert len(actions) == 2
+        returned_task_ids = {action["task_id"] for action in actions}
+        assert returned_task_ids.issubset({task.id for task in pending_tasks})
+        assert not returned_task_ids.intersection(set(completed_task_ids))
+        assert executor.cancel.await_count == 2
+        assert elapsed < 5.0
+
+
+class TestCancellationConcurrency:
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="SKIP LOCKED concurrency test requires PostgreSQL",
+    )
+    async def test_overlapping_pollers_do_not_double_process_cancellations(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#313: concurrent poller passes must not select the same marker."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            pending: list[tuple[Task, str]] = []
+            for _ in range(4):
+                task, run_id = await _pending_cancel_task(seed)
+                pending.append((task, run_id))
+            await seed.commit()
+
+        async def _poll() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                executor = AsyncMock(spec=MacroAgentExecutor)
+
+                async def _slow_cancel(_run_id: str) -> dict[str, Any]:
+                    await asyncio.sleep(0.1)
+                    return {}
+
+                executor.cancel.side_effect = _slow_cancel
+                poller = StuckExecutionPoller(db, executor=executor)
+                return await poller._poll_pending_cancellations()
+
+        actions_a, actions_b = await asyncio.gather(_poll(), _poll())
+        all_actions = actions_a + actions_b
+        completed = [
+            action
+            for action in all_actions
+            if action["action"] == "execution_cancel_completed"
+        ]
+        task_ids = [action["task_id"] for action in completed]
+        assert len(completed) == 4
+        assert len(task_ids) == len(set(task_ids))
+
+
+class TestExecutionStartRecovery:
+    async def test_missing_profile_is_retryable_and_backs_off(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#311: a missing profile is retryable; duplicate polls back off."""
+        task, _contract = await _approved_task_with_pending_start(db_session)
+        profile = await db_session.scalar(
+            select(ProjectProfileModel).where(
+                ProjectProfileModel.project_id == task.project_id
+            )
+        )
+        assert profile is not None
+        await db_session.delete(profile)
+        await db_session.commit()
+
+        first_actions = await StuckExecutionPoller(db_session).poll()
+        failed = [
+            action
+            for action in first_actions
+            if action["action"] == "execution_start_recovery_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].get("retryable") is True
+
+        # A second pass inside the backoff window must not produce another
+        # recovery attempt.
+        second_actions = await StuckExecutionPoller(db_session).poll()
+        assert not any(
+            action["action"] == "execution_start_recovery_failed"
+            for action in second_actions
+        )
+        assert not any(
+            action["action"] == "execution_start_recovered"
+            for action in second_actions
+        )
+
+        # Restore the profile and bypass the backoff for the final pass.
+        db_session.add(
+            ProjectProfileModel(
+                project_id=task.project_id,
+                profile_json=ProjectProfile(
+                    project_id=task.project_id,
+                    repository={"path": "/tmp/recovery-repo"},
+                    execution={"allowed_harnesses": ["opencode"]},
+                ).model_dump(mode="json"),
+            )
+        )
+        await db_session.commit()
+
+        async def _no_backoff(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            StuckExecutionPoller,
+            "_execution_start_recovery_is_backing_off",
+            _no_backoff,
+            raising=False,
+        )
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-after-backoff"}
+        third_actions = await StuckExecutionPoller(
+            db_session, executor=executor
+        ).poll()
+        assert any(
+            action["action"] == "execution_start_recovered"
+            for action in third_actions
+        )
+        executor.start.assert_awaited_once()
+
+    async def test_malformed_contract_is_non_retryable_and_deduped(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#311: a malformed contract is terminal and never re-attempted."""
+        internal_id = str(uuid4())
+        task_id = f"task-malformed-start-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-malformed-start",
+                proposed_by="agent-1",
+                state=TaskState.EXEC_APPROVED,
+                task_contract_json={"execution": "not-a-mapping"},
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-malformed-start-{internal_id[:8]}",
+                event_type="execution_start_pending",
+                task_id=task_id,
+                actor="system",
+                source="approval_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                payload={"operation": "execution_start"},
+            )
+        )
+        await db_session.commit()
+
+        first_actions = await StuckExecutionPoller(db_session).poll()
+        failed = [
+            action
+            for action in first_actions
+            if action["action"] == "execution_start_recovery_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].get("retryable") is False
+
+        second_actions = await StuckExecutionPoller(db_session).poll()
+        assert not any(
+            action["action"] == "execution_start_recovery_failed"
+            for action in second_actions
+        )
+        audits = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+        ).scalars().all()
+        assert (
+            len(
+                [
+                    audit
+                    for audit in audits
+                    if audit.event_type == "execution_start_recovery_failed"
+                ]
+            )
+            == 1
+        )
+
+    async def test_macro_agent_flaky_failure_is_recorded_retryable(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#311: a macro-agent failure during recovery is logged retryable."""
+        task, _contract = await _approved_task_with_pending_start(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.side_effect = RuntimeError("macro-agent flaky")
+
+        first_actions = await StuckExecutionPoller(
+            db_session, executor=executor
+        ).poll()
+        failed = [
+            action
+            for action in first_actions
+            if action["action"] == "execution_start_recovery_failed"
+        ]
+        assert len(failed) == 1
+        assert failed[0].get("retryable") is True
+
+        # The task leaves EXEC_APPROVED and is finalized as FAILED, so later
+        # passes do not keep retrying the same marker.
+        refreshed = await _fetch_task(db_session, task.id)
+        assert refreshed.state == TaskState.FAILED
+
+        second_actions = await StuckExecutionPoller(
+            db_session, executor=executor
+        ).poll()
+        assert not any(
+            action["action"] == "execution_start_recovery_failed"
+            for action in second_actions
+        )
+        assert executor.start.await_count == 1
+
+
+class TestPlaneProjectionSweeper:
+    async def test_sweeper_resolves_orphaned_plane_projection_pending(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#314: orphaned plane_projection_pending markers are resolved."""
+        internal_id = str(uuid4())
+        task_id = f"task-plane-sweep-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.RUNNING,
+            )
+        )
+        await db_session.flush()
+        pending = AuditLog(
+            event_id=f"evt-plane-pending-{internal_id[:8]}",
+            event_type="plane_projection_pending",
+            task_id=task_id,
+            actor="system",
+            source="reconciliation_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+            payload={
+                "operation": "update_state",
+                "state": TaskState.EXEC_APPROVED.value,
+            },
+        )
+        db_session.add(pending)
+        await db_session.commit()
+
+        dry_actions = await StuckExecutionPoller(
+            db_session, dry_run=True
+        ).poll()
+        dry_sweep = [
+            action
+            for action in dry_actions
+            if action.get("action") == "would_resolve_plane_projection_pending"
+        ]
+        assert len(dry_sweep) == 1
+        assert dry_sweep[0]["pending_event_id"] == pending.event_id
+
+        actions = await StuckExecutionPoller(db_session).poll()
+        sweep = [
+            action
+            for action in actions
+            if action.get("action") == "plane_projection_resolved"
+        ]
+        assert len(sweep) == 1
+        assert sweep[0]["task_id"] == task_id
+
+        audits = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+        ).scalars().all()
+        completed = [
+            audit
+            for audit in audits
+            if audit.event_type == "plane_projection_completed"
+        ]
+        assert len(completed) == 1
+        assert completed[0].payload["reason"] == "resolved_independently"
+        assert completed[0].payload["pending_event_id"] == pending.event_id
+
+    async def test_sweeper_ignores_recent_plane_projection_pending(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#314: in-flight/recent markers are not swept."""
+        internal_id = str(uuid4())
+        task_id = f"task-plane-recent-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.RUNNING,
+            )
+        )
+        await db_session.flush()
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-plane-recent-{internal_id[:8]}",
+                event_type="plane_projection_pending",
+                task_id=task_id,
+                actor="system",
+                source="reconciliation_service",
+                timestamp=datetime.now(UTC) - timedelta(seconds=10),
+                payload={
+                    "operation": "update_state",
+                    "state": TaskState.EXEC_APPROVED.value,
+                },
+            )
+        )
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+        assert not any(
+            action.get("action") == "plane_projection_resolved"
+            for action in actions
+        )
 
 
 class _FailingMacroAgentClient:
