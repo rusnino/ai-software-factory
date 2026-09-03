@@ -22,6 +22,7 @@ from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.audit_service import AuditService
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.stuck_execution_poller import StuckExecutionPoller
 
@@ -822,6 +823,62 @@ class TestPendingRecovery:
             pending_run_id
         ]
         executor.cancel.assert_awaited_once_with(pending_run_id)
+
+    async def test_pending_cancellation_poll_respects_batch_size(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """Cancellation recovery is bounded by batch_size across large history.
+
+        Regression test for #308: without a database-side LIMIT on the pending
+        marker query, an ever-growing append-only audit log would be fully
+        materialized on every poll. This test seeds many completed markers
+        (which must be excluded by the anti-join) plus several pending markers,
+        then asserts that only ``batch_size`` pending markers are returned.
+        """
+        # Build a large tail of completed cancellation history.
+        completed_tasks: list[Task] = []
+        for _ in range(50):
+            task, run_id = await _pending_cancel_task(db_session)
+            completed_tasks.append(task)
+            await AuditService.log(
+                db=db_session,
+                event_type="execution_cancel_completed",
+                task_id=task.id,
+                actor="system",
+                source="stuck_execution_poller",
+                payload={"macro_agent_run_id": run_id},
+            )
+            await db_session.commit()
+
+        pending: list[tuple[Task, str]] = []
+        for _ in range(3):
+            task, run_id = await _pending_cancel_task(db_session)
+            pending.append((task, run_id))
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.return_value = {}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            batch_size=2,
+        ).poll()
+
+        assert len(actions) == 2
+        assert executor.cancel.await_count == 2
+        returned_run_ids = {
+            action["macro_agent_run_id"]
+            for action in actions
+            if action["action"] == "execution_cancel_completed"
+        }
+        expected_run_ids = {run_id for _, run_id in pending[:2]}
+        assert returned_run_ids == expected_run_ids
+
+        # None of the completed-history tasks should be reconsidered.
+        completed_ids = {task.id for task in completed_tasks}
+        for action in actions:
+            assert action["task_id"] not in completed_ids
 
     async def test_stale_verification_retry_marker_restarts_execution(
         self,
