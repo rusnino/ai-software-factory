@@ -30,6 +30,9 @@ dependencies = [
     "structlog>=24.4",
 ]
 
+[project.scripts]
+macro-agent-service = "macro_agent_service.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",

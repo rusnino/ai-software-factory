@@ -110,6 +110,18 @@ async def test_find_issue_by_controller_task_id_returns_none_for_plane_404(
     assert result is None
 
 
+async def test_find_issue_by_controller_task_id_propagates_non_404_plane_errors(
+    httpx_mock, settings_override: Settings
+) -> None:
+    """A non-404 Plane error must propagate as PlaneClientError, not be swallowed."""
+    httpx_mock.add_response(status_code=500, json={"detail": "Internal Server Error"})
+
+    with pytest.raises(PlaneClientError) as exc_info:
+        await PlaneClient().find_issue_by_controller_task_id("TASK-1")
+
+    assert exc_info.value.status_code == 500
+
+
 async def test_find_issue_by_controller_task_id_uses_external_id(
     httpx_mock, settings_override: Settings
 ) -> None:
