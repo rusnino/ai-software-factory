@@ -206,6 +206,38 @@ async def test_unauthenticated_intake_requests_consume_global_ip_budget(
     assert [response.status_code for response in responses] == [401, 401, 429]
 
 
+async def test_authenticated_intake_bounded_per_ip_regardless_of_sender_rotation(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#312: rotating sender/source_id cannot bypass a per-IP intake cap."""
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_ip_per_minute", 3)
+    monkeypatch.setattr(settings, "intake_secret", "intake-secret")
+    monkeypatch.setattr(settings, "plane_base_url", "")
+    reset_rate_limits()
+
+    def payload(idx: int) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": f"idea-{idx}",
+            "sender": f"attacker-{idx}@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    headers = {"X-Intake-Secret": "intake-secret"}
+    responses = [
+        await async_client.post("/intake/idea", json=payload(i), headers=headers)
+        for i in range(5)
+    ]
+
+    codes = [response.status_code for response in responses]
+    assert codes.count(200) == 3
+    assert codes.count(429) == 2
+
+
 async def test_inflight_duplicate_intake_burst_does_not_starve_new_submission(
     async_client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

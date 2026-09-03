@@ -5,7 +5,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import status
+from fastapi import HTTPException, status
 
 from governance_controller.config import settings
 
@@ -30,11 +30,18 @@ _DEFAULT_MAX_DISTINCT_IPS = 10_000
 _requests_by_ip: dict[str, deque[float]] = {}
 _requests_last_access: dict[str, float] = {}
 
+# Separate per-IP intake budget: bounds authenticated intake volume regardless
+# of how many distinct senders or source_ids a client rotates (#312).
+_intake_requests_by_ip: dict[str, deque[float]] = {}
+_intake_requests_last_access: dict[str, float] = {}
+
 
 def reset_rate_limits() -> None:
     """Clear all in-memory rate-limit counters."""
     _requests_by_ip.clear()
     _requests_last_access.clear()
+    _intake_requests_by_ip.clear()
+    _intake_requests_last_access.clear()
 
 
 class InMemoryRateLimitMiddleware:
@@ -46,6 +53,10 @@ class InMemoryRateLimitMiddleware:
     a pre-auth admission token; successful authentication releases it so the
     durable sender/duplicate guard can classify retries without starving a new
     submission, while invalid attempts remain rate-limited (#300).
+    Successful authenticated intake also charges a separate per-source-IP
+    intake budget (``GC_INTAKE_RATE_LIMIT_PER_IP_PER_MINUTE``); duplicate
+    ``409`` responses release that charge so retries do not starve new
+    submissions (#312).
 
     # ponytail: in-memory only; multi-process deployments need a shared store
     # (Redis, memcached) once rate limits must be cluster-wide.
@@ -139,6 +150,75 @@ class InMemoryRateLimitMiddleware:
                 "release_intake_rate_limit"
             ] = release_admission
 
+            intake_limit = settings.intake_rate_limit_per_ip_per_minute
+            if intake_limit > 0:
+                intake_window: deque[float] | None = None
+
+                def _ensure_intake_window() -> deque[float]:
+                    """Return the (possibly empty) intake window for this IP."""
+                    nonlocal intake_window
+                    if intake_window is not None:
+                        return intake_window
+                    fresh = _intake_requests_by_ip.setdefault(ip, deque())
+                    _intake_requests_last_access[ip] = time.monotonic()
+                    cutoff = time.monotonic() - _RATE_LIMIT_WINDOW_SECONDS
+                    while fresh and fresh[0] <= cutoff:
+                        fresh.popleft()
+                    if not fresh:
+                        _intake_requests_by_ip.pop(ip, None)
+                        _intake_requests_last_access.pop(ip, None)
+                        fresh = _intake_requests_by_ip.setdefault(ip, deque())
+                        _intake_requests_last_access[ip] = time.monotonic()
+                    max_ips = getattr(
+                        settings, "rate_limit_max_ips", _DEFAULT_MAX_DISTINCT_IPS
+                    )
+                    while len(_intake_requests_by_ip) > max_ips:
+                        oldest_ip = min(
+                            _intake_requests_last_access,
+                            key=_intake_requests_last_access.get,  # type: ignore[arg-type]
+                        )
+                        _intake_requests_by_ip.pop(oldest_ip, None)
+                        _intake_requests_last_access.pop(oldest_ip, None)
+                    intake_window = fresh
+                    return fresh
+
+                def charge_intake_ip_rate_limit() -> None:
+                    """Charge a successful authenticated intake request.
+
+                    Raises HTTPException(429) when the per-source-IP intake
+                    budget is exhausted. Duplicate submissions are released by
+                    the response wrapper below.
+                    """
+                    window = _ensure_intake_window()
+                    if len(window) >= intake_limit:
+                        raise HTTPException(
+                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Intake rate limit exceeded",
+                        )
+                    window.append(now)
+                    _intake_requests_last_access[ip] = time.monotonic()
+
+                def release_intake_ip_rate_limit() -> None:
+                    """Release the intake token for a duplicate submission."""
+                    if intake_window is None:
+                        return
+                    if _intake_requests_by_ip.get(ip) is not intake_window:
+                        return
+                    try:
+                        intake_window.remove(now)
+                    except ValueError:
+                        return
+                    if not intake_window:
+                        _intake_requests_by_ip.pop(ip, None)
+                        _intake_requests_last_access.pop(ip, None)
+
+                scope.setdefault("state", {})[
+                    "charge_intake_ip_rate_limit"
+                ] = charge_intake_ip_rate_limit
+                scope.setdefault("state", {})[
+                    "release_intake_ip_rate_limit"
+                ] = release_intake_ip_rate_limit
+
         async def send_response(message: dict[str, Any]) -> None:
             """Release the admission token for duplicate intake responses."""
             await send(message)
@@ -149,6 +229,11 @@ class InMemoryRateLimitMiddleware:
                 and scope.get("method") == "POST"
             ):
                 release_admission()
+                release_intake = scope.get("state", {}).get(
+                    "release_intake_ip_rate_limit"
+                )
+                if callable(release_intake):
+                    release_intake()
 
         await self.app(scope, receive, send_response)
 

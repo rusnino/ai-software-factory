@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables.
 
     Environment variables are expected to be prefixed with ``GC_``.
+
+    SECRET ROTATION / RESTART REQUIREMENT:
+        All shared secrets below are read once at startup and cached in
+        memory. Rotating any secret (Controller API, macro-agent, event
+        bridge, intake, Plane webhook, Telegram, OPA) therefore requires a
+        coordinated simultaneous restart of every Controller instance and
+        every caller that presents those secrets. A rolling restart without a
+        cutover will cause authenticated calls to fail with 401 until both
+        sides load the new value.
     """
 
     model_config = SettingsConfigDict(env_prefix="GC_")
@@ -97,6 +106,12 @@ class Settings(BaseSettings):
     # Intake rate limiting: maximum draft-creating submissions per sender per
     # minute. Set to 0 to disable rate limiting.
     intake_rate_limit_per_minute: int = 10
+
+    # Intake-specific per-source-IP rate limiting: maximum successful
+    # authenticated intake requests per originating IP per minute. This bounds
+    # total authenticated intake volume regardless of how many distinct senders or
+    # source_ids a client rotates (#312). Set to 0 to disable.
+    intake_rate_limit_per_ip_per_minute: int = 60
 
     # Global API rate limiting: maximum requests per originating IP per minute
     # for all Controller endpoints except /health and successfully authenticated

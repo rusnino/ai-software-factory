@@ -62,10 +62,13 @@ def _validate_intake_secret(
 
 
 def _release_intake_admission(request: Request) -> None:
-    """Release the middleware token after endpoint authentication succeeds."""
+    """Release the global IP token and charge the intake-specific IP budget."""
     release = getattr(request.state, "release_intake_rate_limit", None)
     if callable(release):
         release()
+    charge = getattr(request.state, "charge_intake_ip_rate_limit", None)
+    if callable(charge):
+        charge()
 
 
 def _require_intake_secret(
