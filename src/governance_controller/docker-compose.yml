@@ -54,18 +54,29 @@ services:
   # GC_OPA_BASE_URL pointing at this service. OPA is not required for local
   # development or for the Controller's built-in policy decisions.
   opa:
-    image: openpolicyagent/opa:0.68.0
+    image: openpolicyagent/opa:1.19.1
+    profiles:
+      - opa
+    volumes:
+      - ./policies/opa:/policy:ro
     command:
       - run
       - --server
       - --log-format=json
       - --addr=http://0.0.0.0:8181
+      - /policy
     ports:
       - "127.0.0.1:8181:8181"
     cap_drop:
       - ALL
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8181/health || exit 1"]
+      test:
+        - CMD
+        - /opa
+        - eval
+        - --fail
+        - --data=/policy
+        - data.governance.approve.allow
       interval: 5s
       timeout: 5s
       retries: 5

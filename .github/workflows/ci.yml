@@ -27,8 +27,8 @@ jobs:
         run: uv run mypy governance_controller
       - name: Check and test OPA policy
         run: |
-          docker run --rm -v "${GITHUB_WORKSPACE}/src/governance_controller/policies/opa:/policy:ro" openpolicyagent/opa:1.19.1 check /policy
-          docker run --rm -v "${GITHUB_WORKSPACE}/src/governance_controller/policies/opa:/policy:ro" openpolicyagent/opa:1.19.1 test /policy
+          docker compose --profile opa run --rm --no-deps opa check /policy
+          docker compose --profile opa run --rm --no-deps opa test /policy
 
   governance-controller-postgres:
     runs-on: ubuntu-latest
