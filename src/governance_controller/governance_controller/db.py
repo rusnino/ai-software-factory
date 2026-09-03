@@ -169,13 +169,6 @@ async def run_migrations() -> None:
     _get_audit_log_table()
     async with get_engine().begin() as conn:
         dialect_name = conn.dialect.name
-        if dialect_name == "postgresql":
-            from governance_controller.models.audit_log import _AUDITLOG_TIP_LOCK_KEY
-
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(:key)"),
-                {"key": _AUDITLOG_TIP_LOCK_KEY},
-            )
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
@@ -198,14 +191,6 @@ async def run_migrations() -> None:
             new_columns.append(("previous_hash", "VARCHAR"))
         if "row_hash" not in column_names:
             new_columns.append(("row_hash", "VARCHAR"))
-
-        for column_name, column_type in new_columns:
-            await conn.execute(
-                text(
-                    f"ALTER TABLE auditlog ADD COLUMN {column_name} "
-                    f"{column_type} DEFAULT ''"
-                )
-            )
 
         # Add any missing columns to the execution table (#268).
         execution_columns = await conn.run_sync(
@@ -231,6 +216,24 @@ async def run_migrations() -> None:
                 "ON execution (cancellation_pending, id)"
             )
         )
+
+        # Serialize the audit chain only after execution DDL has completed. A
+        # poller may hold an execution row lock before writing its audit entry.
+        if dialect_name == "postgresql":
+            from governance_controller.models.audit_log import _AUDITLOG_TIP_LOCK_KEY
+
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _AUDITLOG_TIP_LOCK_KEY},
+            )
+
+        for column_name, column_type in new_columns:
+            await conn.execute(
+                text(
+                    f"ALTER TABLE auditlog ADD COLUMN {column_name} "
+                    f"{column_type} DEFAULT ''"
+                )
+            )
 
         if dialect_name == "postgresql" and cancellation_pending_added:
             # Existing pending markers predate the queue flag. Backfill them

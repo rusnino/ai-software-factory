@@ -944,6 +944,161 @@ class TestAuditLogPostgresDDL:
             await writer_engine.dispose()
             await migration_engine.dispose()
 
+    async def test_postgres_migration_does_not_hold_tip_lock_during_execution_ddl(
+        self,
+    ) -> None:
+        """#308 round 3: execution DDL cannot cycle with a poller audit write."""
+        import asyncio
+
+        from sqlalchemy import text
+
+        from governance_controller.db import _engines_by_loop, run_migrations
+        from governance_controller.db import engine as db_engine
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        setup_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        try:
+            async with setup_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.drop_all)
+                await conn.run_sync(SQLModel.metadata.create_all)
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO execution "
+                        "(id, task_id, state, started_at, macro_agent_run_id) "
+                        "VALUES ('exec-lock-order-row', 'task-lock-order-row', "
+                        "'FAILED', NOW(), 'run-lock-order-row')"
+                    )
+                )
+        finally:
+            await setup_engine.dispose()
+
+        suffix = uuid4().hex[:8]
+        migration_application = f"gc308-migration-execution-{suffix}"
+        poller_application = f"gc308-poller-execution-{suffix}"
+        migration_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+            connect_args={
+                "server_settings": {"application_name": migration_application}
+            },
+        )
+        poller_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+            connect_args={
+                "server_settings": {"application_name": poller_application}
+            },
+        )
+        observer_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        poller_ready = asyncio.Event()
+        start_audit_write = asyncio.Event()
+        audit_write_flushed = asyncio.Event()
+        release_execution_lock = asyncio.Event()
+        poller_task: asyncio.Task[None] | None = None
+        migration_task: asyncio.Task[None] | None = None
+
+        async def _poller_transaction() -> None:
+            async with AsyncSession(
+                poller_engine, expire_on_commit=False
+            ) as session:
+                await session.execute(
+                    text(
+                        "SELECT id FROM execution "
+                        "WHERE id = 'exec-lock-order-row' FOR UPDATE"
+                    )
+                )
+                poller_ready.set()
+                await start_audit_write.wait()
+                await AuditService.log(
+                    db=session,
+                    event_type="execution_lock_order_writer",
+                    task_id="task-lock-order-row",
+                    actor="system",
+                    source="stuck_execution_poller",
+                    execution_id="exec-lock-order-row",
+                )
+                audit_write_flushed.set()
+                await release_execution_lock.wait()
+                await session.commit()
+
+        async def _wait_for_execution_ddl_wait() -> None:
+            async with observer_engine.connect() as observer:
+                while True:
+                    waiting = await observer.scalar(
+                        text(
+                            """
+                            SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_locks AS l
+                                JOIN pg_stat_activity AS a ON a.pid = l.pid
+                                WHERE a.application_name = :application_name
+                                  AND l.locktype = 'relation'
+                                  AND l.relation = 'execution'::regclass
+                                  AND l.mode = 'AccessExclusiveLock'
+                                  AND NOT l.granted
+                            )
+                            """
+                        ),
+                        {"application_name": migration_application},
+                    )
+                    if waiting:
+                        return
+                    await asyncio.sleep(0.01)
+
+        original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
+        db_module = __import__("governance_controller.db", fromlist=["engine"])
+        try:
+            db_module.engine = migration_engine
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
+            poller_task = asyncio.create_task(_poller_transaction())
+            await asyncio.wait_for(poller_ready.wait(), timeout=5)
+
+            migration_task = asyncio.create_task(run_migrations())
+            await asyncio.wait_for(_wait_for_execution_ddl_wait(), timeout=5)
+
+            start_audit_write.set()
+            await asyncio.wait_for(audit_write_flushed.wait(), timeout=5)
+            release_execution_lock.set()
+            await asyncio.wait_for(
+                asyncio.gather(migration_task, poller_task), timeout=5
+            )
+
+            async with observer_engine.connect() as observer:
+                writer_count = await observer.scalar(
+                    text(
+                        "SELECT count(*) FROM auditlog "
+                        "WHERE event_type = 'execution_lock_order_writer'"
+                    )
+                )
+                assert writer_count == 1
+        finally:
+            release_execution_lock.set()
+            for task in (migration_task, poller_task):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(task for task in (migration_task, poller_task) if task is not None),
+                return_exceptions=True,
+            )
+            db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
+            await observer_engine.dispose()
+            await poller_engine.dispose()
+            await migration_engine.dispose()
+
     async def test_postgres_trigger_blocks_update_and_delete(
         self, isolated_db: tuple[AsyncEngine, sessionmaker]
     ) -> None:
