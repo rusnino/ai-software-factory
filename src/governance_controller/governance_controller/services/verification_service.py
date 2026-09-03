@@ -216,6 +216,38 @@ class VerificationService:
         contract_verification_checks = cls._verification_commands_from_contract(
             contract
         )
+
+        # Reject command-derived forbidden paths before starting any subprocess.
+        # A post-execution report is not a protection when the command can already
+        # exfiltrate or overwrite the forbidden path.
+        preflight_forbidden_paths: list[str] = list(contract.forbidden_paths)
+        if completion is not None:
+            preflight_forbidden_paths = list(
+                set(preflight_forbidden_paths)
+                | set(completion.forbidden_path_check.paths)
+            )
+        preflight_command_paths: set[str] = set()
+        for check in contract_verification_checks:
+            preflight_command_paths |= _extract_command_paths(check.command)
+        if completion is not None:
+            for check in list(completion.required) + list(completion.optional):
+                preflight_command_paths |= _extract_command_paths(check.command)
+        preflight_conflicts = _forbidden_path_conflicts(
+            preflight_command_paths, preflight_forbidden_paths
+        )
+        if preflight_conflicts:
+            return {
+                "contract_id": contract.task_id,
+                "passed": False,
+                "checks": [
+                    {
+                        "name": "forbidden_paths",
+                        "status": "failed",
+                        "detail": sorted(preflight_conflicts),
+                    }
+                ],
+            }
+
         for check in contract_verification_checks:
             result = await cls._run_check(check, cwd=cwd)
             checks.append(result)

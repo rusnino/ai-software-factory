@@ -23,10 +23,11 @@ validates every ``Check.command`` before approval. The checks below are applied 
     ``tar --to-command``/``--remove-files``/``--absolute-names``/
     ``--transform``/``--xform``, and ``git clean -f``/``-x``/``-d``.
  6. Reject command-execution primitives on allowlisted binaries: ``git -c``
-    overrides and persistent ``git config`` for dangerous config keys
-    (``core.sshCommand``, ``core.fsmonitor``, ``core.editor``,
-    ``credential.helper``, etc.) and
-   ``sed`` ``s///e``/``<addr>e`` both run arbitrary shell commands.
+     overrides and persistent ``git config`` for dangerous config keys
+     (``core.sshCommand``, ``core.fsmonitor``, ``core.editor``,
+     ``credential.helper``, etc.) and
+    ``git --config-env``, protected ``.git/config``/``.git/hooks`` writes, tar
+    extraction, and sed file I/O/``s///e``/``<addr>e`` primitives.
 7. Reject container isolation escape flags (``--privileged``,
    ``--network=host``, ``--volume``, ``--mount``, etc.) as defense-in-depth in
    case a future allowed helper wraps a container binary. ``docker``/``podman``/
@@ -303,6 +304,34 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Any command that can persist data in these repository control files is denied.
+# A later git command can execute values read from them, so checking only git's
+# own argv is insufficient.
+_GIT_CONTROL_FILE_WRITERS: frozenset[str] = frozenset(
+    {"cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed"}
+)
+_GIT_CONTROL_FILE_NAMES: frozenset[str] = frozenset(
+    {"config", "config.worktree", "hooks"}
+)
+
+# Options whose values select a filesystem location. The values are included in
+# touched_paths even when the option and path are separate argv tokens.
+_PATH_ARGUMENT_OPTIONS: frozenset[str] = frozenset(
+    {
+        "--directory",
+        "--target-directory",
+        "--git-dir",
+        "--work-tree",
+        "--file",
+        "--include",
+        "--exclude",
+        "-C",
+        "-I",
+        "-f",
+        "-t",
+    }
+)
+
 # Dangerous tar flags that execute arbitrary commands, delete files, or rewrite
 # extracted paths outside the worktree.
 # #140/#310: these options invoke shell commands, remove files, preserve
@@ -388,8 +417,27 @@ def _extract_command_paths(command: str) -> set[str]:
     if argv is None:
         return set()
     paths: set[str] = set()
-    for token in argv[1:]:
+    for index, token in enumerate(argv[1:], start=1):
         lowered = token.lower()
+        if token in _PATH_ARGUMENT_OPTIONS and index + 1 < len(argv):
+            paths.add(argv[index + 1])
+            continue
+        if token.startswith("--") and "=" in token:
+            option, candidate = token.split("=", 1)
+            if option.lower() in {
+                option_name.lower() for option_name in _PATH_ARGUMENT_OPTIONS
+            } and candidate:
+                paths.add(candidate)
+                continue
+        if token.startswith("-C") and len(token) > 2:
+            paths.add(token[2:])
+            continue
+        if token.startswith("-I") and len(token) > 2:
+            paths.add(token[2:].lstrip("="))
+            continue
+        if token.startswith("-t") and len(token) > 2:
+            paths.add(token[2:].lstrip("="))
+            continue
         if token.startswith("-"):
             # Some flags carry an inline path: -I/path, --file=/path, -I=path.
             for sep in ("=", ""):
@@ -404,6 +452,12 @@ def _extract_command_paths(command: str) -> set[str]:
         # Keep tokens that resemble filesystem paths.
         if token.startswith(("/", "~", ".")) or "/" in token:
             paths.add(token)
+    if _base_command(argv[0]) == "sed":
+        for token in argv[1:]:
+            for match in re.finditer(
+                r"(?i)(?:^|[;\n])[^;\n]*?[rRwW]\s+([^\s;]+)", token
+            ):
+                paths.add(match.group(1))
     return paths
 
 
@@ -441,6 +495,59 @@ def _argv_contains_metacharacter(argv: list[str]) -> bool:
 def _base_command(token: str) -> str:
     """Return the lower-cased base command name for a token."""
     return token.split("/")[-1].lower()
+
+
+def _git_subcommand_index(argv: list[str]) -> int | None:
+    """Return the actual git subcommand position after global options."""
+    if not argv or _base_command(argv[0]) != "git":
+        return None
+    options_with_values = {
+        "-C",
+        "-c",
+        "--config",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+    }
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if token in options_with_values:
+            index += 2
+            continue
+        if any(
+            token.startswith(option + "=")
+            for option in options_with_values
+            if option.startswith("--")
+        ):
+            index += 1
+            continue
+        if token.startswith(("-C", "--config-env=")) and len(token) > 2:
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _is_git_control_file_path(path: str) -> bool:
+    """Return True for paths inside repository config or hooks controls."""
+    try:
+        normalized = _normalize_path(path)
+    except ValueError:
+        return True
+    parts = [part for part in normalized.split("/") if part]
+    return any(
+        part == ".git"
+        and index + 1 < len(parts)
+        and parts[index + 1] in _GIT_CONTROL_FILE_NAMES
+        for index, part in enumerate(parts)
+    )
 
 
 def _is_allowed_argv0(argv: list[str]) -> bool:
@@ -499,7 +606,14 @@ def _has_git_dangerous_config(argv: list[str]) -> bool:
                 return True
             i += 1
             continue
-        if token == "config":
+        if token.lower().startswith("--config-env="):
+            config = token.split("=", 1)[1]
+            key, _, _ = config.partition("=")
+            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+                return True
+            i += 1
+            continue
+        if token == "config" and i == _git_subcommand_index(argv):
             # #309: persistent ``git config [<options>] <key> <value>`` sets the
             # key just like a ``git -c`` override. Skip option tokens and any
             # argument-taking options (--file/-f, --blob) before looking at
@@ -529,6 +643,13 @@ def _has_git_dangerous_config(argv: list[str]) -> bool:
             return False
         i += 1
     return False
+
+
+def _has_git_control_file_target(argv: list[str]) -> bool:
+    """Return True when a non-git allowlisted writer targets git controls."""
+    if not argv or _base_command(argv[0]) not in _GIT_CONTROL_FILE_WRITERS:
+        return False
+    return any(_is_git_control_file_path(token) for token in argv[1:])
 
 
 def _has_tar_dangerous_flag(argv: list[str]) -> bool:
@@ -605,6 +726,10 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
     i = 1
     while i < len(argv):
         token = argv[i]
+        if token in ("-i", "--in-place") or token.startswith("--in-place="):
+            return True
+        if token.startswith("-i") and not token.startswith("--"):
+            return True
         if token in ("-e", "--expression", "-f", "--file"):
             if token in ("-f", "--file"):
                 return True
@@ -676,6 +801,12 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
                         if "e" in flags.lower():
                             return True
                         break
+        # sed r/R reads a file and w/W writes one without invoking a shell.
+        if re.search(r"(?i)(?:^|[;\n])[^;\n]*?[rRwW]\s+[^\s;]+", script):
+            return True
+        # The w/W substitution flags also take a following output filename.
+        if re.search(r"(?i)[/]w\s+", script):
+            return True
         # Detect the bare 'e' command, e.g. '1e id', '$e touch /tmp/x', or
         # '/pattern/e touch /tmp/x'. A regex address can contain any text, so
         # the command boundary is the reliable part to match.
@@ -683,6 +814,22 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
             r"(^|[;\n])\s*[^;\n]*?e(?=\s|$|;)",
             script,
             re.IGNORECASE,
+        ):
+            return True
+    return False
+
+
+def _has_tar_write_operation(argv: list[str]) -> bool:
+    """Return True for tar operations that write extracted archive members."""
+    if _base_command(argv[0]) != "tar":
+        return False
+    for token in argv[1:]:
+        if token.lower() in {"--extract", "--get"}:
+            return True
+        if (
+            token.startswith("-")
+            and not token.startswith("--")
+            and "x" in token.lower()
         ):
             return True
     return False
@@ -738,7 +885,9 @@ def _has_command_execution_primitive(argv: list[str]) -> bool:
     """Return True if an allowlisted binary carries a command-execution hook."""
     return bool(
         _has_git_dangerous_config(argv)
+        or _has_git_control_file_target(argv)
         or _has_tar_dangerous_flag(argv)
+        or _has_tar_write_operation(argv)
         or _has_find_dangerous_action(argv)
         or _has_sed_dangerous_flag(argv)
     )

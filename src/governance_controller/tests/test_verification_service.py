@@ -506,6 +506,99 @@ async def test_forbidden_path_in_command_text_is_detected() -> None:
     assert any("/tmp/gcpoc_secret_dir" in str(p) for p in forbidden["detail"])
 
 
+async def test_tar_directory_path_in_command_is_detected() -> None:
+    """#134: verification checks option-glued tar paths too."""
+    forbidden = "/tmp/gcpoc_tar_forbidden"
+    contract = TaskContract(
+        task_id="task-tar-directory-path",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Reject a forbidden tar directory",
+        acceptance=["The forbidden path is reported"],
+        forbidden_paths=[forbidden],
+        completion_contract=CompletionContract(
+            task_id="task-tar-directory-path",
+            required=[
+                Check(
+                    type="tar",
+                    command=f"tar --directory={forbidden} --list -f /dev/null",
+                )
+            ],
+            forbidden_path_check=ForbiddenPathCheck(paths=[forbidden]),
+            scope_check=ScopeCheck(description="tar directory path"),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract)
+
+    assert result["passed"] is False
+    forbidden_check = next(
+        check for check in result["checks"] if check["name"] == "forbidden_paths"
+    )
+    assert forbidden_check["status"] == "failed"
+    assert any(forbidden in str(path) for path in forbidden_check["detail"])
+
+
+async def test_forbidden_command_path_is_rejected_before_subprocess(tmp_path) -> None:
+    """#134: a forbidden command path must not be touched before reporting failure."""
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    marker = forbidden / "marker.txt"
+    contract = TaskContract(
+        task_id="task-command-preflight",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Reject a forbidden command path before execution",
+        acceptance=["The marker is not created"],
+        forbidden_paths=[str(forbidden)],
+        completion_contract=CompletionContract(
+            task_id="task-command-preflight",
+            required=[Check(type="touch", command=f"touch {marker}")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[str(forbidden)]),
+            scope_check=ScopeCheck(description="command preflight"),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(tmp_path))
+
+    assert result["passed"] is False
+    assert marker.exists() is False
+    assert all(check["name"] != "required:touch" for check in result["checks"])
+
+
+async def test_sed_file_io_path_is_rejected_before_subprocess(tmp_path) -> None:
+    """#319: a path embedded in a sed script is preflighted before execution."""
+    forbidden = tmp_path / "forbidden"
+    forbidden.mkdir()
+    marker = forbidden / "marker.txt"
+    input_path = tmp_path / "input.txt"
+    input_path.write_text("payload\n")
+    contract = TaskContract(
+        task_id="task-sed-preflight",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Reject sed file output before execution",
+        acceptance=["The marker is not created"],
+        forbidden_paths=[str(forbidden)],
+        completion_contract=CompletionContract(
+            task_id="task-sed-preflight",
+            required=[
+                Check(
+                    type="sed",
+                    command=f"sed -n '1w {forbidden}/marker.txt' {input_path}",
+                )
+            ],
+            forbidden_path_check=ForbiddenPathCheck(paths=[str(forbidden)]),
+            scope_check=ScopeCheck(description="sed preflight"),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(tmp_path))
+
+    assert result["passed"] is False
+    assert marker.exists() is False
+
+
 async def test_verification_commands_merge_with_completion_contract() -> None:
     contract = TaskContract(
         task_id="task-008",

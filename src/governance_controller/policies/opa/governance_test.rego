@@ -488,6 +488,108 @@ test_git_config_override_forms_are_denied if {
     contains(lower(violation), "config")
 }
 
+test_git_config_env_forms_are_denied if {
+    some key in [
+        "core.sshCommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    ]
+    command := sprintf(
+        "git --config-env=%s=MALICIOUS_VALUE commit --amend --allow-empty",
+        [key],
+    )
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": [
+                    "git",
+                    sprintf("--config-env=%s=MALICIOUS_VALUE", [key]),
+                    "commit",
+                    "--amend",
+                    "--allow-empty",
+                ],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "config")
+}
+
+test_git_control_file_targets_are_denied if {
+    some test_case in [
+        {
+            "command": "cp source victim/.git/config",
+            "argv": ["cp", "source", "victim/.git/config"],
+        },
+        {
+            "command": "mv source victim/.git/hooks/pre-commit",
+            "argv": ["mv", "source", "victim/.git/hooks/pre-commit"],
+        },
+        {
+            "command": "tar -xf malicious.tar",
+            "argv": ["tar", "-xf", "malicious.tar"],
+        },
+    ]
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [test_case.command],
+            "parsed_commands": [{
+                "raw": test_case.command,
+                "argv": test_case.argv,
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "control")
+}
+
+test_sed_file_io_commands_are_denied if {
+    some command in [
+        "sed -n '1r /tmp/secret' input.txt",
+        "sed -n '1R /tmp/secret' input.txt",
+        "sed -n '1w /tmp/output' input.txt",
+        "sed 's/foo/bar/W /tmp/output' input.txt",
+    ]
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": [command]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "file")
+}
+
+test_git_add_literal_config_filenames_are_allowed if {
+    command := "git add config core.editor"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["git", "add", "config", "core.editor"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == true
+}
+
 test_forbidden_path_sibling_is_allowed if {
     decision := data.governance.approve with input as object.union(
         _base_input,

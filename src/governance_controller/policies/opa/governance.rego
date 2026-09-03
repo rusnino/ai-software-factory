@@ -43,6 +43,7 @@ _violation contains _harness_role_violation[_]
 _violation contains _resource_cap_violation[_]
 _violation contains _command_parse_violation[_]
 _violation contains _path_conflict_violation[_]
+_violation contains _control_file_violation[_]
 
 # ---------------------------------------------------------------------------
 # Input accessors (defensive defaults for missing keys)
@@ -224,6 +225,43 @@ _command_execution_violation contains msg if {
     msg := sprintf("Sed command-execution primitive: %s", [cmd])
 }
 
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    some arg in argv
+    arg == "-i"
+    msg := sprintf("Sed in-place file write cannot be inspected safely: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    some index, arg in argv
+    script := _sed_script(argv, index)
+    _sed_script_file_io(script)
+    msg := sprintf("Sed file input/output primitive: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    regex.match(`(?i)(^|[[:space:]])[^[:space:]]*[rRwW][[:space:]]+[^[:space:]]+`, cmd)
+    msg := sprintf("Sed file input/output primitive: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "tar"
+    some arg in argv
+    _tar_extract_operation(arg)
+    msg := sprintf("Tar archive extraction writes untrusted files: %s", [cmd])
+}
+
 _destructive_violation contains msg if {
     some cmd in _commands
     argv := _command_argv(cmd)
@@ -286,8 +324,7 @@ _git_config_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "git"
-    some index
-    arg := argv[index]
+    some index, arg in argv
     index >= 1
     _git_config_key(argv, index) != ""
     lower(_git_config_key(argv, index)) in {
@@ -309,7 +346,28 @@ _git_config_violation contains msg if {
     some index
     arg := argv[index]
     index >= 1
+    _git_config_env_key(argv, index) != ""
+    lower(_git_config_env_key(argv, index)) in {
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    }
+    msg := sprintf("Dangerous git config-env override in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index
+    arg := argv[index]
+    index >= 1
     arg == "config"
+    index == _git_subcommand_index(argv)
     key := _git_config_subcommand_key(argv, index)
     key != ""
     lower(key) in {
@@ -321,6 +379,16 @@ _git_config_violation contains msg if {
         "include.path",
     }
     msg := sprintf("Dangerous git config subcommand in command: %s", [cmd])
+}
+
+_control_file_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) in {"cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed"}
+    some arg in argv
+    _is_git_control_file_path(arg)
+    msg := sprintf("Command targets protected git control file: %s", [cmd])
 }
 
 # ---------------------------------------------------------------------------
@@ -520,6 +588,16 @@ _tar_short_dangerous_flag(arg) if {
     contains(arg, "F")
 }
 
+_tar_extract_operation(arg) if {
+    lower(arg) in {"--extract", "--get"}
+}
+
+_tar_extract_operation(arg) if {
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(lower(arg), "x")
+}
+
 _tar_short_dangerous_flag(arg) if {
     startswith(arg, "-")
     not startswith(arg, "--")
@@ -580,6 +658,14 @@ _git_config_key(argv, index) := key if {
     key := parts[0]
 }
 
+_git_config_env_key(argv, index) := key if {
+    arg := argv[index]
+    startswith(lower(arg), "--config-env=")
+    parts := split(arg, "=")
+    count(parts) >= 3
+    key := parts[1]
+}
+
 _git_config_key(argv, index) := key if {
     arg := argv[index]
     startswith(lower(arg), "-c")
@@ -613,6 +699,50 @@ _git_config_option_argument(argv, config_index, i) if {
     j > config_index
     j < i
     argv[j] in {"--file", "-f", "--blob"}
+}
+
+_git_global_options_with_values := {
+    "-C",
+    "-c",
+    "--config",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+}
+
+_git_global_option_value(argv, index) if {
+    some option_index, option in argv
+    option_index >= 1
+    option_index < index
+    option in _git_global_options_with_values
+    index == option_index + 1
+}
+
+_git_prior_non_subcommand_argument(argv, index) if {
+    some prior, arg in argv
+    prior >= 1
+    prior < index
+    not startswith(arg, "-")
+    not _git_global_option_value(argv, prior)
+}
+
+_git_subcommand_index(argv) := index if {
+    some index, arg in argv
+    index >= 1
+    not startswith(arg, "-")
+    not _git_global_option_value(argv, index)
+    not _git_prior_non_subcommand_argument(argv, index)
+}
+
+_is_git_control_file_path(path) if {
+    parts := split(trim(path, "/"), "/")
+    some index, part in parts
+    part == ".git"
+    index + 1 < count(parts)
+    parts[index + 1] in {"config", "config.worktree", "hooks"}
 }
 
 _base_command(token) := base if {
@@ -763,6 +893,14 @@ _sed_script(argv, index) := script if {
 
 _sed_script_executes(script) if {
     regex.match(`(?i)(^|[;\n])[[:space:]]*[^;\n]*e([[:space:]]|$|;)`, script)
+}
+
+_sed_script_file_io(script) if {
+    regex.match(`(?i)(^|[;\n])[^;\n]*[rRwW][[:space:]]+[^;\n]+`, script)
+}
+
+_sed_script_file_io(script) if {
+    regex.match(`(?i)/w[[:space:]]+`, script)
 }
 
 _sed_script_executes(script) if {

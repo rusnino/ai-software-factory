@@ -918,6 +918,151 @@ class TestPolicyEngineCommandExecutionPrimitives:
     @pytest.mark.parametrize(
         "command",
         [
+            "git -C repository config core.editor touch",
+            "git -c safe.key=value config core.editor touch",
+        ],
+    )
+    def test_git_config_subcommand_after_global_options_is_rejected(
+        self, command: str
+    ) -> None:
+        """The git config subcommand is parsed after global option values."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git global option parsing"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "core.sshCommand",
+            "core.editor",
+            "core.pager",
+            "core.fsmonitor",
+            "credential.helper",
+            "include.path",
+        ],
+    )
+    def test_git_config_env_sets_dangerous_keys(self, key: str) -> None:
+        """#317: --config-env must not bypass dangerous-key checks."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="git",
+                        command=(
+                            f"git --config-env={key}=MALICIOUS_VALUE "
+                            "commit --amend --allow-empty"
+                        ),
+                    )
+                ],
+                scope_check=ScopeCheck(description="git config-env bypass"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("command-execution primitive" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cp source victim/.git/config",
+            "mv source victim/.git/hooks/pre-commit",
+            "tar -xf malicious.tar",
+            "sed -n '1w /tmp/blocked/marker.txt' input.txt",
+            "sed 's/foo/bar/W /tmp/blocked/marker.txt' input.txt",
+        ],
+    )
+    def test_control_file_and_sed_file_io_targets_are_rejected(
+        self, command: str
+    ) -> None:
+        """#318/#319: persistent control files and sed file-I/O are denied."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="exec", command=command)],
+                scope_check=ScopeCheck(description="control file bypass"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any(
+            "command-execution primitive" in v or "control file" in v.lower()
+            for v in result.violations
+        )
+
+    def test_git_add_literal_config_filenames_is_allowed(self) -> None:
+        """#327: config is a filename unless it is git's actual subcommand."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command="git add config core.editor")],
+                scope_check=ScopeCheck(description="literal config filenames"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+
+    @pytest.mark.parametrize(
+        "command_template",
+        [
+            "tar --directory={path} -tf archive.tar",
+            "tar -C{path} -tf archive.tar",
+            "cp --target-directory={path} source",
+            "cp -t {path} source",
+        ],
+    )
+    def test_path_option_values_are_checked_against_forbidden_paths(
+        self, command_template: str
+    ) -> None:
+        """#134: option-valued paths cannot bypass forbidden-path checks."""
+        forbidden = "/tmp/blocked"
+        contract = _make_contract(
+            forbidden_paths=[forbidden],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="path-option",
+                        command=command_template.format(path=forbidden),
+                    )
+                ],
+                forbidden_path_check=ForbiddenPathCheck(paths=[forbidden]),
+                scope_check=ScopeCheck(description="tar directory path"),
+            ),
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any(forbidden in violation for violation in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "tar -xPf a.tar",
             "tar -x --absolute-names -f a.tar",
             "tar -x --transform=s,x,y, -f a.tar",
