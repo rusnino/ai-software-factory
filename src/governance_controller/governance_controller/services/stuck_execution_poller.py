@@ -133,33 +133,43 @@ class StuckExecutionPoller:
     async def _poll_pending_cancellations(self) -> list[dict[str, Any]]:
         """Retry external cancellations that failed after a CAS loser."""
         completed = aliased(AuditLog)
-        stmt = (
-            select(AuditLog)
-            .outerjoin(
-                completed,
-                and_(
-                    completed.event_type == "execution_cancel_completed",  # type: ignore[arg-type]
-                    completed.task_id == AuditLog.task_id,  # type: ignore[arg-type]
-                    completed.payload["macro_agent_run_id"].as_string()
-                    == AuditLog.payload["macro_agent_run_id"].as_string(),
-                ),
-            )
-            .where(AuditLog.event_type == "execution_cancel_pending")  # type: ignore[arg-type]
-            .where(completed.id.is_(None))  # type: ignore[union-attr]
-            .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
-            .limit(self._batch_size)
-        )
-        if self._is_postgres():
-            # Avoid duplicate recovery work when multiple poller processes run
-            # concurrently; SKIP LOCKED is safe because audit rows are never
-            # mutated, only appended to.
-            stmt = stmt.with_for_update(of=AuditLog, skip_locked=True)
-        result = await self.db.execute(stmt)
-
         actions: list[dict[str, Any]] = []
-        for marker in result.scalars().all():
+        seen_ids: set[int] = set()
+        for _ in range(self._batch_size):
+            # Claim one marker at a time. Committing one row then cannot release
+            # locks for a stale batch still held in this loop (#323).
+            stmt = (
+                select(AuditLog)
+                .outerjoin(
+                    completed,
+                    and_(
+                        completed.event_type == "execution_cancel_completed",  # type: ignore[arg-type]
+                        completed.task_id == AuditLog.task_id,  # type: ignore[arg-type]
+                        completed.payload["macro_agent_run_id"].as_string()
+                        == AuditLog.payload["macro_agent_run_id"].as_string(),
+                    ),
+                )
+                .where(AuditLog.event_type == "execution_cancel_pending")  # type: ignore[arg-type]
+                .where(completed.id.is_(None))  # type: ignore[union-attr]
+                .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
+                .limit(1)
+            )
+            if seen_ids:
+                stmt = stmt.where(
+                    AuditLog.__table__.c.id.notin_(seen_ids)  # type: ignore[attr-defined]
+                )
+            if self._is_postgres():
+                stmt = stmt.with_for_update(of=AuditLog, skip_locked=True)
+            result = await self.db.execute(stmt)
+            marker = result.scalar_one_or_none()
+            if marker is None:
+                break
+            if marker.id is not None:
+                seen_ids.add(marker.id)
+
             run_id = marker.payload.get("macro_agent_run_id")
             if not isinstance(run_id, str) or not run_id:
+                await self.db.commit()
                 continue
 
             task = await self.db.scalar(
@@ -178,6 +188,7 @@ class StuckExecutionPoller:
                             "reason": "run_attached_to_current_task",
                         }
                     )
+                    await self.db.commit()
                     continue
                 await AuditService.log(
                     db=self.db,
@@ -212,6 +223,7 @@ class StuckExecutionPoller:
                         "macro_agent_run_id": run_id,
                     }
                 )
+                await self.db.commit()
                 continue
 
             try:
@@ -504,6 +516,13 @@ class StuckExecutionPoller:
                     terminal.event_type == "verification_retry_recovery_failed",  # type: ignore[arg-type]
                     terminal.payload["retryable"].as_boolean().is_(False),
                 ),
+                and_(
+                    terminal.event_type == "execution_start_failed",  # type: ignore[arg-type]
+                    terminal.payload["reason_code"].as_string()
+                    == "retry_execution_start_never_completed",
+                    terminal.payload["pending_event_id"].as_string()
+                    == AuditLog.event_id,
+                ),
             ),
         )
         result = await self.db.execute(
@@ -706,6 +725,7 @@ class StuckExecutionPoller:
                         "verification_retry_recovered",
                         "verification_retry_failed",
                         "verification_retry_recovery_failed",
+                        "execution_start_failed",
                     ]
                 ),
             )
@@ -717,6 +737,12 @@ class StuckExecutionPoller:
                 "verification_retry_recovered",
                 "verification_retry_failed",
             }:
+                return True
+            if (
+                entry.event_type == "execution_start_failed"
+                and entry.payload.get("reason_code")
+                == "retry_execution_start_never_completed"
+            ):
                 return True
             if (
                 entry.event_type == "verification_retry_recovery_failed"
@@ -839,10 +865,20 @@ class StuckExecutionPoller:
                 )
                 continue
 
+            retry_marker = await self._verification_retry_marker(
+                task.id, task.execution_attempts
+            )
+            retry_detail: dict[str, Any] = {}
+            if retry_marker is not None:
+                retry_detail = {
+                    "pending_event_id": retry_marker.event_id,
+                    "attempt": task.execution_attempts,
+                }
             await self._mark_failed(
                 task,
                 execution,
                 "retry_execution_start_never_completed",
+                detail=retry_detail,
             )
             actions.append(
                 {
@@ -856,6 +892,23 @@ class StuckExecutionPoller:
             await self.db.commit()
 
         return actions
+
+    async def _verification_retry_marker(
+        self, task_id: str, attempt: int
+    ) -> AuditLog | None:
+        """Return the pending marker for a logical verification retry attempt."""
+        result = await self.db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                AuditLog.event_type == "verification_retry_pending",  # type: ignore[arg-type]
+            )
+            .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
+        )
+        for marker in result.scalars().all():
+            if marker.payload.get("attempt") == attempt:
+                return marker
+        return None
 
     async def _poll_running(self) -> list[dict[str, Any]]:
         """Block RUNNING tasks whose execution has genuinely timed out."""
@@ -1115,13 +1168,17 @@ class StuckExecutionPoller:
                     and task.state.value != pending_state
                 )
             elif operation == "terminal_failure_alert":
-                resolved = task.state in {
-                    TaskState.FAILED.value,
-                    TaskState.DONE.value,
-                    TaskState.BLOCKED.value,
-                }
+                # Terminal state is the condition that requires this alert; it
+                # is not evidence that the external human notification arrived.
+                resolved = False
             elif operation == "verification_failure_alert":
                 resolved = task.state != TaskState.FAILED.value
+            elif operation == "reconciliation_state_fix":
+                pending_state = marker.payload.get("state")
+                resolved = (
+                    pending_state is not None
+                    and task.state.value != pending_state
+                )
 
             if not resolved:
                 continue
@@ -1281,7 +1338,11 @@ class StuckExecutionPoller:
         )
 
     async def _mark_failed(
-        self, task: Task, execution: Execution, reason_code: str
+        self,
+        task: Task,
+        execution: Execution,
+        reason_code: str,
+        detail: dict[str, Any] | None = None,
     ) -> None:
         """Transition a READY/RUNNING execution and its task to FAILED."""
         success = await StateMachine.atomic_transition(self.db, task, TaskState.FAILED)
@@ -1292,6 +1353,13 @@ class StuckExecutionPoller:
         execution.ended_at = datetime.now(UTC)
         await self.db.flush()
 
+        payload: dict[str, Any] = {
+            "reason": "execution start never completed after READY transition",
+            "reason_code": reason_code,
+        }
+        if detail:
+            payload.update(detail)
+
         await AuditService.log(
             db=self.db,
             event_type="execution_start_failed",
@@ -1299,8 +1367,5 @@ class StuckExecutionPoller:
             actor="system:poller",
             source="stuck_execution_poller",
             execution_id=execution.id,
-            payload={
-                "reason": "execution start never completed after READY transition",
-                "reason_code": reason_code,
-            },
+            payload=payload,
         )

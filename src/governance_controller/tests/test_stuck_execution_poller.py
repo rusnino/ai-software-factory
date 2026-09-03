@@ -1456,8 +1456,159 @@ class TestCancellationConcurrency:
         assert len(completed) == 4
         assert len(task_ids) == len(set(task_ids))
 
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="deterministic lock interleave requires PostgreSQL",
+    )
+    async def test_batch_lock_interleave_does_not_duplicate_cancellations(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#323: committing one row must not invalidate a stale batch claim."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            for _ in range(5):
+                await _pending_cancel_task(seed)
+            await seed.commit()
+
+        first_commit_paused = asyncio.Event()
+        release_first_commit = asyncio.Event()
+        commit_paused = False
+        original_commit = AsyncSession.commit
+
+        async def _commit(session: AsyncSession) -> None:
+            nonlocal commit_paused
+            await original_commit(session)
+            if not commit_paused:
+                commit_paused = True
+                first_commit_paused.set()
+                await release_first_commit.wait()
+
+        monkeypatch.setattr(AsyncSession, "commit", _commit)
+
+        async def _poll() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                executor = AsyncMock(spec=MacroAgentExecutor)
+                executor.cancel.return_value = {}
+                return await StuckExecutionPoller(
+                    db, executor=executor, batch_size=5
+                )._poll_pending_cancellations()
+
+        first = asyncio.create_task(_poll())
+        await asyncio.wait_for(first_commit_paused.wait(), timeout=5)
+        second = asyncio.create_task(_poll())
+        second_actions = await asyncio.wait_for(second, timeout=5)
+        release_first_commit.set()
+        first_actions = await asyncio.wait_for(first, timeout=5)
+
+        completed = [
+            action
+            for action in first_actions + second_actions
+            if action["action"] == "execution_cancel_completed"
+        ]
+        task_ids = [action["task_id"] for action in completed]
+        assert len(completed) == 5
+        assert len(task_ids) == len(set(task_ids))
+
 
 class TestExecutionStartRecovery:
+    async def test_retry_start_terminal_resolution_is_not_reopened(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#321: retry-start failure is terminal for the matching retry marker."""
+        internal_id = str(uuid4())
+        task_id = f"task-retry-terminal-{internal_id[:8]}"
+        execution_id = f"execution-retry-terminal-{internal_id[:8]}"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id=f"proj-retry-terminal-{internal_id[:8]}",
+            proposed_by="agent-1",
+            objective="Keep a resolved retry terminal",
+            acceptance=["the retry is not reopened"],
+            execution={"timeout_minutes": 1, "max_retries": 1},
+        )
+        profile = ProjectProfile(
+            project_id=contract.project_id,
+            repository={"path": "/tmp/recovery-repo"},
+            execution={"allowed_harnesses": ["opencode"]},
+        )
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                proposed_by=contract.proposed_by,
+                state=TaskState.RUNNING,
+                execution_attempts=1,
+                latest_macro_agent_run_id=execution_id,
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        db_session.add(
+            ProjectProfileModel(
+                project_id=profile.project_id,
+                profile_json=profile.model_dump(mode="json"),
+            )
+        )
+        db_session.add(
+            Execution(
+                id=execution_id,
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                started_at=datetime.now(UTC) - timedelta(hours=2),
+                macro_agent_run_id=None,
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-retry-terminal-{internal_id[:8]}",
+                event_type="verification_retry_pending",
+                task_id=task_id,
+                actor="system",
+                source="verification_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                payload={
+                    "attempt": 1,
+                    "max_retries": 1,
+                    "verification_report": {"passed": False},
+                },
+            )
+        )
+        await db_session.commit()
+
+        first_actions = await StuckExecutionPoller(db_session).poll()
+        assert any(
+            action["action"] == "failed_retry_start" for action in first_actions
+        )
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "must-not-start"}
+        second_actions = await StuckExecutionPoller(
+            db_session, executor=executor
+        ).poll()
+
+        assert not any(
+            action["action"] == "verification_retry_recovered"
+            for action in second_actions
+        )
+        executor.start.assert_not_awaited()
+        execution_count = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task_id).with_only_columns(
+                Execution.id
+            )
+        )
+        assert execution_count == execution_id
+        failure = await db_session.scalar(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,
+                AuditLog.event_type == "execution_start_failed",
+            )
+        )
+        assert failure is not None
+        assert failure.payload["attempt"] == 1
+
     async def test_missing_profile_is_retryable_and_backs_off(
         self,
         db_session: AsyncSession,
@@ -1623,6 +1774,90 @@ class TestExecutionStartRecovery:
 
 
 class TestPlaneProjectionSweeper:
+    async def test_terminal_failure_alert_is_not_resolved_by_terminal_state(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#322: terminal state does not prove a human alert was delivered."""
+        internal_id = str(uuid4())
+        task_id = f"task-terminal-alert-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+            )
+        )
+        pending = AuditLog(
+            event_id=f"evt-terminal-alert-{internal_id[:8]}",
+            event_type="plane_projection_pending",
+            task_id=task_id,
+            actor="system",
+            source="verification_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+            payload={
+                "operation": "terminal_failure_alert",
+                "reason": "max_retries_exhausted",
+            },
+        )
+        db_session.add(pending)
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+
+        assert not any(
+            action.get("action") == "plane_projection_resolved"
+            for action in actions
+        )
+        audits = (
+            await db_session.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+        ).scalars().all()
+        assert not any(
+            audit.event_type == "plane_projection_completed"
+            and audit.payload.get("pending_event_id") == pending.event_id
+            for audit in audits
+        )
+
+    async def test_reconciliation_state_fix_marker_is_swept_when_state_moves_on(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#325: reconciliation markers use the same stale-state rule."""
+        internal_id = str(uuid4())
+        task_id = f"task-reconciliation-sweep-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.DONE,
+            )
+        )
+        pending = AuditLog(
+            event_id=f"evt-reconciliation-sweep-{internal_id[:8]}",
+            event_type="plane_projection_pending",
+            task_id=task_id,
+            actor="system",
+            source="reconciliation_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+            payload={
+                "operation": "reconciliation_state_fix",
+                "state": TaskState.EXEC_APPROVED.value,
+            },
+        )
+        db_session.add(pending)
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+
+        assert any(
+            action.get("action") == "plane_projection_resolved"
+            and action.get("pending_event_id") == pending.event_id
+            for action in actions
+        )
     async def test_sweeper_resolves_orphaned_plane_projection_pending(
         self,
         db_session: AsyncSession,
