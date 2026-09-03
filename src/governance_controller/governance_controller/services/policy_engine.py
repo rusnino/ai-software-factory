@@ -16,14 +16,16 @@ validates every ``Check.command`` before approval. The checks below are applied 
    because their payloads bypass token-level policy checks.
 4. Require an explicit allowlist match for ``argv[0]``. Only a small set of
    common verification binaries is permitted.
-5. Reject common destructive file-system operations inside the resolved argv:
-   ``rm`` with recursive and force flags, ``rm --no-preserve-root``,
-   ``dd if=... of=...`` with device-ish targets, ``mkfs.*``,
-   ``find -delete``/``-exec``/``-ok``, ``tar --to-command``/``--remove-files``,
-   and ``git clean -f``/``-x``/``-d``.
-6. Reject command-execution primitives on allowlisted binaries: ``git -c``
-   overrides for dangerous config keys (``core.sshCommand``,
-   ``core.fsmonitor``, ``core.editor``, ``credential.helper``, etc.) and
+ 5. Reject common destructive file-system operations inside the resolved argv:
+    ``rm`` with recursive and force flags, ``rm --no-preserve-root``,
+    ``dd if=... of=...`` with device-ish targets, ``mkfs.*``,
+    ``find -delete``/``-exec``/``-ok``/``-fprintf``,
+    ``tar --to-command``/``--remove-files``/``--absolute-names``/
+    ``--transform``/``--xform``, and ``git clean -f``/``-x``/``-d``.
+ 6. Reject command-execution primitives on allowlisted binaries: ``git -c``
+    overrides and persistent ``git config`` for dangerous config keys
+    (``core.sshCommand``, ``core.fsmonitor``, ``core.editor``,
+    ``credential.helper``, etc.) and
    ``sed`` ``s///e``/``<addr>e`` both run arbitrary shell commands.
 7. Reject container isolation escape flags (``--privileged``,
    ``--network=host``, ``--volume``, ``--mount``, etc.) as defense-in-depth in
@@ -301,9 +303,10 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Dangerous tar flags that execute arbitrary commands or delete files.
-# #140: these options invoke shell commands or remove files outside the
-# verification process's auditable argv subset.
+# Dangerous tar flags that execute arbitrary commands, delete files, or rewrite
+# extracted paths outside the worktree.
+# #140/#310: these options invoke shell commands, remove files, preserve
+# leading absolute paths, or apply filename transformations during extraction.
 _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
     {
         # Use the shortest unambiguous GNU long-option prefixes so getopt
@@ -316,11 +319,15 @@ _FORBIDDEN_TAR_FLAGS: frozenset[str] = frozenset(
         "--rmt",
         "--rsh",
         "--remove",
+        "--absolute-names",
+        "--transform",
+        "--xform",
     }
 )
 
-# Dangerous find predicates and actions. #135: -delete silently removes files;
-# -exec and -ok can run arbitrary commands.
+# Dangerous find predicates and actions. #135/#310: -delete silently removes
+# files; -exec/-ok run arbitrary commands; -fprintf writes arbitrary content to
+# a file chosen by the command.
 _FORBIDDEN_FIND_ACTIONS: frozenset[str] = frozenset(
     {
         "-delete",
@@ -331,6 +338,7 @@ _FORBIDDEN_FIND_ACTIONS: frozenset[str] = frozenset(
         "-fls",
         "-fprint",
         "-fprint0",
+        "-fprintf",
     }
 )
 
@@ -470,7 +478,7 @@ def _is_container_escape_flag(argv: list[str]) -> bool:
 
 
 def _has_git_dangerous_config(argv: list[str]) -> bool:
-    """Return True if a git -c override sets a dangerous config key."""
+    """Return True if git sets a dangerous config key via -c or git config."""
     if _base_command(argv[0]) != "git":
         return False
     i = 1
@@ -489,22 +497,52 @@ def _has_git_dangerous_config(argv: list[str]) -> bool:
             key, _, _ = config.partition("=")
             if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
                 return True
+            i += 1
+            continue
+        if token == "config":
+            # #309: persistent ``git config [<options>] <key> <value>`` sets the
+            # key just like a ``git -c`` override. Skip option tokens and any
+            # argument-taking options (--file/-f, --blob) before looking at
+            # the key argument.
+            j = i + 1
+            while j < len(argv):
+                opt = argv[j]
+                if opt in ("--file", "--blob"):
+                    j += 2
+                    continue
+                if opt.startswith("--file=") or opt.startswith("--blob="):
+                    j += 1
+                    continue
+                if opt.startswith("-f"):
+                    # -f <path>, -f<path>, or -f=<path> all consume the argument.
+                    j += 1 if opt != "-f" else 2
+                    continue
+                if opt.startswith("-"):
+                    j += 1
+                    continue
+                break
+            if j < len(argv):
+                key, _, _ = argv[j].partition("=")
+                if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+                    return True
+            # No further interesting subcommands after ``git config``.
+            return False
         i += 1
     return False
 
 
 def _has_tar_dangerous_flag(argv: list[str]) -> bool:
-    """Return True if tar uses an extraction hook or destructive flag."""
+    """Return True if tar uses a destructive or path-rewriting flag."""
     if _base_command(argv[0]) != "tar":
         return False
     for token in argv[1:]:
         for flag in _FORBIDDEN_TAR_FLAGS:
             if token.lower().split("=", 1)[0].startswith(flag):
                 return True
-        # GNU tar's short aliases for --info-script and
-        # --use-compress-program are -F and -I, including attached values.
+        # GNU tar's short aliases for --info-script, --use-compress-program,
+        # and --absolute-names are -F, -I, and -P, including attached values.
         if token.startswith("-") and not token.startswith("--") and any(
-            option in token[1:] for option in ("F", "I")
+            option in token[1:] for option in ("F", "I", "P")
         ):
             return True
     return False

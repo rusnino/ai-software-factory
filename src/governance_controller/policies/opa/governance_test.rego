@@ -529,3 +529,65 @@ test_missing_completeness_fact_is_denied if {
     some violation in decision.violations
     contains(lower(violation), "objective")
 }
+
+test_git_config_subcommand_forms_are_denied if {
+    keys := [
+        "core.sshCommand",
+        "core.editor",
+        "core.pager",
+        "core.fsmonitor",
+        "credential.helper",
+        "include.path",
+    ]
+    templates := [
+        "git config %s touch",
+        "git config --global %s touch",
+    ]
+    every key in keys {
+        every template in templates {
+            command := sprintf(template, [key])
+            decision := data.governance.approve with input as object.union(
+                _base_input,
+                {"commands": [command]},
+            )
+            decision.allow == false
+            some violation in decision.violations
+            contains(lower(violation), "git config")
+        }
+    }
+}
+
+test_git_config_subcommand_injection_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["git config --global core.editor \"touch /tmp/pwned; true #\""]},
+    )
+
+    decision.allow == false
+}
+
+test_tar_absolute_names_and_transform_are_denied if {
+    every command in [
+        "tar -xPf a.tar",
+        "tar -x --absolute-names -f a.tar",
+        "tar -x --transform=s,x,y, -f a.tar",
+        "tar -x --xform=s,x,y, -f a.tar",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+        decision.allow == false
+    }
+}
+
+test_find_fprintf_is_denied if {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": ["find / -maxdepth 1 -fprintf out.txt fmt"]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "dangerous")
+}

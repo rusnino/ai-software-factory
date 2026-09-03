@@ -858,6 +858,114 @@ class TestPolicyEngineCommandExecutionPrimitives:
         assert any("command-execution primitive" in v for v in result.violations)
 
     @pytest.mark.parametrize(
+        "key",
+        [
+            "core.sshCommand",
+            "core.editor",
+            "core.pager",
+            "core.fsmonitor",
+            "credential.helper",
+            "include.path",
+        ],
+    )
+    def test_git_config_subcommand_sets_dangerous_keys(self, key: str) -> None:
+        # #309: persistent `git config <key> <value>` must be blocked like -c.
+        for command in (
+            f"git config {key} touch",
+            f"git config --global {key} touch",
+        ):
+            contract = _make_contract(
+                completion_contract=CompletionContract(
+                    task_id="task-1",
+                    required=[Check(type="git", command=command)],
+                    scope_check=ScopeCheck(description="git config bypass"),
+                )
+            )
+            profile = _make_profile()
+
+            result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+            assert result.allowed is False
+            assert any(
+                "git config" in v.lower() or "command-execution primitive" in v
+                for v in result.violations
+            )
+
+    def test_git_config_subcommand_with_injection_is_rejected(self) -> None:
+        # #309: a dangerous key combined with shell metacharacters must still be
+        # rejected by policy.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="git",
+                        command=(
+                            'git config --global core.editor'
+                            ' "touch /tmp/pwned; true #"'
+                        ),
+                    )
+                ],
+                scope_check=ScopeCheck(description="git config injection"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "tar -xPf a.tar",
+            "tar -x --absolute-names -f a.tar",
+            "tar -x --transform=s,x,y, -f a.tar",
+            "tar -x --xform=s,x,y, -f a.tar",
+        ],
+    )
+    def test_tar_absolute_names_and_transform_are_rejected(self, command: str) -> None:
+        # #310: tar -P/--absolute-names and --transform/--xform can redirect
+        # extraction outside the worktree.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="tar", command=command)],
+                scope_check=ScopeCheck(description="tar transform bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any(
+            "destructive shell operation" in v or "command-execution primitive" in v
+            for v in result.violations
+        )
+
+    def test_find_fprintf_is_rejected(self) -> None:
+        # #310: find -fprintf is an arbitrary file-write primitive.
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[
+                    Check(
+                        type="find",
+                        command="find / -maxdepth 1 -fprintf out.txt fmt",
+                    )
+                ],
+                scope_check=ScopeCheck(description="find fprintf bypass"),
+            )
+        )
+        profile = _make_profile()
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("destructive shell operation" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
         ("command", "allowed"),
         [
             ("sed -e 's/foo/bar/g' file.txt", True),
@@ -875,8 +983,8 @@ class TestPolicyEngineCommandExecutionPrimitives:
              ("rm --recursive /tmp/work", True),
              ("rm -R -F /tmp/work", False),
              ("rm -r -f /tmp/work", False),
-              ("git -C /tmp/repo clean -fdx", False),
-              ("git -C /tmp/repo clean -FDX", False),
+               ("git -C /tmp/repo clean -fdx", False),
+               ("git -C /tmp/repo clean -FDX", False),
              ("tar --checkpoint-action=exec=touch -xf archive.tar", False),
              ("tar --checkpoint-a=exec=touch -xf archive.tar", False),
              ("tar -xIcat archive.tar", False),

@@ -242,7 +242,7 @@ _destructive_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "find"
     some arg in argv
-    lower(arg) in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0"}
+    lower(arg) in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"}
     msg := sprintf("Dangerous find action in command: %s", [cmd])
 }
 
@@ -299,6 +299,28 @@ _git_config_violation contains msg if {
         "include.path",
     }
     msg := sprintf("Dangerous git config override in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index
+    arg := argv[index]
+    index >= 1
+    arg == "config"
+    key := _git_config_subcommand_key(argv, index)
+    key != ""
+    lower(key) in {
+        "core.sshcommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    }
+    msg := sprintf("Dangerous git config subcommand in command: %s", [cmd])
 }
 
 # ---------------------------------------------------------------------------
@@ -487,6 +509,9 @@ _tar_dangerous_flags := {
     "--rmt",
     "--rsh",
     "--remove",
+    "--absolute-names",
+    "--transform",
+    "--xform",
 }
 
 _tar_short_dangerous_flag(arg) if {
@@ -499,6 +524,12 @@ _tar_short_dangerous_flag(arg) if {
     startswith(arg, "-")
     not startswith(arg, "--")
     contains(arg, "I")
+}
+
+_tar_short_dangerous_flag(arg) if {
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(arg, "P")
 }
 
 _git_clean_dangerous_flag(arg) if {
@@ -556,6 +587,32 @@ _git_config_key(argv, index) := key if {
     config := substring(arg, 2, -1)
     parts := split(config, "=")
     key := parts[0]
+}
+
+# #309: git config [<options>] <key> <value> persists a config key. Locate the
+# first non-option token after "config", treating --file/-f/--blob and their
+# arguments as option tokens.
+_git_config_subcommand_key(argv, config_index) := key if {
+    candidates := [i |
+        some i, arg in argv
+        i > config_index
+        not startswith(arg, "-")
+        not _git_config_option_argument(argv, config_index, i)
+    ]
+    count(candidates) > 0
+    key := _git_config_key_name(argv[candidates[0]])
+}
+
+_git_config_key_name(token) := key if {
+    parts := split(token, "=")
+    key := parts[0]
+}
+
+_git_config_option_argument(argv, config_index, i) if {
+    some j
+    j > config_index
+    j < i
+    argv[j] in {"--file", "-f", "--blob"}
 }
 
 _base_command(token) := base if {
