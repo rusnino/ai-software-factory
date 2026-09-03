@@ -8,18 +8,20 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from typer.testing import CliRunner
 
 from governance_controller.cli import app, reconcile
 from governance_controller.constants import TaskState
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
+from governance_controller.services.audit_service import AuditService
 
 
 @pytest.fixture
@@ -212,6 +214,120 @@ class TestCliApprove:
             )
 
         assert result.exit_code == 1
+
+    def test_approve_with_idempotency_key_is_idempotent(
+        self, tmp_path
+    ) -> None:
+        """#316: retrying gc approve with the same --idempotency-key is safe."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        db_path = tmp_path / "live_cli_idempotency.db"
+        secret = "live-cli-secret-idempotency"
+        base_url = f"http://127.0.0.1:{port}"
+        server_env = {
+            **os.environ,
+            "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+            "GC_CONTROLLER_API_SECRET": secret,
+        }
+
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "governance_controller.main:app",
+                "--port",
+                str(port),
+            ],
+            env=server_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            ready = False
+            while time.monotonic() < deadline:
+                if server.poll() is not None:
+                    pytest.fail(
+                        "Controller server exited early:\n"
+                        + (server.stdout.read() if server.stdout else "")
+                    )
+                try:
+                    resp = httpx.get(f"{base_url}/health", timeout=0.5)
+                    if resp.status_code == 200:
+                        ready = True
+                        break
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.2)
+            if not ready:
+                pytest.fail("Controller server did not become ready in time")
+
+            task_id = "live-cli-idempotency-316"
+            create_payload = {
+                "task_contract": {
+                    "task_id": task_id,
+                    "project_id": "live-cli-proj-316",
+                    "proposed_by": "agent-1",
+                    "objective": "Live CLI idempotency test for #316",
+                    "acceptance": ["CLI approve is idempotent with --idempotency-key"],
+                },
+                "project_profile": {
+                    "project_id": "live-cli-proj-316",
+                    "project_name": "Live CLI Project",
+                    "repository": {"path": "/tmp/repo"},
+                },
+            }
+            create_resp = httpx.post(
+                f"{base_url}/tasks",
+                json=create_payload,
+                headers={"X-Controller-Secret": secret},
+                timeout=5,
+            )
+            assert create_resp.status_code == 201, create_resp.text
+
+            idempotency_key = "idempotency-key-316"
+            cli_env = {**os.environ, "GC_CONTROLLER_API_SECRET": secret}
+            for _ in range(2):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "governance_controller.cli",
+                        "approve",
+                        task_id,
+                        "--type",
+                        "plan",
+                        "--base-url",
+                        base_url,
+                        "--idempotency-key",
+                        idempotency_key,
+                    ],
+                    env=cli_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert f"Approved {task_id}: PLAN_APPROVED" in result.stdout
+
+            get_resp = httpx.get(
+                f"{base_url}/tasks/{task_id}",
+                headers={"X-Controller-Secret": secret},
+                timeout=5,
+            )
+            assert get_resp.status_code == 200
+            assert get_resp.json()["state"] == "PLAN_APPROVED"
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
 
 
 class TestCliReconcile:
@@ -487,6 +603,126 @@ class TestCliReconcile:
             ("task-a", TaskState.PROPOSED, "project-a", None)
         ]
         assert all(t[2] == "project-a" for t in controller_tasks)
+
+
+class TestCliVerifyAudit:
+    async def test_verify_audit_reports_valid_chain(
+        self,
+        patched_db,
+        runner: CliRunner,
+    ) -> None:
+        """#315: gc verify-audit confirms a clean hash chain."""
+        _engine, local_session = patched_db
+
+        async with local_session() as seed:
+            for i in range(3):
+                await AuditService.log(
+                    db=seed,
+                    event_type="test_event",
+                    task_id="verify-chain-ok",
+                    actor="tester",
+                    source="test",
+                    payload={"index": i},
+                )
+            await seed.commit()
+
+        result = await asyncio.to_thread(runner.invoke, app, ["verify-audit"])
+        assert result.exit_code == 0, result.output
+        assert "verified" in result.output
+        assert "broken" not in result.output
+
+    async def test_verify_audit_detects_tampered_row(
+        self,
+        patched_db,
+        runner: CliRunner,
+    ) -> None:
+        """#315: gc verify-audit reports the first row whose hash no longer matches."""
+        _engine, local_session = patched_db
+        row_ids: list[int] = []
+
+        async with local_session() as seed:
+            for i in range(3):
+                entry = await AuditService.log(
+                    db=seed,
+                    event_type="test_event",
+                    task_id="verify-chain-bad",
+                    actor="tester",
+                    source="test",
+                    payload={"index": i},
+                )
+                row_ids.append(entry.id)
+            await seed.commit()
+
+        async with local_session() as conn:
+            # Bypass ORM events and DB triggers to simulate a forensic tamper.
+            dialect = conn.bind.dialect.name if conn.bind else "sqlite"  # type: ignore[union-attr]
+            if dialect == "postgresql":
+                await conn.execute(
+                    text(
+                        "DROP TRIGGER IF EXISTS auditlog_block_update_delete "
+                        "ON auditlog"
+                    )
+                )
+            else:
+                await conn.execute(
+                    text("DROP TRIGGER IF EXISTS auditlog_block_update")
+                )
+                await conn.execute(
+                    text("DROP TRIGGER IF EXISTS auditlog_block_delete")
+                )
+            await conn.execute(
+                text(
+                    "UPDATE auditlog SET payload = '{\"index\": 99}' WHERE id = :id"
+                ),
+                {"id": row_ids[1]},
+            )
+            await conn.commit()
+
+        result = await asyncio.to_thread(runner.invoke, app, ["verify-audit"])
+        assert result.exit_code == 1, result.output
+        assert f"broken at AuditLog id={row_ids[1]}" in result.output
+
+    async def test_verify_audit_marks_legacy_boundary(
+        self,
+        patched_db,
+        runner: CliRunner,
+    ) -> None:
+        """#315: legacy rows with empty hashes are flagged, not treated as breaks."""
+        _engine, local_session = patched_db
+        boundary_id: int | None = None
+
+        async with local_session() as seed:
+            # Simulate pre-hash-schema rows by inserting directly, bypassing the
+            # ORM before_insert event that computes row_hash.
+            boundary_result = await seed.execute(
+                text(
+                    "INSERT INTO auditlog "
+                    "(event_id, event_type, task_id, actor, source, "
+                    "timestamp, payload, previous_hash, row_hash) "
+                    "VALUES (:eid, 'legacy', 'legacy-task', 'system', 'test', "
+                    ":ts, '{}', '', '') RETURNING id"
+                ),
+                {
+                    "eid": "legacy-event-1",
+                    "ts": datetime.now(UTC),
+                },
+            )
+            boundary_id = boundary_result.scalar_one()
+
+            await AuditService.log(
+                db=seed,
+                event_type="hashed_event",
+                task_id="legacy-task",
+                actor="system",
+                source="test",
+                payload={"ok": True},
+            )
+            await seed.commit()
+
+        result = await asyncio.to_thread(runner.invoke, app, ["verify-audit"])
+        assert result.exit_code == 0, result.output
+        assert "verified" in result.output
+        assert f"Legacy boundary at AuditLog id={boundary_id}" in result.output
 
 
 async def test_reconcile_plane_id_survives_later_rollback(

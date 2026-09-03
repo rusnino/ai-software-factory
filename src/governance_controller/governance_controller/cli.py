@@ -10,6 +10,7 @@ from sqlalchemy import select
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
 from governance_controller.db import dispose_engines_sync, get_db_session
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.task import Task
 from governance_controller.schemas.approval import ApprovalRequest
 from governance_controller.services.audit_service import AuditService
@@ -53,6 +54,11 @@ def approve(
         envvar="GC_CONTROLLER_API_SECRET",
         help="X-Controller-Secret value for authenticated endpoints.",
     ),
+    idempotency_key: str | None = typer.Option(
+        None,
+        "--idempotency-key",
+        help="Optional Idempotency-Key header value for safe retries.",
+    ),
 ) -> None:
     """Approve a task via the Controller's authoritative approvals endpoint."""
     payload = ApprovalRequest(
@@ -65,6 +71,8 @@ def approve(
     )
 
     headers = {"X-Controller-Secret": secret}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     try:
         response = httpx.post(
             f"{base_url}/approvals",
@@ -81,6 +89,82 @@ def approve(
 
     body = response.json()
     typer.echo(f"Approved {task_id}: {body['state']}")
+
+
+def _verify_audit_chain(rows: list[AuditLog]) -> tuple[int, str]:
+    """Walk the AuditLog hash chain and return (exit_code, message)."""
+    if not rows:
+        return 0, "No audit log rows to verify."
+
+    legacy_boundary_id: int | None = None
+    previous_row_hash = ""
+
+    for index, row in enumerate(rows):
+        if row.row_hash == "" or row.row_hash is None:
+            # Unverifiable legacy row (pre-hash schema). Mark the boundary at
+            # the last such row before the first verifiable entry.
+            legacy_boundary_id = row.id
+            continue
+
+        if previous_row_hash == "" and index > 0:
+            # First verifiable row after a legacy prefix: the previous row is
+            # the explicit boundary.
+            legacy_boundary_id = rows[index - 1].id
+
+        if row.previous_hash != previous_row_hash:
+            return (
+                1,
+                f"Audit hash chain broken at AuditLog id={row.id} "
+                "(previous_hash does not match prior row_hash).",
+            )
+
+        computed = row.compute_hash()
+        if computed != row.row_hash:
+            return (
+                1,
+                f"Audit hash chain broken at AuditLog id={row.id} "
+                "(row_hash does not match computed hash).",
+            )
+
+        previous_row_hash = row.row_hash
+
+    parts = ["Audit hash chain verified."]
+    if legacy_boundary_id is not None:
+        parts.append(
+            f"Legacy boundary at AuditLog id={legacy_boundary_id}; "
+            "rows at or before this point are unverifiable."
+        )
+    return 0, " ".join(parts)
+
+
+@app.command()
+def verify_audit() -> None:
+    """Walk the AuditLog hash chain and report the first mismatch.
+
+    Legacy rows that predate the hash-chain columns are reported as an
+    explicit unverifiable boundary rather than a chain break.
+    """
+
+    async def _run() -> int:
+        async with get_db_session() as db:
+            result = await db.execute(
+                select(AuditLog).order_by(AuditLog.id)
+            )
+            rows = list(result.scalars().all())
+            exit_code, message = _verify_audit_chain(rows)
+            typer.echo(message)
+            return exit_code
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        exit_code = loop.run_until_complete(_run())
+    finally:
+        dispose_engines_sync(loop)
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+    raise typer.Exit(code=exit_code)
 
 
 @app.command()
