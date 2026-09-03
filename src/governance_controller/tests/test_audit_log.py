@@ -4,7 +4,7 @@ import asyncio
 import os
 from typing import Any
 from unittest.mock import patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import event, select
@@ -721,6 +721,228 @@ class TestAuditLogPostgresDDL:
                 assert executor.cancel.await_count == 2
         finally:
             await verify_engine.dispose()
+
+    async def test_postgres_migration_orders_tip_lock_before_auditlog_ddl(
+        self,
+    ) -> None:
+        """#308 round 2: first migration cannot cycle with an AuditLog writer."""
+        import asyncio
+
+        from sqlalchemy import text
+
+        from governance_controller.db import _engines_by_loop, run_migrations
+        from governance_controller.db import engine as db_engine
+        from governance_controller.models.audit_log import _AUDITLOG_TIP_LOCK_KEY
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        setup_engine = create_async_engine(url, echo=False, future=True)
+        try:
+            async with setup_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.drop_all)
+                await conn.run_sync(SQLModel.metadata.create_all)
+                await conn.execute(
+                    text(
+                        "DROP TRIGGER IF EXISTS auditlog_block_update_delete "
+                        "ON auditlog"
+                    )
+                )
+                await conn.execute(
+                    text("ALTER TABLE auditlog DROP COLUMN previous_hash")
+                )
+                await conn.execute(text("ALTER TABLE auditlog DROP COLUMN row_hash"))
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO auditlog "
+                        "(event_id, event_type, task_id, execution_id, actor, "
+                        "source, timestamp, payload) VALUES "
+                        "('evt-lock-order-malformed', 'execution_cancel_pending', "
+                        "'task-lock-order-malformed', NULL, 'system', 'legacy', "
+                        "NOW(), '{}')"
+                    )
+                )
+        finally:
+            await setup_engine.dispose()
+
+        suffix = uuid4().hex[:8]
+        migration_application = f"gc308-migration-{suffix}"
+        writer_application = f"gc308-writer-{suffix}"
+        migration_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+            connect_args={
+                "server_settings": {"application_name": migration_application}
+            },
+        )
+        writer_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+            connect_args={"server_settings": {"application_name": writer_application}},
+        )
+        observer_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        migration_ddl_acquired = asyncio.Event()
+        writer_ready = asyncio.Event()
+        writer_action = asyncio.Event()
+        writer_mode = "release_then_insert"
+        writer_task: asyncio.Task[None] | None = None
+        migration_task: asyncio.Task[None] | None = None
+        ddl_wait_task: asyncio.Task[bool] | None = None
+        advisory_wait_task: asyncio.Task[None] | None = None
+
+        def _capture_migration_ddl(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            if statement.lower().lstrip().startswith(
+                "alter table auditlog add column"
+            ):
+                migration_ddl_acquired.set()
+
+        async def _writer() -> None:
+            async with AsyncSession(writer_engine, expire_on_commit=False) as session:
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": _AUDITLOG_TIP_LOCK_KEY},
+                )
+                writer_ready.set()
+                await writer_action.wait()
+                if writer_mode == "insert_while_holding_lock":
+                    await AuditService.log(
+                        db=session,
+                        event_type="concurrent_writer",
+                        task_id="task-concurrent-writer",
+                        actor="system",
+                        source="test",
+                    )
+                else:
+                    await session.commit()
+                    await migration_ddl_acquired.wait()
+                    await AuditService.log(
+                        db=session,
+                        event_type="concurrent_writer",
+                        task_id="task-concurrent-writer",
+                        actor="system",
+                        source="test",
+                    )
+                await session.commit()
+
+        async def _wait_for_migration_advisory_wait() -> None:
+            async with observer_engine.connect() as observer:
+                while True:
+                    waiting = await observer.scalar(
+                        text(
+                            """
+                            SELECT EXISTS (
+                                SELECT 1
+                                FROM pg_locks AS l
+                                JOIN pg_stat_activity AS a ON a.pid = l.pid
+                                WHERE a.application_name = :application_name
+                                  AND l.locktype = 'advisory'
+                                  AND NOT l.granted
+                            )
+                            """
+                        ),
+                        {"application_name": migration_application},
+                    )
+                    if waiting:
+                        return
+                    await asyncio.sleep(0.01)
+
+        original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
+        db_module = __import__("governance_controller.db", fromlist=["engine"])
+        event.listen(
+            migration_engine.sync_engine,
+            "after_cursor_execute",
+            _capture_migration_ddl,
+        )
+        try:
+            db_module.engine = migration_engine
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
+            writer_task = asyncio.create_task(_writer())
+            await asyncio.wait_for(writer_ready.wait(), timeout=5)
+            migration_task = asyncio.create_task(run_migrations())
+            ddl_wait_task = asyncio.create_task(migration_ddl_acquired.wait())
+            advisory_wait_task = asyncio.create_task(
+                _wait_for_migration_advisory_wait()
+            )
+            done, pending = await asyncio.wait(
+                {ddl_wait_task, advisory_wait_task},
+                timeout=5,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                raise AssertionError(
+                    "migration did not reach DDL or advisory-lock wait"
+                )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+            if migration_ddl_acquired.is_set():
+                # The current implementation holds auditlog's DDL lock before
+                # waiting on the writer's advisory lock. Make the writer enter
+                # its before_insert path now, which closes the lock cycle.
+                writer_mode = "insert_while_holding_lock"
+            writer_action.set()
+            await asyncio.wait_for(
+                asyncio.gather(migration_task, writer_task), timeout=5
+            )
+            assert writer_mode == "release_then_insert"
+
+            async with observer_engine.connect() as observer:
+                writer_count = await observer.scalar(
+                    text(
+                        "SELECT count(*) FROM auditlog "
+                        "WHERE event_type = 'concurrent_writer'"
+                    )
+                )
+                assert writer_count == 1
+        finally:
+            for task in (
+                ddl_wait_task,
+                advisory_wait_task,
+                migration_task,
+                writer_task,
+            ):
+                if task is not None and not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                *(
+                    task
+                    for task in (
+                        ddl_wait_task,
+                        advisory_wait_task,
+                        migration_task,
+                        writer_task,
+                    )
+                    if task is not None
+                ),
+                return_exceptions=True,
+            )
+            event.remove(
+                migration_engine.sync_engine,
+                "after_cursor_execute",
+                _capture_migration_ddl,
+            )
+            db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
+            await observer_engine.dispose()
+            await writer_engine.dispose()
+            await migration_engine.dispose()
 
     async def test_postgres_trigger_blocks_update_and_delete(
         self, isolated_db: tuple[AsyncEngine, sessionmaker]

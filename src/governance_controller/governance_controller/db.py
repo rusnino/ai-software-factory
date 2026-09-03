@@ -168,6 +168,14 @@ async def run_migrations() -> None:
     # Force the AuditLog model to be imported so its table name is known.
     _get_audit_log_table()
     async with get_engine().begin() as conn:
+        dialect_name = conn.dialect.name
+        if dialect_name == "postgresql":
+            from governance_controller.models.audit_log import _AUDITLOG_TIP_LOCK_KEY
+
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _AUDITLOG_TIP_LOCK_KEY},
+            )
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
@@ -184,7 +192,6 @@ async def run_migrations() -> None:
             lambda sync_conn: inspect(sync_conn).get_columns("auditlog")
         )
         column_names = {c["name"] for c in columns}
-        dialect_name = conn.dialect.name
 
         new_columns: list[tuple[str, str]] = []
         if "previous_hash" not in column_names:
@@ -368,15 +375,8 @@ async def run_migrations() -> None:
                 .all()
             )
             if unrecoverable:
-                from governance_controller.models.audit_log import (
-                    _AUDITLOG_TIP_LOCK_KEY,
-                    AuditLog,
-                )
+                from governance_controller.models.audit_log import AuditLog
 
-                await conn.execute(
-                    text("SELECT pg_advisory_xact_lock(:key)"),
-                    {"key": _AUDITLOG_TIP_LOCK_KEY},
-                )
                 previous_hash = (
                     await conn.execute(
                         text(
