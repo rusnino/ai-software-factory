@@ -56,12 +56,11 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-02): Controller-side hardening is implemented and freshly verified, but Phase 2
-is NOT gate-clean because HIGH issue `#301` remains open. MEDIUM issue `#297` and LOW issue `#298`
-also remain open; LOW issue `#308` remains open for cancellation-history scan cost. Working-tree
-fixes for `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and `#302`-`#307` require push/issue-status
-confirmation.**
-Sixteen review rounds have run. Rounds 1-4
+**Status (2026-09-03): Phase 2 is NOT gate-clean. Round 17 closed 5 of 6 `phase-2` issues for
+real (`#256`, `#297`, `#298`, `#299`, `#300`) but reopened the 6th (`#308` — its fix commit never
+changed the code) and found 8 new issues, including `#309` (CRITICAL, live RCE via a git-config
+policy bypass) and `#311` (HIGH, an unbounded recovery-retry loop) — both `phase-2`-labeled and
+open.** Seventeen review rounds have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —
@@ -107,12 +106,42 @@ Plane was never told), and `#299` (LOW — the OPA Rego policy had drifted behin
 across 16 rounds, though the embedded-engine-authoritative guarantee itself was live-proven to hold:
 a real OPA server allowed `sudo whoami`, the full backend correctly denied it without even consulting
 OPA).** By this project's own tracked severity bar (zero open
-`severity:critical`/`severity:high`), Phase 2 was described as gate-clean at that historical
-checkpoint — but the `#283`→`#297`
-pattern (a fix introducing a new, differently-shaped regression, now recurring a THIRD time within
-one fix's own aftermath) means the next round should keep adversarially reviewing every fix, not
-treat this milestone as license to relax. This project's own history means this status line should
-never be trusted without re-running `gh issue list --label phase-2 --state open` first.
+`severity:critical`/`severity:high`), Phase 2 genuinely reached gate-clean at that historical
+checkpoint — a real milestone, surviving independent re-verification for the first time.
+
+**Round 17 broke it again within one round.** opencode closed all 6 `phase-2` issues open after
+Round 16 (`#256`, `#297`-`#300`, `#308`) across 15 pushed commits. The reviewer ran 10 parallel
+live-verification agents — one per closed issue/commit cluster, plus a dedicated `RISK-16`/`RISK-19`
+sweep of the whole batch, a full real end-to-end pipeline run, and an unexplored-corners pass
+(multi-tenancy, audit-hash-chain tooling, secret rotation, macro-agent-service). **Result: 5 of 6
+genuinely fixed** (`#256`, `#297`, `#298`, `#299`, `#300` — independently reproduced; the intake
+sender-quota race went from reproducing 40/40 on pre-fix code to 0/40 post-fix). **`#308` is NOT
+fixed and was reopened**: its commit (`70f4b92`) added only a test — the query it claims to bound
+is byte-identical before and after, and a live `EXPLAIN (ANALYZE, BUFFERS)` at 40k-400k audit rows
+shows execution time scaling ~linearly (54ms→760ms), invisible to the existing 53-row test. The
+fresh-angle work found 8 new issues: `#309` (**CRITICAL** — `git config <key> <value>`, the plain
+subcommand form as opposed to `-c`/`--config`, bypasses the dangerous-git-config-key check on both
+policy backends; live RCE proven via `git config core.editor "touch ...; true #"` +
+`git commit --amend --allow-empty`, each individually policy-approved), `#311` (**HIGH** — the new
+execution-start recovery poller has no backoff or retryable classification, live-reproduced retrying
+a permanently-failing recovery on every single poll pass forever), `#310`/`#312` (MEDIUM: more
+tar/find flag gaps in the same policy-parser family as `#134`/`#140`/`#141`/`#309`; authenticated
+intake fully bypasses the global rate limiter via attacker-controlled `sender`/`source_id`
+rotation), and `#313`-`#316` (LOW: three latent, non-corrupting hardening gaps in the new recovery
+poller; orphaned Plane-projection markers with no dedicated recovery mechanism; no operational tool
+to verify the audit hash chain; assorted operational polish). The fresh-angle pass additionally
+caught and corrected `docs/NEXT_STEPS.md`'s prior false claim that `#134` was fixed — a fresh
+full-stack live reproduction (`tar --directory=<forbidden> -xf payload.tar`, passing both policy
+backends and writing into the declared-forbidden directory) confirms it is not — while independently
+re-verifying and closing its two true siblings, `#140`/`#141`.
+
+**Phase 2 is not gate-clean: `#309` (CRITICAL) and `#311` (HIGH) are open under `phase-2`.** The
+`#280`→`#283`→`#297` "fix introduces a new, differently-shaped regression" pattern has now also
+manifested in the policy-parser family (`#134`→`#140`/`#141`→`#309`/`#310`, the "enumerate the safe
+flag forms, miss one" shape recurring a fourth time) and, in `#308`'s case, as a "regression test
+commit that isn't actually a fix" — the sharpest instance yet of this project's standing lesson that
+a closed issue and a green test are not proof. This project's own history means this status line
+should never be trusted without re-running `gh issue list --label phase-2 --state open` first.
 
 - [x] Deploy Plane CE. *(local dev instance running; real deployment story not yet exercised)*
 - [x] Build Plane adapter for bidirectional sync. *(read side works; projection write side wired

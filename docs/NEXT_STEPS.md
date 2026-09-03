@@ -2,16 +2,34 @@
 
 ## Current State
 
-**Current status (2026-09-02): this file's 2026-08-31 gate-clean narrative is historical and
-superseded.** The current hardening pass fixes `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and
-`#302`-`#307` in the working tree and adds recovery-marker, dry-run, policy-bypass, and PostgreSQL
-single-flight coverage. `#297` and `#308` remain open performance follow-ups.
-Independent verification found one new HIGH blocker, `#301`: the macro-agent `/runs` contract is
-not idempotent when the Controller loses an accepted response. Since this requires a macro-agent
-API/internal change prohibited by the current Phase 2 plan, **Phase 2 must not be declared gate-clean
-until that contract is resolved or explicitly re-scoped by a human.** Do not trust a "gate-clean"
-claim in this file's history — it has been declared prematurely at least three times before (each
-by the reviewer, later found wrong). As of 2026-08-31, sixteen review rounds have run. Rounds 1-15 (`#154`-`#286`) landed and
+**Current status (2026-09-03): Round 17 re-broke gate-clean.** opencode closed all 6 open
+`phase-2` issues (`#256`, `#297`, `#298`, `#299`, `#300`, `#308`) across 15 pushed commits
+(`595bbcd`-`70f4b92`). The reviewer ran 10 parallel live-verification agents — one per issue/commit
+cluster, plus 3 genuinely fresh angles (a dedicated `RISK-16`/`RISK-19` sweep of the whole batch, a
+full real end-to-end pipeline run, and an unexplored-corners pass covering multi-tenancy, audit-chain
+tooling, secret rotation, and macro-agent-service). **Five of the six closed issues are genuinely
+fixed, independently live-reproduced** (real Postgres, real HTTP, real races — not diff-trust).
+**The sixth, `#308`, is NOT actually fixed and has been reopened**: its "fix" commit (`70f4b92`) only
+added a test; the query it claims to bound (`_poll_pending_cancellations`) is byte-identical
+before and after, and a live `EXPLAIN (ANALYZE, BUFFERS)` at realistic scale (40k→400k audit rows)
+shows execution time scaling ~linearly (54ms→760ms) — the existing 53-row regression test is too
+small to have caught this. The fresh-angle work found **8 new issues (`#309`-`#316`)**, most
+notably `#309` (**CRITICAL**, live-reproduced RCE: `git config <key> <value>` — the plain subcommand
+form, as opposed to `-c`/`--config` — bypasses the dangerous-git-config-key check on both the
+embedded and OPA policy backends) and `#311` (**HIGH**: the new execution-start recovery poller has
+no backoff, live-reproduced retrying an unrecoverable failure forever). It also caught and corrected
+this file's own prior claim that `#134` was fixed — it was not; a fresh full-stack live
+reproduction (`tar --directory=<forbidden> -xf payload.tar` sails through both policy backends and
+writes a file into the declared-forbidden directory) confirms `#134` is still open, while the
+neighboring `#140`/`#141` (closed this round, independently re-verified) were genuinely fixed.
+**Phase 2 is not gate-clean: `#309` (CRITICAL) and `#311` (HIGH) are both open with the `phase-2`
+label**, on top of the pre-existing `#301` (HIGH, phase-1, macro-agent idempotency, still correctly
+blocked pending a macro-agent API change) and `#134`/`#305` (phase-1, unrelated to this round's
+phase-2 mandate). Do not trust a "gate-clean" claim in this file's history — it has been declared
+prematurely at least three times before (each by the reviewer, later found wrong), and this round is
+a second, sharper instance of the same lesson: a closed-issue label and a green regression test are
+not proof a fix is real (`#308`) or that a docs claim is accurate (`#134`).
+As of 2026-08-31, sixteen review rounds had run. Rounds 1-15 (`#154`-`#286`) landed and
 hold up on re-verification; three recurring defect classes were established along the way —
 `RISK-16` (write before CAS, committed regardless of outcome, 3 confirmed instances), `RISK-19`
 (identity-map staleness, 5 confirmed instances), and a third, unnamed pattern where a fix for one
@@ -65,13 +83,20 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-After the current change set is pushed, the expected open set is **4 issues: `#301` (HIGH,
-macro-agent start idempotency), `#297` (MEDIUM, Plane issue-scan cost), `#298` (LOW, pending
-Plane-projection auditability), and `#308` (LOW, cancellation-history scan cost)**. The working-tree
-fixes for `#134`, `#140`, `#141`, `#256`, `#299`, `#300`, and `#302`-`#307` must be confirmed closed
-after push.
-**Phase 2 is not gate-clean while `#301` remains open.** The Controller-side recovery and policy
-hardening is verified, but the macro-agent API contract remains an explicit blocker.
+As of Round 17 (2026-09-03), the `phase-2`-labeled open set is **9 issues: `#309` (CRITICAL, git
+config subcommand-form policy bypass — live RCE), `#311` (HIGH, execution-start recovery poller has
+no backoff), `#310`/`#312` (MEDIUM: tar/find flag gaps; intake global-limiter bypass), and
+`#308`/`#313`/`#314`/`#315`/`#316` (LOW: cancellation-poll still unbounded — reopened; poller
+hardening latents; orphaned Plane-marker hygiene; no audit-chain verify tool; operational polish)**.
+`#301` (HIGH) and `#305` (HIGH) remain open under the `phase-1` label — out of this round's
+`phase-2` verification mandate but still real blockers to Phase 3. `#134` (CRITICAL, phase-1) is
+also still open — this file previously claimed it fixed; it is not (see above).
+**Phase 2 is not gate-clean: `#309` and `#311` are open, both `phase-2`-labeled, one CRITICAL and one
+HIGH.** The Controller-side recovery and intake hardening from this round's batch is genuinely solid
+(5 of 6 closed issues independently reproduced fixed, plus real concurrency wins like the sender-quota
+race going from 40/40-reproducible to 0/40 post-fix) — but the policy-parser bypass class
+(`#134`→`#140`/`#141`→`#309`/`#310`) keeps recurring in the same shape ("enumerate the safe flag
+forms, miss one"), and this round is the fourth time it's produced a live RCE-class finding.
 
 Phase 1 architectural summary: command validation uses an explicit `argv[0]` allowlist plus
 per-binary dangerous-construct checks. Known-resolved bypass classes include wrapper/interpreter
@@ -97,10 +122,19 @@ HTML-escaped Plane drafts, and a Telegram-approval path now authenticated the sa
 backend that runs only after the embedded PolicyEngine passes and receives a minimized, optionally
    bearer-token-authenticated input document (the embedded-engine-authoritative guarantee live-proven
    this round, with the Rego policy brought back to parity and covered by the latest 34-case OPA
-   suite).
+   suite). **Round 17 added**: durable pending-Plane-projection audit markers before every outbound
+   Plane call (approval projection, task creation, CLI retry, reconciliation state-fix, verification
+   alert — `#298`); a dedicated execution-handoff recovery poller for interrupted approval/
+   execution-start/verification-retry/cancellation handoffs (`0b4d5b4`, still has hardening gaps —
+   `#311`/`#313`); server-side Plane trace lookup replacing the full-project scan (`#297`); intake
+   admission-accounting concurrency hardening for sender-quota races and stale-rate-limit-bucket
+   clobbering (`6a98ad7`, both live-reproduced and closed); and closure of two of three
+   `#134`-shaped policy-parser bypass classes (`#140`/`#141`, via `4b941d3`) — the third, `#134`
+   itself, remains open, and a new fourth instance (`#309`, git config subcommand form) was found.
 
-Test status (2026-09-02): **534 passed / 23 skipped** on SQLite, **555 passed / 2 skipped** on
-PostgreSQL, OPA **34/34**, `ruff` clean, `mypy governance_controller` clean (69 source files);
+Test status (2026-09-03): **535 passed / 24 skipped** on SQLite, **557 passed / 2 skipped** on
+PostgreSQL, OPA **34/34**, `ruff` clean, `mypy governance_controller` clean (69 source files) — all
+independently re-run by the reviewer this round, not taken from opencode's own claim.
 `macro_agent_service`
 has **10 passed**, `ruff`/`mypy` clean — all independently re-run and confirmed by the reviewer, not
 just taken from opencode's own claim. The two live Plane contract tests are skipped because
@@ -108,13 +142,19 @@ just taken from opencode's own claim. The two live Plane contract tests are skip
 this environment. **CI is green** (`.github/workflows/ci.yml`, added by `#223`, had failed on all 13
 runs since 2026-08-26 until Round 11's CI-infra fix) — confirmed via `gh run list`, current HEAD's
 run included. Green tests plus a self-declared "gate-clean" are still not sufficient evidence of
-correctness in this project — none of round 8's through round 16's findings, including all six
-CRITICALs found across those rounds and this round's own `#297`-`#300`, were caught by the test
-suite before their respective fixes/findings landed; they required killing a live process,
-adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely concurrent
-real HTTP/DB/multi-process load at a live server or real Postgres, running the full real pipeline
-end to end against real services, or simply trying to actually exercise a documented workflow or a
-real (not mocked) network boundary that every existing test's fixture shape happened to sidestep.
+correctness in this project — none of round 8's through round 17's findings, including every
+CRITICAL found across those rounds and Round 17's own `#309` and its reopening of `#308`, were caught
+by the test suite before their respective fixes/findings landed; they required killing a live
+process, adversarially re-reviewing the immediately preceding round's own fix, throwing genuinely
+concurrent real HTTP/DB/multi-process load at a live server or real Postgres, running the full real
+pipeline end to end against real services, comparing a "fixed" query's `EXPLAIN ANALYZE` at a scale
+two orders of magnitude past its own regression test, or simply trying to actually exercise a
+documented workflow or a real (not mocked) network boundary that every existing test's fixture shape
+happened to sidestep. Round 17 specifically re-learned that **a closed GitHub issue with a named
+"regression test" commit is not proof either** — `#308`'s regression test passed identically against
+both the pre-fix and (claimed) post-fix commit because no code actually changed between them; only
+running the query at realistic scale, not just reading the diff or running the named test, surfaced
+that.
 
 Implemented components:
 
@@ -157,11 +197,12 @@ None declared. OpenCode integration remains a stub path; no ACP/MCP blocker was 
 
 ## Phase 2 Status
 
-**Current status (2026-09-02): Controller-side recovery, intake, and policy hardening is implemented
-and freshly verified, but Phase 2 is NOT gate-clean because HIGH issue `#301` remains open. MEDIUM
-issue `#297` and LOW issue `#298` also remain open; fixes for `#256`, `#299`, `#300`, and `#302`-`#307`
-are in the current change set and require push/issue-status confirmation.** All 10 Phase 2 SDD tasks landed in `main`
-between commits `7c0bd5c` and `4715c22`. Sixteen review
+**Current status (2026-09-03): Phase 2 is NOT gate-clean.** Round 17 closed 5 of 6 targeted
+`phase-2` issues for real (`#256`, `#297`, `#298`, `#299`, `#300` — independently live-reproduced
+fixed), reopened the 6th (`#308` — its "fix" never changed the code), and the fresh-angle pass found
+`#309` (CRITICAL, live RCE) and `#311` (HIGH, unbounded retry) newly open under `phase-2`, plus
+6 more MEDIUM/LOW gaps (`#310`, `#312`-`#316`). All 10 Phase 2 SDD tasks landed in `main`
+between commits `7c0bd5c` and `4715c22`. Seventeen review
 rounds have run since: Round 1 (`#154`-`#163`), Round 2 (`#164`-`#185`), Round 3 (`#186`-`#213`),
 Round 4 (fix-batch verification + fresh audit, `#189`-`#221` reopened/new), Round 5 (Phase 1 core,
 deployment/CI, schema validation, docs-accuracy sweep, `#222`-`#234`), Round 6 (adversarial review
@@ -204,23 +245,46 @@ scan, architecturally the same "new fix, new cost" shape as `#283`), `#300` (MED
 rate-limiter and duplicate-guard interact badly and can starve legitimate submissions), `#298` (LOW,
 a narrow crash-timing-only audit-trail gap in `#283`'s own fix), and `#299` (LOW, the OPA Rego policy
 has drifted behind the embedded engine across 16 rounds of the latter's bypass-closing fixes — not
-exploitable, the embedded-engine-authoritative guarantee was live-proven to hold).** **By this
-project's own established definition — zero open `severity:critical`/`severity:high` — Phase 2 IS
-genuinely gate-clean as of this round, for the first time surviving independent re-verification
-rather than being declared and later found wrong. This is a real milestone, not a reason to relax:
-4 live-reproduced MEDIUM/LOW gaps remain open, and the exact pattern that's repeated in this
-project's history — a fix introducing a new, different-shaped regression (`#280`→`#283`→`#297`) —
-just recurred a third time within a single fix's own aftermath (`#283`→`#297`/`#298`), so the next
-round should keep adversarially reviewing every fix, not just confirm it closes its reported bug.**
+exploitable, the embedded-engine-authoritative guarantee was live-proven to hold). By this project's
+own established definition, Round 16 genuinely reached zero open `severity:critical`/`severity:high`
+— a real milestone.** **Round 17 broke it again, within one round.** opencode closed all 6
+`phase-2` issues open after Round 16 (`#256`, `#297`-`#300`, `#308`) across 15 commits. The reviewer
+ran 10 parallel live-verification agents (one per closed issue/commit cluster, plus a dedicated
+`RISK-16`/`RISK-19` sweep of the whole batch, a full real end-to-end pipeline run, and an
+unexplored-corners pass). **Result: 5 of 6 genuinely fixed** (`#256`, `#297`, `#298`, `#299`, `#300`
+— independently reproduced, including a sender-quota race that reproduced 40/40 on pre-fix code and
+0/40 post-fix). **`#308` is not fixed — reopened**: its commit only added a test; a live
+`EXPLAIN ANALYZE` at 40k-400k rows shows the query it claims to bound still scales ~linearly. The
+fresh-angle work found 8 new issues: `#309` (**CRITICAL** — `git config <key> <value>` subcommand
+form bypasses the dangerous-config-key check on both policy backends, live RCE proven), `#311`
+(**HIGH** — the new execution-start recovery poller has no backoff, live-reproduced retrying a
+permanently-failing recovery forever), `#310`/`#312` (MEDIUM: more tar/find flag gaps; intake's
+global rate limiter fully bypassable by rotating attacker-controlled fields once authenticated),
+and `#313`-`#316` (LOW: poller hardening latents with no live corruption found; orphaned
+Plane-projection-marker hygiene; no audit-hash-chain verify tool; assorted operational polish). The
+fresh-angle pass also caught this file's own prior false claim that `#134` was fixed (it wasn't —
+live-reproduced still-open) while confirming its siblings `#140`/`#141` genuinely were (closed this
+round). **Phase 2 is not gate-clean: `#309` and `#311` are open under `phase-2`, one CRITICAL and one
+HIGH.** The pattern of "a fix introducing a new, different-shaped regression" (`#280`→`#283`→`#297`,
+now `#299`/`#134`'s policy-parser class → `#309`/`#310`) keeps recurring — the next round should
+keep adversarially reviewing every fix, including previously-"fixed" ones, not just confirm each
+closes its own reported bug.**
 
-## Immediate Next Step: Resolve the Remaining Blocker, Then Reassess Phase 2
+## Immediate Next Step: Fix `#309` (CRITICAL) and `#311` (HIGH), Then Reassess Phase 2
 
-`#301` requires a macro-agent API contract that makes `POST /runs` idempotent by
-`controller_execution_id` or provides a lookup endpoint after response loss. This is currently
-blocked by the Phase 2 constraint against modifying macro-agent internals. Reassess `#298`'s narrow
-pre-call-commit audit gap, confirm `#256`, `#299`, `#300`, and `#302`-`#307` close after the current
-commit is pushed, and rerun the live critical/high issue queries before any Phase 3 work. Keep
-`#297` open until the Plane API filtering/performance tradeoff is resolved.
+`#309` (git config subcommand-form policy bypass, live RCE) and `#311` (execution-start recovery
+poller retries forever with no backoff) are the two `phase-2`-labeled blockers to gate-clean status
+and should be fixed first — `#309` especially, given its live-proven RCE shape matches this
+project's CRITICAL bar exactly. `#308` needs an actual query-level fix this time (not another
+test-only commit) verified at realistic scale (tens of thousands of rows), not just against its
+53-row regression test. `#301` (phase-1) requires a macro-agent API contract that makes `POST /runs`
+idempotent by `controller_execution_id` or provides a lookup endpoint after response loss — still
+blocked by the Phase 2 constraint against modifying macro-agent internals; two Controller-side
+refinements were added to its issue this round (exception-type classification, and reusing the
+original attempt's `Execution.id` on retry so a future macro-agent idempotency key would actually
+help). Rerun the live critical/high issue queries before any Phase 3 work, and re-verify each
+`#310`/`#312`-`#316` fix the same way this round verified `#256`/`#297`-`#300` — live reproduction,
+not diff-trust.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
@@ -248,8 +312,16 @@ Before starting Phase 3, confirm the live issue list has no open `severity:criti
 ## Blockers to Watch
 
 - macro-agent API stability and `/runs` contract.
+- GitHub issue `#309` (CRITICAL): `git config <key> <value>` subcommand form bypasses the
+  dangerous-config-key check on both policy backends — live RCE, blocks gate-clean.
+- GitHub issue `#311` (HIGH): execution-start recovery poller has no backoff, retries a permanently
+  failing recovery forever — blocks gate-clean.
 - GitHub issue `#301`: response-loss recovery can create duplicate/orphaned macro-agent runs.
-- GitHub issue `#298`: narrow crash-timing window with no Plane-projection audit row.
+- GitHub issue `#308` (reopened): cancellation-recovery poll query still scales ~linearly with audit
+  history at realistic scale — the prior "fix" only added a test, no code changed.
+- GitHub issue `#134`: forbidden-path command scanning still misses `--directory=`/`-C`-style
+  option-glued path arguments — a live, full-stack-reproduced bypass, not yet fixed despite prior
+  docs claims.
 - OpenCode ACP compatibility with macro-agent MCP tools.
 - Plane CE self-hosted availability and API rate limits.
 
