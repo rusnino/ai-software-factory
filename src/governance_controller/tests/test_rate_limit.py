@@ -15,6 +15,8 @@ from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.middleware import (
     InMemoryRateLimitMiddleware,
+    _intake_requests_by_ip,
+    _intake_requests_last_access,
     _requests_by_ip,
     _requests_last_access,
     reset_rate_limits,
@@ -236,6 +238,85 @@ async def test_authenticated_intake_bounded_per_ip_regardless_of_sender_rotation
     codes = [response.status_code for response in responses]
     assert codes.count(200) == 3
     assert codes.count(429) == 2
+
+
+async def test_authenticated_intake_cap_holds_under_concurrent_asgi_requests(
+    async_client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#324: the threadpooled auth dependency cannot oversell the per-IP cap."""
+    from governance_controller.api.intake import get_idea_ingestion_service
+    from governance_controller.main import app
+    from governance_controller.schemas.intake import ClassifiedIdea, RawIdea
+
+    monkeypatch.setattr(settings, "rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_minute", 100)
+    monkeypatch.setattr(settings, "intake_rate_limit_per_ip_per_minute", 6)
+    monkeypatch.setattr(settings, "intake_secret", "intake-secret")
+    monkeypatch.setattr(settings, "plane_base_url", "")
+    reset_rate_limits()
+
+    class _SlowAppendDeque(deque):
+        def append(self, value: float) -> None:
+            # Widen the check-then-append window while requests are executing
+            # through FastAPI's real synchronous dependency threadpool.
+            time.sleep(0.02)
+            super().append(value)
+
+    # ASGITransport uses this source address by default. Seed one existing
+    # admission so the slow append exposes the race without changing the cap
+    # semantics: five more requests may be admitted, then the sixth is denied.
+    intake_window = _SlowAppendDeque([time.monotonic()])
+    _intake_requests_by_ip["127.0.0.1"] = intake_window
+    _intake_requests_last_access["127.0.0.1"] = time.monotonic()
+
+    class _FastIngestionService:
+        def classify(self, idea: RawIdea) -> ClassifiedIdea:
+            return ClassifiedIdea(
+                idea=idea,
+                category="new_project",
+                confidence=1.0,
+                reason="test",
+            )
+
+        async def create_draft(
+            self,
+            classified: ClassifiedIdea,
+            project_id: str | None = None,
+            db: Any = None,
+        ) -> dict[str, object]:
+            return {"id": classified.idea.source_id}
+
+    app.dependency_overrides[get_idea_ingestion_service] = (
+        lambda: _FastIngestionService()
+    )
+
+    def payload(idx: int) -> dict[str, str]:
+        return {
+            "source": "api",
+            "source_id": f"concurrent-{idx}",
+            "sender": f"sender-{idx}@example.com",
+            "subject": "Feature request",
+            "body": "Build a useful feature",
+        }
+
+    try:
+        responses = await asyncio.gather(
+            *(
+                async_client.post(
+                    "/intake/idea",
+                    json=payload(idx),
+                    headers={"X-Intake-Secret": "intake-secret"},
+                )
+                for idx in range(40)
+            )
+        )
+    finally:
+        app.dependency_overrides.pop(get_idea_ingestion_service, None)
+
+    statuses = [response.status_code for response in responses]
+    assert statuses.count(200) == 5
+    assert statuses.count(429) == 35
 
 
 async def test_inflight_duplicate_intake_burst_does_not_starve_new_submission(

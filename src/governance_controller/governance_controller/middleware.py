@@ -1,5 +1,6 @@
 """Application-level ASGI middleware."""
 
+import threading
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -34,14 +35,16 @@ _requests_last_access: dict[str, float] = {}
 # of how many distinct senders or source_ids a client rotates (#312).
 _intake_requests_by_ip: dict[str, deque[float]] = {}
 _intake_requests_last_access: dict[str, float] = {}
+_intake_rate_limit_lock = threading.Lock()
 
 
 def reset_rate_limits() -> None:
     """Clear all in-memory rate-limit counters."""
     _requests_by_ip.clear()
     _requests_last_access.clear()
-    _intake_requests_by_ip.clear()
-    _intake_requests_last_access.clear()
+    with _intake_rate_limit_lock:
+        _intake_requests_by_ip.clear()
+        _intake_requests_last_access.clear()
 
 
 class InMemoryRateLimitMiddleware:
@@ -189,28 +192,30 @@ class InMemoryRateLimitMiddleware:
                     budget is exhausted. Duplicate submissions are released by
                     the response wrapper below.
                     """
-                    window = _ensure_intake_window()
-                    if len(window) >= intake_limit:
-                        raise HTTPException(
-                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                            detail="Intake rate limit exceeded",
-                        )
-                    window.append(now)
-                    _intake_requests_last_access[ip] = time.monotonic()
+                    with _intake_rate_limit_lock:
+                        window = _ensure_intake_window()
+                        if len(window) >= intake_limit:
+                            raise HTTPException(
+                                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                                detail="Intake rate limit exceeded",
+                            )
+                        window.append(now)
+                        _intake_requests_last_access[ip] = time.monotonic()
 
                 def release_intake_ip_rate_limit() -> None:
                     """Release the intake token for a duplicate submission."""
-                    if intake_window is None:
-                        return
-                    if _intake_requests_by_ip.get(ip) is not intake_window:
-                        return
-                    try:
-                        intake_window.remove(now)
-                    except ValueError:
-                        return
-                    if not intake_window:
-                        _intake_requests_by_ip.pop(ip, None)
-                        _intake_requests_last_access.pop(ip, None)
+                    with _intake_rate_limit_lock:
+                        if intake_window is None:
+                            return
+                        if _intake_requests_by_ip.get(ip) is not intake_window:
+                            return
+                        try:
+                            intake_window.remove(now)
+                        except ValueError:
+                            return
+                        if not intake_window:
+                            _intake_requests_by_ip.pop(ip, None)
+                            _intake_requests_last_access.pop(ip, None)
 
                 scope.setdefault("state", {})[
                     "charge_intake_ip_rate_limit"
