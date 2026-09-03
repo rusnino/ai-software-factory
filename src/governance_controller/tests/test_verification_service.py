@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -1499,3 +1499,163 @@ class TestVerificationConcurrency:
             # the task CAS is lost.
             assert rows[0].state == TaskState.FAILED
             assert rows[0].ended_at is not None
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_matched_run_id_branch_flush_does_not_revert_third_writer(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """RISK-16 sweep: the CAS-lost 'same run id' branch flushes blindly.
+
+        When ``cas_result`` (the run-ID attach CAS) loses because a second
+        writer B already attached the *exact same* ``macro_agent_run_id``,
+        ``_start_retry_execution`` takes the "matched" branch (lines ~967-971
+        in the current file): it copies ``fresh_task.version`` onto the local
+        ``task`` object and falls through to an unconditional ``db.flush()``
+        with no further CAS guard. That flush's ORM UPDATE only carries the
+        dirty columns (``latest_macro_agent_run_id``, ``version``) and has no
+        WHERE-version predicate, unlike every other write path in this
+        method.
+
+        This test seats a THIRD, independently-CAS'd writer C exactly between
+        the ``fresh_task`` re-read and that flush (via a live re-read hook,
+        not a mock/theoretical race). Writer C wins a real
+        ``StateMachine.atomic_transition`` to FAILED (version N -> N+1) and
+        commits. The matched-branch flush must not silently revert the
+        version counter C just committed to -- if it does, C's committed
+        transition becomes invisible to any future CAS that legitimately
+        expects version N+1, which is the same "blind write overwrites a
+        winning concurrent commit" shape as RISK-16's prior instances.
+        """
+        _engine, local_session = isolated_db
+        task_id = "task-retry-matched-branch-race"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise the CAS-lost matched-run-id branch",
+            acceptance=["writer C's committed progress is not reverted"],
+        )
+
+        run_id = "run-matched-branch"
+
+        async def _start_then_attach_elsewhere(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            # Writer B: attach the SAME run id our own CAS will try to
+            # attach, so our cas_result loses but the fresh re-read
+            # "matches" instead of hitting the safe raise path.
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == racing_task.version,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_start_then_attach_elsewhere
+        )
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+
+            original_execute = db.execute
+            call_count = {"n": 0}
+
+            async def patched_execute(*args: object, **kwargs: object):
+                result = await original_execute(*args, **kwargs)
+                call_count["n"] += 1
+                # The 3rd explicit db.execute() call in
+                # _start_retry_execution's CAS-lost path is the
+                # populate_existing fresh_task re-read. Seat writer C's
+                # real, independently-CAS'd commit immediately after that
+                # read returns, before the method's next statement
+                # (the unconditional flush) runs.
+                if call_count["n"] == 3:
+                    async with local_session() as writer_c:
+                        current = await writer_c.scalar(
+                            select(Task).where(Task.id == task_id)
+                        )
+                        assert current is not None
+                        won = await StateMachine.atomic_transition(
+                            writer_c, current, TaskState.FAILED
+                        )
+                        assert won is True, "setup error: writer C CAS should win"
+                        await writer_c.commit()
+                return result
+
+            db.execute = patched_execute  # type: ignore[method-assign]
+            try:
+                started = await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+            finally:
+                db.execute = original_execute  # type: ignore[method-assign]
+            await db.commit()
+
+        assert call_count["n"] == 3, (
+            "setup error: expected exactly 3 db.execute calls "
+            "(claim, run-id CAS, fresh_task re-read) before this point"
+        )
+        assert started is True
+
+        async with local_session() as check:
+            final = await check.scalar(select(Task).where(Task.id == task_id))
+            assert final is not None
+            # Writer C's real transition is untouched in memory by A (A never
+            # assigns task.state), so it must survive regardless.
+            assert final.state == TaskState.FAILED
+            # The matched branch must not blindly overwrite the version
+            # counter writer C already advanced past. If this fails with a
+            # LOWER version than writer C committed, the matched-branch
+            # flush reverted a genuinely newer, independently-CAS'd commit
+            # -- a new RISK-16-shaped instance.
+            audits = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+            concurrent_mod_rows = [
+                row
+                for row in audits.scalars().all()
+                if row.event_type == "concurrent_modification"
+            ]
+            assert final.version >= 3, (
+                "matched-branch flush reverted writer C's committed version "
+                f"advance: task.version={final.version}, state={final.state}, "
+                f"concurrent_modification audits recorded={len(concurrent_mod_rows)}"
+            )
