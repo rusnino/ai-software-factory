@@ -2,8 +2,10 @@ import asyncio
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from uuid import uuid4
 
-from sqlalchemy import inspect, text
+from sqlalchemy import insert, inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -207,6 +209,7 @@ async def run_migrations() -> None:
             await conn.execute(
                 text("ALTER TABLE execution ADD COLUMN status_error VARCHAR")
             )
+        cancellation_pending_added = False
         if "cancellation_pending" not in execution_column_names:
             await conn.execute(
                 text(
@@ -214,6 +217,7 @@ async def run_migrations() -> None:
                     "BOOLEAN NOT NULL DEFAULT FALSE"
                 )
             )
+            cancellation_pending_added = True
         await conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_execution_cancellation_pending "
@@ -221,31 +225,203 @@ async def run_migrations() -> None:
             )
         )
 
-        if dialect_name == "postgresql":
+        if dialect_name == "postgresql" and cancellation_pending_added:
             # Existing pending markers predate the queue flag. Backfill them
             # once at migration time; polling itself never scans audit history.
             await conn.execute(
                 text(
                     """
                     UPDATE execution AS e
-                    SET cancellation_pending = TRUE
-                    WHERE EXISTS (
-                        SELECT 1
+                    SET macro_agent_run_id = COALESCE(
+                            e.macro_agent_run_id,
+                            p.macro_agent_run_id
+                        ),
+                        cancellation_pending = TRUE
+                    FROM (
+                        SELECT DISTINCT ON (p.execution_id)
+                            p.execution_id,
+                            NULLIF(p.payload->>'macro_agent_run_id', '')
+                                AS macro_agent_run_id
                         FROM auditlog AS p
-                        WHERE p.execution_id = e.id
-                          AND p.event_type = 'execution_cancel_pending'
+                        WHERE p.event_type = 'execution_cancel_pending'
+                          AND p.execution_id IS NOT NULL
+                          AND NULLIF(p.payload->>'macro_agent_run_id', '')
+                                IS NOT NULL
                           AND NOT EXISTS (
                               SELECT 1
                               FROM auditlog AS c
                               WHERE c.event_type = 'execution_cancel_completed'
                                 AND c.task_id = p.task_id
-                                AND c.payload->>'macro_agent_run_id'
-                                    = p.payload->>'macro_agent_run_id'
+                                AND NULLIF(c.payload->>'macro_agent_run_id', '')
+                                    = NULLIF(
+                                        p.payload->>'macro_agent_run_id', ''
+                                    )
                           )
-                    )
+                        ORDER BY p.execution_id, p.id DESC
+                    ) AS p
+                    WHERE e.id = p.execution_id
+                      AND (
+                          e.macro_agent_run_id IS NULL
+                          OR e.macro_agent_run_id = p.macro_agent_run_id
+                      )
                     """
                 )
             )
+            await conn.execute(
+                text(
+                    """
+                    UPDATE execution AS e
+                    SET cancellation_pending = TRUE
+                    FROM (
+                        SELECT DISTINCT ON (
+                            p.task_id,
+                            NULLIF(p.payload->>'macro_agent_run_id', '')
+                        )
+                            p.task_id,
+                            NULLIF(p.payload->>'macro_agent_run_id', '')
+                                AS macro_agent_run_id
+                        FROM auditlog AS p
+                        WHERE p.event_type = 'execution_cancel_pending'
+                          AND p.execution_id IS NULL
+                          AND NULLIF(p.payload->>'macro_agent_run_id', '')
+                                IS NOT NULL
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM auditlog AS c
+                              WHERE c.event_type = 'execution_cancel_completed'
+                                AND c.task_id = p.task_id
+                                AND NULLIF(c.payload->>'macro_agent_run_id', '')
+                                    = NULLIF(
+                                        p.payload->>'macro_agent_run_id', ''
+                                    )
+                          )
+                        ORDER BY
+                            p.task_id,
+                            NULLIF(p.payload->>'macro_agent_run_id', ''),
+                            p.id DESC
+                    ) AS p
+                    WHERE e.task_id = p.task_id
+                      AND e.macro_agent_run_id = p.macro_agent_run_id
+                    """
+                )
+            )
+
+            unrecoverable = (
+                (await conn.execute(
+                    text(
+                        """
+                        SELECT
+                            p.event_id,
+                            p.task_id,
+                            p.execution_id,
+                            'no_matching_execution' AS reason
+                        FROM auditlog AS p
+                        WHERE p.event_type = 'execution_cancel_pending'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM auditlog AS c
+                              WHERE c.event_type = 'execution_cancel_completed'
+                                AND c.task_id = p.task_id
+                                AND NULLIF(c.payload->>'macro_agent_run_id', '')
+                                    = NULLIF(
+                                        p.payload->>'macro_agent_run_id', ''
+                                    )
+                          )
+                          AND (
+                              NULLIF(
+                                  p.payload->>'macro_agent_run_id', ''
+                              ) IS NULL
+                              OR NOT EXISTS (
+                                  SELECT 1
+                                  FROM execution AS e
+                                  WHERE (
+                                      p.execution_id IS NOT NULL
+                                      AND e.id = p.execution_id
+                                      AND (
+                                          e.macro_agent_run_id IS NULL
+                                          OR e.macro_agent_run_id = NULLIF(
+                                              p.payload->>'macro_agent_run_id',
+                                              ''
+                                          )
+                                      )
+                                  )
+                                  OR (
+                                      p.execution_id IS NULL
+                                      AND e.task_id = p.task_id
+                                      AND e.macro_agent_run_id = NULLIF(
+                                          p.payload->>'macro_agent_run_id', ''
+                                      )
+                                  )
+                              )
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM auditlog AS u
+                              WHERE u.event_type =
+                                  'execution_cancel_unrecoverable'
+                                AND u.payload->>'pending_event_id' = p.event_id
+                          )
+                        ORDER BY p.id
+                        """
+                    )
+                )).mappings()
+                .all()
+            )
+            if unrecoverable:
+                from governance_controller.models.audit_log import (
+                    _AUDITLOG_TIP_LOCK_KEY,
+                    AuditLog,
+                )
+
+                await conn.execute(
+                    text("SELECT pg_advisory_xact_lock(:key)"),
+                    {"key": _AUDITLOG_TIP_LOCK_KEY},
+                )
+                previous_hash = (
+                    await conn.execute(
+                        text(
+                            "SELECT row_hash FROM auditlog "
+                            "ORDER BY id DESC LIMIT 1"
+                        )
+                    )
+                ).scalar_one_or_none() or ""
+                for marker in unrecoverable:
+                    pending_event_id = str(marker["event_id"])
+                    entry = AuditLog(
+                        event_id=str(uuid4()),
+                        event_type="execution_cancel_unrecoverable",
+                        task_id=str(marker["task_id"]),
+                        execution_id=(
+                            str(marker["execution_id"])
+                            if marker["execution_id"] is not None
+                            else None
+                        ),
+                        actor="system",
+                        source="run_migrations",
+                        timestamp=datetime.now(UTC),
+                        payload={
+                            "pending_event_id": pending_event_id,
+                            "reason": str(marker["reason"]),
+                        },
+                        previous_hash=previous_hash,
+                    )
+                    row_hash = entry.compute_hash()
+                    entry.row_hash = row_hash
+                    await conn.execute(
+                        insert(AuditLog).values(
+                            event_id=entry.event_id,
+                            event_type=entry.event_type,
+                            task_id=entry.task_id,
+                            execution_id=entry.execution_id,
+                            actor=entry.actor,
+                            source=entry.source,
+                            timestamp=entry.timestamp,
+                            payload=entry.payload,
+                            previous_hash=entry.previous_hash,
+                            row_hash=row_hash,
+                        )
+                    )
+                    previous_hash = row_hash
 
         # Backfill any legacy rows that were inserted before the migration.
         # Hash values cannot be reconstructed deterministically for old rows,

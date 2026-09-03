@@ -7,7 +7,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
@@ -520,20 +520,53 @@ class TestAuditLogPostgresDDL:
         migration_engine = create_async_engine(
             url, echo=False, future=True, poolclass=NullPool
         )
+        migration_statements: list[str] = []
+
+        def _capture_backfill(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if (
+                "update execution as e" in normalized
+                or "execution_cancel_pending" in normalized
+            ):
+                migration_statements.append(statement)
+
+        event.listen(
+            migration_engine.sync_engine,
+            "before_cursor_execute",
+            _capture_backfill,
+        )
         try:
             db_module = __import__("governance_controller.db", fromlist=["engine"])
             db_module.engine = migration_engine
             _engines_by_loop[asyncio.get_running_loop()] = migration_engine
             await run_migrations()
+            first_run_backfills = list(migration_statements)
 
             # Idempotency: running it again with the column already present
             # must not error either.
+            migration_statements.clear()
             await run_migrations()
+            second_run_backfills = list(migration_statements)
         finally:
+            event.remove(
+                migration_engine.sync_engine,
+                "before_cursor_execute",
+                _capture_backfill,
+            )
             db_module.engine = original_engine
             _engines_by_loop.clear()
             _engines_by_loop.update(original_engines)
             await migration_engine.dispose()
+
+        assert first_run_backfills
+        assert second_run_backfills == []
 
         # The real regression check: a fresh Execution insert (the actual
         # production code path #268 was breaking) must succeed.
@@ -571,6 +604,121 @@ class TestAuditLogPostgresDDL:
                     )
                 )
                 assert pending.scalar_one() is True
+        finally:
+            await verify_engine.dispose()
+
+    async def test_postgres_run_migrations_promotes_legacy_cancellation_payloads(
+        self,
+    ) -> None:
+        """#308: recover payload-only markers and record malformed ones."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from sqlalchemy import text
+
+        from governance_controller.adapters.macro_agent.executor import (
+            MacroAgentExecutor,
+        )
+        from governance_controller.db import _engines_by_loop, run_migrations
+        from governance_controller.db import engine as db_engine
+        from governance_controller.models.execution import Execution
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        setup_engine = create_async_engine(url, echo=False, future=True)
+        try:
+            async with setup_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.drop_all)
+                await conn.run_sync(SQLModel.metadata.create_all)
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO execution "
+                        "(id, task_id, state, started_at, macro_agent_run_id) "
+                        "VALUES ('exec-legacy-direct', 'task-legacy-direct', "
+                        "'FAILED', NOW(), NULL), "
+                        "('exec-legacy-task-run', 'task-legacy-task-run', "
+                        "'FAILED', NOW(), 'run-legacy-task-run')"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO auditlog "
+                        "(event_id, event_type, task_id, execution_id, actor, "
+                        "source, timestamp, payload, previous_hash, row_hash) VALUES "
+                        "('evt-legacy-direct', 'execution_cancel_pending', "
+                        "'task-legacy-direct', 'exec-legacy-direct', 'system', "
+                        "'legacy', NOW(), "
+                        "'{\"macro_agent_run_id\": \"run-legacy-direct\"}', '', ''), "
+                        "('evt-legacy-task-run', 'execution_cancel_pending', "
+                        "'task-legacy-task-run', NULL, 'system', 'legacy', NOW(), "
+                        "'{\"macro_agent_run_id\": \"run-legacy-task-run\"}', '', ''), "
+                        "('evt-legacy-malformed', 'execution_cancel_pending', "
+                        "'task-legacy-malformed', NULL, 'system', 'legacy', NOW(), "
+                        "'{}', '', '')"
+                    )
+                )
+        finally:
+            await setup_engine.dispose()
+
+        original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
+        migration_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        try:
+            db_module = __import__("governance_controller.db", fromlist=["engine"])
+            db_module.engine = migration_engine
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
+            await run_migrations()
+        finally:
+            db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
+            await migration_engine.dispose()
+
+        verify_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        try:
+            async with AsyncSession(verify_engine, expire_on_commit=False) as session:
+                direct = await session.scalar(
+                    select(Execution).where(Execution.id == "exec-legacy-direct")
+                )
+                task_run = await session.scalar(
+                    select(Execution).where(Execution.id == "exec-legacy-task-run")
+                )
+                assert direct is not None
+                assert task_run is not None
+                assert direct.macro_agent_run_id == "run-legacy-direct"
+                assert direct.cancellation_pending is True
+                assert task_run.cancellation_pending is True
+
+                malformed = await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.event_type == "execution_cancel_unrecoverable"
+                    )
+                )
+                malformed_rows = malformed.scalars().all()
+                assert len(malformed_rows) == 1
+                assert malformed_rows[0].payload == {
+                    "pending_event_id": "evt-legacy-malformed",
+                    "reason": "no_matching_execution",
+                }
+
+                executor = AsyncMock(spec=MacroAgentExecutor)
+                executor.cancel.return_value = {}
+                actions = await StuckExecutionPoller(
+                    session, executor=executor, batch_size=2
+                )._poll_pending_cancellations()
+                assert {
+                    action["macro_agent_run_id"] for action in actions
+                } == {"run-legacy-direct", "run-legacy-task-run"}
+                assert executor.cancel.await_count == 2
         finally:
             await verify_engine.dispose()
 

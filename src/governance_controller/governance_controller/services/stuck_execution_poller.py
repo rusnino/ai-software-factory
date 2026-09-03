@@ -151,6 +151,7 @@ class StuckExecutionPoller:
                 )
             if self._is_postgres():
                 stmt = stmt.with_for_update(of=Execution, skip_locked=True)
+            stmt = stmt.execution_options(populate_existing=True)
             result = await self.db.execute(stmt)
             execution = result.scalar_one_or_none()
             if execution is None:

@@ -346,6 +346,11 @@ class TestPendingRecovery:
         executor.cancel.assert_not_awaited()
         refreshed = await _fetch_task(db_session, task.id)
         assert refreshed.latest_macro_agent_run_id is None
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.cancellation_pending is True
         audits = (
             await db_session.execute(
                 select(AuditLog).where(AuditLog.task_id == task.id)
@@ -356,6 +361,56 @@ class TestPendingRecovery:
             and row.payload.get("macro_agent_run_id") == run_id
             for row in audits
         )
+
+    async def test_pending_cancellation_refreshes_existing_execution(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A queued execution must be refreshed before recovery uses its run ID."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, old_run_id = await _pending_cancel_task(seed)
+            execution = await seed.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            execution.cancellation_pending = False
+            execution.macro_agent_run_id = old_run_id
+            await seed.commit()
+
+        async with local_session() as db:
+            stale = await db.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert stale is not None
+            assert stale.macro_agent_run_id == old_run_id
+
+            async with local_session() as writer:
+                await writer.execute(
+                    update(Execution)
+                    .where(Execution.id == stale.id)
+                    .values(
+                        macro_agent_run_id="run-refreshed",
+                        cancellation_pending=True,
+                    )
+                )
+                await writer.commit()
+
+            actions = await StuckExecutionPoller(
+                db,
+                executor=AsyncMock(spec=MacroAgentExecutor),
+                dry_run=True,
+            )._poll_pending_cancellations()
+
+        assert actions == [
+            {
+                "task_id": task.id,
+                "execution_id": stale.id,
+                "action": "would_cancel_pending_execution",
+                "macro_agent_run_id": "run-refreshed",
+            }
+        ]
 
     async def test_dry_run_does_not_resume_pending_approved_start(
         self,
