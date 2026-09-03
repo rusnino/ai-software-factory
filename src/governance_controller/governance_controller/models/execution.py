@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, String
+from sqlalchemy import Boolean, Column, DateTime, Index, String
 from sqlmodel import Field, SQLModel
 
 from governance_controller.constants import TaskState
@@ -15,6 +15,10 @@ def utc_now() -> datetime:
 
 class Execution(SQLModel, table=True):
     """A recorded macro-agent execution for a governed task."""
+
+    __table_args__ = (
+        Index("ix_execution_cancellation_pending", "cancellation_pending", "id"),
+    )
 
     id: str = Field(primary_key=True)
     task_id: str = Field(index=True)
@@ -31,4 +35,13 @@ class Execution(SQLModel, table=True):
     status_error: str | None = Field(
         default=None,
         sa_column=Column(String, nullable=True),
+    )
+    cancellation_pending: bool = Field(
+        default=False,
+        sa_column=Column(
+            Boolean,
+            nullable=False,
+            default=False,
+            server_default="false",
+        ),
     )

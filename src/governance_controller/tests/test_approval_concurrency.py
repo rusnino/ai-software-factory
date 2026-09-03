@@ -922,6 +922,7 @@ class TestApprovalConcurrency:
             assert len(rows) == 1
             assert rows[0].state == TaskState.READY
             assert rows[0].macro_agent_run_id == "run-running-cas"
+            assert rows[0].cancellation_pending is False
             fake_executor.cancel.assert_awaited_once_with("run-running-cas")
 
     @pytest.mark.skipif(
@@ -989,6 +990,7 @@ class TestApprovalConcurrency:
             assert len(rows) == 1
             assert rows[0].state == TaskState.READY
             assert rows[0].macro_agent_run_id == "run-orphan-293"
+            assert rows[0].cancellation_pending is False
 
             audits = await check.execute(
                 select(AuditLog).where(AuditLog.task_id == task_id)
@@ -1063,3 +1065,9 @@ class TestApprovalConcurrency:
             assert any(
                 row.event_type == "execution_cancel_pending" for row in audits
             )
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.cancellation_pending is True

@@ -455,18 +455,19 @@ class TestAuditLogPostgresDDL:
         finally:
             await check_engine.dispose()
 
-    async def test_postgres_run_migrations_backfills_missing_execution_status_error(
+    async def test_postgres_run_migrations_backfills_missing_execution_columns(
         self,
     ) -> None:
-        """#268: run_migrations() must add execution.status_error if missing.
+        """#268/#308: run_migrations() restores missing execution columns.
 
         Simulates an already-deployed Postgres instance whose ``execution``
-        table predates the ``status_error`` column: create the full schema via
-        ``create_all()`` (which includes the column), then drop it to recreate
-        the pre-existing-deployment shape, run the real ``run_migrations()``,
-        and confirm the column reappears and a subsequent ``Execution`` INSERT
-        (the core execution-trigger path, not just status_error writes) no
-        longer raises ``UndefinedColumnError``.
+        table predates the ``status_error`` and ``cancellation_pending``
+        columns: create the full schema via ``create_all()`` (which includes
+        both columns), then drop them to recreate the pre-existing-deployment
+        shape, seed an unresolved cancellation marker, run the real
+        ``run_migrations()``, and confirm both columns reappear, the marker is
+        backfilled into the queue, and a subsequent ``Execution`` INSERT (the
+        core execution-trigger path, not just status_error writes) succeeds.
         """
         import asyncio
 
@@ -487,6 +488,29 @@ class TestAuditLogPostgresDDL:
                 # today's model but not in this (older) database.
                 await conn.execute(
                     text("ALTER TABLE execution DROP COLUMN status_error")
+                )
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO execution "
+                        "(id, task_id, state, started_at, macro_agent_run_id) "
+                        "VALUES ('exec-cancel-migration', 'task-cancel-migration', "
+                        "'FAILED', NOW(), 'run-cancel-migration')"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO auditlog "
+                        "(event_id, event_type, task_id, execution_id, actor, "
+                        "source, timestamp, payload, previous_hash, row_hash) VALUES "
+                        "('evt-cancel-migration', 'execution_cancel_pending', "
+                        "'task-cancel-migration', 'exec-cancel-migration', "
+                        "'system', 'test', NOW(), "
+                        "'{\"macro_agent_run_id\": \"run-cancel-migration\"}', "
+                        "'', '')"
+                    )
                 )
         finally:
             await setup_engine.dispose()
@@ -539,6 +563,14 @@ class TestAuditLogPostgresDDL:
                     )
                 )
                 assert result.scalar_one() == "ConnectionRefusedError"
+
+                pending = await session.execute(
+                    text(
+                        "SELECT cancellation_pending FROM execution WHERE id = "
+                        "'exec-cancel-migration'"
+                    )
+                )
+                assert pending.scalar_one() is True
         finally:
             await verify_engine.dispose()
 

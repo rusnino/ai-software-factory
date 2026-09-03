@@ -207,6 +207,45 @@ async def run_migrations() -> None:
             await conn.execute(
                 text("ALTER TABLE execution ADD COLUMN status_error VARCHAR")
             )
+        if "cancellation_pending" not in execution_column_names:
+            await conn.execute(
+                text(
+                    "ALTER TABLE execution ADD COLUMN cancellation_pending "
+                    "BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_execution_cancellation_pending "
+                "ON execution (cancellation_pending, id)"
+            )
+        )
+
+        if dialect_name == "postgresql":
+            # Existing pending markers predate the queue flag. Backfill them
+            # once at migration time; polling itself never scans audit history.
+            await conn.execute(
+                text(
+                    """
+                    UPDATE execution AS e
+                    SET cancellation_pending = TRUE
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM auditlog AS p
+                        WHERE p.execution_id = e.id
+                          AND p.event_type = 'execution_cancel_pending'
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM auditlog AS c
+                              WHERE c.event_type = 'execution_cancel_completed'
+                                AND c.task_id = p.task_id
+                                AND c.payload->>'macro_agent_run_id'
+                                    = p.payload->>'macro_agent_run_id'
+                          )
+                    )
+                    """
+                )
+            )
 
         # Backfill any legacy rows that were inserted before the migration.
         # Hash values cannot be reconstructed deterministically for old rows,

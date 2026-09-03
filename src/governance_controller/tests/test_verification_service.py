@@ -1416,6 +1416,7 @@ class TestVerificationConcurrency:
             assert execution.state == TaskState.BLOCKED
             assert execution.ended_at is not None
             assert execution.macro_agent_run_id == "run-retry-cas-294"
+            assert execution.cancellation_pending is False
 
             audits = await check.execute(
                 select(AuditLog).where(AuditLog.task_id == task_id)

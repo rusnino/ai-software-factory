@@ -643,6 +643,8 @@ class ApprovalService:
             if fresh_task is None or (
                 fresh_task.latest_macro_agent_run_id != macro_agent_run_id
             ):
+                execution.cancellation_pending = True
+                await self.db.flush()
                 await AuditService.log(
                     db=self.db,
                     event_type="execution_cancel_pending",
@@ -674,6 +676,8 @@ class ApprovalService:
                     )
                     await self.db.commit()
                 else:
+                    execution.cancellation_pending = False
+                    await self.db.flush()
                     await AuditService.log(
                         db=self.db,
                         event_type="execution_cancel_completed",

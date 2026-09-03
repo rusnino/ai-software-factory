@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -11,7 +10,7 @@ from uuid import uuid4
 import httpx
 import pytest
 import pytest_httpx
-from sqlalchemy import insert, select, update
+from sqlalchemy import event, insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
@@ -756,6 +755,47 @@ class TestPendingRecovery:
         ).scalars().all()
         assert any(row.event_type == "execution_cancel_completed" for row in audit_rows)
 
+    async def test_failed_cancellation_stays_queued_for_retry(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A failed external cancel keeps the durable queue row pending."""
+        task, run_id = await _pending_cancel_task(db_session)
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.side_effect = [
+            RuntimeError("macro-agent unavailable"),
+            {},
+        ]
+        poller = StuckExecutionPoller(db_session, executor=executor)
+
+        first_actions = await poller._poll_pending_cancellations()
+        assert first_actions == [
+            {
+                "task_id": task.id,
+                "execution_id": execution.id,
+                "action": "execution_cancel_failed",
+                "macro_agent_run_id": run_id,
+            }
+        ]
+        assert execution.cancellation_pending is True
+
+        second_actions = await poller._poll_pending_cancellations()
+        assert second_actions == [
+            {
+                "task_id": task.id,
+                "execution_id": execution.id,
+                "action": "execution_cancel_completed",
+                "macro_agent_run_id": run_id,
+            }
+        ]
+        assert execution.cancellation_pending is False
+        assert executor.cancel.await_count == 2
+
     async def test_missing_cancel_run_is_treated_as_completed(
         self,
         db_session: AsyncSession,
@@ -800,11 +840,17 @@ class TestPendingRecovery:
         """Cancellation recovery honors batch_size without scanning old outcomes."""
         _completed_task, completed_run_id = await _pending_cancel_task(db_session)
         completed_task = await _fetch_task(db_session, _completed_task.id)
+        completed_execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == completed_task.id)
+        )
+        assert completed_execution is not None
+        completed_execution.cancellation_pending = False
         db_session.add(
             AuditLog(
                 event_id=f"evt-cancel-completed-{uuid4()}",
                 event_type="execution_cancel_completed",
                 task_id=completed_task.id,
+                execution_id=completed_execution.id,
                 actor="system",
                 source="stuck_execution_poller",
                 payload={"macro_agent_run_id": completed_run_id},
@@ -830,25 +876,24 @@ class TestPendingRecovery:
         self,
         db_session: AsyncSession,
     ) -> None:
-        """Cancellation recovery is bounded by batch_size across large history.
-
-        Regression test for #308: without a database-side LIMIT on the pending
-        marker query, an ever-growing append-only audit log would be fully
-        materialized on every poll. This test seeds many completed markers
-        (which must be excluded by the anti-join) plus several pending markers,
-        then asserts that only ``batch_size`` pending markers are returned.
-        """
+        """Cancellation recovery returns no more than ``batch_size`` queue rows."""
         # Build a large tail of completed cancellation history.
         completed_tasks: list[Task] = []
         for _ in range(50):
             task, run_id = await _pending_cancel_task(db_session)
             completed_tasks.append(task)
+            execution = await db_session.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            execution.cancellation_pending = False
             await AuditService.log(
                 db=db_session,
                 event_type="execution_cancel_completed",
                 task_id=task.id,
                 actor="system",
                 source="stuck_execution_poller",
+                execution_id=execution.id,
                 payload={"macro_agent_run_id": run_id},
             )
             await db_session.commit()
@@ -874,8 +919,9 @@ class TestPendingRecovery:
             for action in actions
             if action["action"] == "execution_cancel_completed"
         }
-        expected_run_ids = {run_id for _, run_id in pending[:2]}
-        assert returned_run_ids == expected_run_ids
+        pending_run_ids = {run_id for _, run_id in pending}
+        assert len(returned_run_ids) == 2
+        assert returned_run_ids.issubset(pending_run_ids)
 
         # None of the completed-history tasks should be reconsidered.
         completed_ids = {task.id for task in completed_tasks}
@@ -1018,6 +1064,7 @@ async def _pending_cancel_task(
     """Seed a task with an unresolved external-run cancellation marker."""
     internal_id = str(uuid4())
     task_id = f"task-cancel-recovery-{internal_id[:8]}"
+    execution_id = f"execution-cancel-recovery-{internal_id[:8]}"
     run_id = f"run-cancel-recovery-{internal_id[:8]}"
     db_session.add(
         Task(
@@ -1029,10 +1076,21 @@ async def _pending_cancel_task(
         )
     )
     db_session.add(
+        Execution(
+            id=execution_id,
+            task_id=task_id,
+            state=TaskState.FAILED,
+            started_at=datetime.now(UTC) - timedelta(hours=1),
+            macro_agent_run_id=run_id,
+            cancellation_pending=True,
+        )
+    )
+    db_session.add(
         AuditLog(
             event_id=f"evt-cancel-recovery-{internal_id[:8]}",
             event_type="execution_cancel_pending",
             task_id=task_id,
+            execution_id=execution_id,
             actor="system",
             source="approval_service",
             timestamp=datetime.now(UTC) - timedelta(hours=1),
@@ -1352,66 +1410,147 @@ class TestCancellationLargeHistory:
         not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
         reason="large-history bounded-cost test requires PostgreSQL",
     )
-    async def test_pending_cancellation_query_is_bounded_with_large_history(
+    async def test_pending_cancellation_selector_does_not_scan_resolved_history(
         self,
         isolated_db: tuple,
     ) -> None:
-        """#308: the pending-cancellation query stays flat as history grows."""
+        """#308: polling a live cancellation does not scan audit history."""
         _engine, local_session = isolated_db
-        n_completed = 10000
-        completed_task_ids = [
-            f"task-cancel-hist-{i}" for i in range(n_completed)
-        ]
+        n_history = 50_000
+        target_task_id = "task-cancel-live"
+        target_execution_id = "execution-cancel-live"
+        target_run_id = "run-cancel-live"
 
         async with local_session() as seed:
-            seed.add_all(
-                [
-                    Task(
-                        id=task_id,
-                        project_id="proj-1",
-                        proposed_by="agent-1",
-                        state=TaskState.FAILED,
-                    )
-                    for task_id in completed_task_ids
-                ]
+            seed.add(
+                Task(
+                    id=target_task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.FAILED,
+                )
             )
-            await seed.flush()
+            execution_rows = [
+                {
+                    "id": f"execution-cancel-history-{i}",
+                    "task_id": f"task-cancel-history-{i}",
+                    "state": TaskState.FAILED.value,
+                    "started_at": datetime.now(UTC) - timedelta(days=1),
+                    "macro_agent_run_id": f"run-cancel-history-{i}",
+                }
+                for i in range(n_history)
+            ]
+            execution_rows.append(
+                {
+                    "id": target_execution_id,
+                    "task_id": target_task_id,
+                    "state": TaskState.FAILED.value,
+                    "started_at": datetime.now(UTC) - timedelta(hours=2),
+                    "macro_agent_run_id": target_run_id,
+                }
+            )
+            if "cancellation_pending" in Execution.__table__.c:  # type: ignore[attr-defined]
+                for row in execution_rows:
+                    row["cancellation_pending"] = row["id"] == target_execution_id
+            await seed.execute(insert(Execution), execution_rows)
+
             timestamp = datetime.now(UTC) - timedelta(hours=2)
+            history_rows: list[dict[str, Any]] = []
+            for i in range(n_history):
+                task_id = f"task-cancel-history-{i}"
+                run_id = f"run-cancel-history-{i}"
+                history_rows.extend(
+                    [
+                        {
+                            "event_id": f"evt-cancel-history-pending-{i}",
+                            "event_type": "execution_cancel_pending",
+                            "task_id": task_id,
+                            "execution_id": f"execution-cancel-history-{i}",
+                            "actor": "system",
+                            "source": "stuck_execution_poller",
+                            "timestamp": timestamp,
+                            "payload": {"macro_agent_run_id": run_id},
+                        },
+                        {
+                            "event_id": f"evt-cancel-history-completed-{i}",
+                            "event_type": "execution_cancel_completed",
+                            "task_id": task_id,
+                            "execution_id": f"execution-cancel-history-{i}",
+                            "actor": "system",
+                            "source": "stuck_execution_poller",
+                            "timestamp": timestamp,
+                            "payload": {"macro_agent_run_id": run_id},
+                        },
+                    ]
+                )
+            history_rows.append(
+                {
+                    "event_id": "evt-cancel-live-pending",
+                    "event_type": "execution_cancel_pending",
+                    "task_id": target_task_id,
+                    "execution_id": target_execution_id,
+                    "actor": "system",
+                    "source": "stuck_execution_poller",
+                    "timestamp": timestamp,
+                    "payload": {"macro_agent_run_id": target_run_id},
+                }
+            )
             await seed.execute(
                 insert(AuditLog),
-                [
-                    {
-                        "event_id": f"evt-cancel-hist-{i}",
-                        "event_type": "execution_cancel_completed",
-                        "task_id": completed_task_ids[i],
-                        "actor": "system",
-                        "source": "stuck_execution_poller",
-                        "timestamp": timestamp,
-                        "payload": {"macro_agent_run_id": f"run-hist-{i}"},
-                    }
-                    for i in range(n_completed)
-                ],
+                history_rows,
             )
-            pending_tasks: list[Task] = []
-            for _ in range(3):
-                task, _run_id = await _pending_cancel_task(seed)
-                pending_tasks.append(task)
+            await seed.commit()
+            await seed.execute(text("ANALYZE auditlog"))
+            await seed.execute(text("ANALYZE execution"))
             await seed.commit()
 
-        async with local_session() as db:
-            executor = AsyncMock(spec=MacroAgentExecutor)
-            executor.cancel.return_value = {}
-            poller = StuckExecutionPoller(db, executor=executor, batch_size=2)
-            start = time.monotonic()
-            actions = await poller._poll_pending_cancellations()
-            elapsed = time.monotonic() - start
+        selector_statements: list[tuple[str, Any]] = []
 
-        assert len(actions) == 2
-        returned_task_ids = {action["task_id"] for action in actions}
-        assert returned_task_ids.issubset({task.id for task in pending_tasks})
-        assert not returned_task_ids.intersection(set(completed_task_ids))
-        assert executor.cancel.await_count == 2
-        assert elapsed < 5.0
+        def _capture_selector(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if normalized.lstrip().startswith("select") and (
+                "from auditlog" in normalized or "from execution" in normalized
+            ):
+                selector_statements.append((statement, parameters))
+
+        event.listen(_engine.sync_engine, "before_cursor_execute", _capture_selector)
+        try:
+            async with local_session() as db:
+                actions = await StuckExecutionPoller(
+                    db, dry_run=True, batch_size=1
+                )._poll_pending_cancellations()
+        finally:
+            event.remove(
+                _engine.sync_engine, "before_cursor_execute", _capture_selector
+            )
+
+        assert actions == [
+            {
+                "task_id": target_task_id,
+                "execution_id": target_execution_id,
+                "action": "would_cancel_pending_execution",
+                "macro_agent_run_id": target_run_id,
+            }
+        ]
+        assert selector_statements
+
+        selector, parameters = selector_statements[0]
+        async with _engine.connect() as connection:
+            explain_result = await connection.exec_driver_sql(
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) " + selector,
+                parameters,
+            )
+            plan = "\n".join(row[0] for row in explain_result)
+
+        assert "auditlog" not in plan.lower(), plan
+        assert "ix_execution_cancellation_pending" in plan, plan
 
 
 class TestCancellationConcurrency:

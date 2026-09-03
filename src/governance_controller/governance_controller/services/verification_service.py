@@ -951,6 +951,8 @@ class VerificationService:
                 )
                 await db.commit()
 
+                execution.cancellation_pending = True
+                await db.flush()
                 await AuditService.log(
                     db=db,
                     event_type="execution_cancel_pending",
@@ -982,6 +984,8 @@ class VerificationService:
                     )
                     await db.commit()
                 else:
+                    execution.cancellation_pending = False
+                    await db.flush()
                     await AuditService.log(
                         db=db,
                         event_type="execution_cancel_completed",
