@@ -329,6 +329,25 @@ class TestCliApprove:
                 server.kill()
                 server.wait(timeout=5)
 
+    @pytest.mark.parametrize("idempotency_key", ["", " ", "\t\n"])
+    def test_approve_rejects_blank_idempotency_key_before_request(
+        self, runner: CliRunner, idempotency_key: str
+    ) -> None:
+        with patch("governance_controller.cli.httpx.post") as mock_post:
+            result = runner.invoke(
+                app,
+                [
+                    "approve",
+                    "TASK-327",
+                    "--idempotency-key",
+                    idempotency_key,
+                ],
+            )
+
+        assert result.exit_code == 2, result.output
+        assert "Invalid value" in result.output
+        mock_post.assert_not_called()
+
 
 class TestCliReconcile:
     def test_reconcile_passes_plane_issue_id_to_service(

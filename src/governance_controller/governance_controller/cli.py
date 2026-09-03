@@ -64,6 +64,12 @@ def approve(
     ),
 ) -> None:
     """Approve a task via the Controller's authoritative approvals endpoint."""
+    if idempotency_key is not None and not idempotency_key.strip():
+        raise typer.BadParameter(
+            "must contain a non-whitespace character",
+            param_hint="--idempotency-key",
+        )
+
     payload = ApprovalRequest(
         task_id=task_id,
         approval_type=approval_type,
