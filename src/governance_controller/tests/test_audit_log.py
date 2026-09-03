@@ -1099,6 +1099,171 @@ class TestAuditLogPostgresDDL:
             await poller_engine.dispose()
             await migration_engine.dispose()
 
+    async def test_postgres_concurrent_migrations_serialize_legacy_execution_ddl(
+        self,
+    ) -> None:
+        """#328: concurrent startup migrations must not race legacy execution DDL."""
+        import asyncio
+
+        from sqlalchemy import text
+
+        from governance_controller.db import _engines_by_loop, run_migrations
+        from governance_controller.db import engine as db_engine
+
+        url = os.environ.get("GC_TEST_DATABASE_URL", "")
+        setup_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        try:
+            async with setup_engine.begin() as conn:
+                await conn.run_sync(SQLModel.metadata.drop_all)
+                await conn.run_sync(SQLModel.metadata.create_all)
+                await conn.execute(
+                    text("DROP INDEX IF EXISTS ix_execution_cancellation_pending")
+                )
+                await conn.execute(
+                    text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+        finally:
+            await setup_engine.dispose()
+
+        suffix = uuid4().hex[:8]
+        migration_application = f"gc328-migration-{suffix}"
+        migration_engine = create_async_engine(
+            url,
+            echo=False,
+            future=True,
+            poolclass=NullPool,
+            connect_args={
+                "server_settings": {"application_name": migration_application}
+            },
+        )
+        execution_blocker_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        auditlog_blocker_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        observer_engine = create_async_engine(
+            url, echo=False, future=True, poolclass=NullPool
+        )
+        execution_blocker = None
+        auditlog_blocker = None
+        migration_tasks: list[asyncio.Task[None]] = []
+
+        async def _wait_for_relation_lock(
+            relation: str, granted: bool
+        ) -> None:
+            async with observer_engine.connect() as observer:
+                while True:
+                    count = await observer.scalar(
+                        text(
+                            """
+                            SELECT count(*)
+                            FROM pg_locks AS l
+                            JOIN pg_stat_activity AS a ON a.pid = l.pid
+                            WHERE a.application_name = :application_name
+                              AND l.locktype = 'relation'
+                              AND l.relation = to_regclass(:relation)
+                              AND l.mode = 'AccessExclusiveLock'
+                              AND l.granted = :granted
+                            """
+                        ),
+                        {
+                            "application_name": migration_application,
+                            "relation": relation,
+                            "granted": granted,
+                        },
+                    )
+                    if count and int(count) > 0:
+                        return
+                    await asyncio.sleep(0.01)
+
+        original_engine = db_engine
+        original_engines = dict(_engines_by_loop)
+        db_module = __import__("governance_controller.db", fromlist=["engine"])
+        try:
+            execution_blocker = await execution_blocker_engine.connect()
+            await execution_blocker.begin()
+            await execution_blocker.execute(text("SELECT 1 FROM execution"))
+
+            auditlog_blocker = await auditlog_blocker_engine.connect()
+            await auditlog_blocker.begin()
+            await auditlog_blocker.execute(text("SELECT 1 FROM auditlog"))
+
+            db_module.engine = migration_engine
+            _engines_by_loop[asyncio.get_running_loop()] = migration_engine
+            migration_tasks = [
+                asyncio.create_task(run_migrations()) for _ in range(2)
+            ]
+
+            # The relation lock proves a real migration reached the missing
+            # execution DDL while the independent transaction holds it.
+            await asyncio.wait_for(
+                _wait_for_relation_lock("execution", granted=False), timeout=5
+            )
+            await execution_blocker.commit()
+            await asyncio.wait_for(
+                _wait_for_relation_lock("execution", granted=True), timeout=5
+            )
+            await asyncio.wait_for(
+                _wait_for_relation_lock("auditlog", granted=False), timeout=5
+            )
+            await auditlog_blocker.commit()
+
+            results = await asyncio.wait_for(
+                asyncio.gather(*migration_tasks, return_exceptions=True),
+                timeout=5,
+            )
+            errors = [result for result in results if isinstance(result, Exception)]
+            assert not errors, errors
+
+            async with observer_engine.connect() as observer:
+                column_exists = await observer.scalar(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM information_schema.columns
+                            WHERE table_name = 'execution'
+                              AND column_name = 'cancellation_pending'
+                        )
+                        """
+                    )
+                )
+                index_exists = await observer.scalar(
+                    text(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM pg_indexes
+                            WHERE tablename = 'execution'
+                              AND indexname = 'ix_execution_cancellation_pending'
+                        )
+                        """
+                    )
+                )
+                assert column_exists is True
+                assert index_exists is True
+        finally:
+            for task in migration_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*migration_tasks, return_exceptions=True)
+            if execution_blocker is not None:
+                await execution_blocker.rollback()
+                await execution_blocker.close()
+            if auditlog_blocker is not None:
+                await auditlog_blocker.rollback()
+                await auditlog_blocker.close()
+            db_module.engine = original_engine
+            _engines_by_loop.clear()
+            _engines_by_loop.update(original_engines)
+            await observer_engine.dispose()
+            await auditlog_blocker_engine.dispose()
+            await execution_blocker_engine.dispose()
+            await migration_engine.dispose()
+
     async def test_postgres_trigger_blocks_update_and_delete(
         self, isolated_db: tuple[AsyncEngine, sessionmaker]
     ) -> None:

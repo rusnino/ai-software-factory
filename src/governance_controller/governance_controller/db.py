@@ -151,6 +151,11 @@ def dispose_engines_sync(loop: asyncio.AbstractEventLoop | None = None) -> None:
         loop.run_until_complete(dispose_engines(loop))
 
 
+# Separate from the audit-chain lock: migration DDL must serialize without
+# acquiring the audit-tip lock before execution relation locks.
+_MIGRATION_LOCK_KEY: int = 0xA471_100_0_0002
+
+
 async def run_migrations() -> None:
     """Apply lightweight startup migrations that ``create_all`` skips.
 
@@ -169,6 +174,11 @@ async def run_migrations() -> None:
     _get_audit_log_table()
     async with get_engine().begin() as conn:
         dialect_name = conn.dialect.name
+        if dialect_name == "postgresql":
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _MIGRATION_LOCK_KEY},
+            )
         tables = await conn.run_sync(
             lambda sync_conn: inspect(sync_conn).get_table_names()
         )
