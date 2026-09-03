@@ -631,6 +631,69 @@ class TestCliVerifyAudit:
         assert "verified" in result.output
         assert "broken" not in result.output
 
+    async def test_verify_audit_streams_without_materializing_rows(
+        self,
+        patched_db,
+        runner: CliRunner,
+    ) -> None:
+        """#326: verify-audit streams a real linked chain with bounded fetches."""
+        _engine, local_session = patched_db
+        entries: list[AuditLog] = []
+
+        async with local_session() as seed:
+            for index in range(3):
+                entries.append(
+                    await AuditService.log(
+                        db=seed,
+                        event_type="streamed_event",
+                        task_id="verify-chain-streamed",
+                        actor="tester",
+                        source="test",
+                        payload={"index": index},
+                    )
+                )
+            await seed.commit()
+
+        assert entries[0].previous_hash == ""
+        assert entries[1].previous_hash == entries[0].row_hash
+        assert entries[2].previous_hash == entries[1].row_hash
+
+        yield_per_values: list[object] = []
+
+        class _ScalarResultWithoutAll:
+            __slots__ = ()
+
+        class _ResultWithoutAll:
+            def scalars(self) -> _ScalarResultWithoutAll:
+                return _ScalarResultWithoutAll()
+
+        class _StreamingOnlySession:
+            def __init__(self, session) -> None:
+                self._session = session
+
+            async def execute(self, _statement) -> _ResultWithoutAll:
+                return _ResultWithoutAll()
+
+            async def stream_scalars(self, statement):
+                yield_per_values.append(
+                    statement.get_execution_options().get("yield_per")
+                )
+                return await self._session.stream_scalars(statement)
+
+        @asynccontextmanager
+        async def streaming_db_session():
+            async with local_session() as session:
+                yield _StreamingOnlySession(session)
+
+        with patch(
+            "governance_controller.cli.get_db_session", streaming_db_session
+        ):
+            result = await asyncio.to_thread(runner.invoke, app, ["verify-audit"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert result.output.strip() == "Audit hash chain verified."
+        assert yield_per_values == [1000]
+
     async def test_verify_audit_detects_tampered_row(
         self,
         patched_db,

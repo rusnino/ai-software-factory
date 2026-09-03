@@ -2,10 +2,13 @@
 
 import asyncio
 from datetime import UTC, datetime
+from typing import cast
 
 import httpx
 import typer
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.expression import ColumnElement
 
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
@@ -91,50 +94,64 @@ def approve(
     typer.echo(f"Approved {task_id}: {body['state']}")
 
 
-def _verify_audit_chain(rows: list[AuditLog]) -> tuple[int, str]:
+async def _verify_audit_chain(db: AsyncSession) -> tuple[int, str]:
     """Walk the AuditLog hash chain and return (exit_code, message)."""
-    if not rows:
-        return 0, "No audit log rows to verify."
+    statement = (
+        select(AuditLog)
+        .order_by(cast(ColumnElement[int], AuditLog.id))
+        .execution_options(yield_per=1000)
+    )
+    stream = await db.stream_scalars(statement)
+    try:
+        row_seen = False
+        legacy_boundary_id: int | None = None
+        previous_row_id: int | None = None
+        previous_row_hash = ""
 
-    legacy_boundary_id: int | None = None
-    previous_row_hash = ""
+        async for row in stream:
+            row_seen = True
+            if row.row_hash == "" or row.row_hash is None:
+                # Unverifiable legacy row (pre-hash schema). Mark the boundary
+                # at the last such row before the first verifiable entry.
+                legacy_boundary_id = row.id
+                previous_row_id = row.id
+                continue
 
-    for index, row in enumerate(rows):
-        if row.row_hash == "" or row.row_hash is None:
-            # Unverifiable legacy row (pre-hash schema). Mark the boundary at
-            # the last such row before the first verifiable entry.
-            legacy_boundary_id = row.id
-            continue
+            if previous_row_hash == "" and previous_row_id is not None:
+                # First verifiable row after a legacy prefix: the previous row
+                # is the explicit boundary.
+                legacy_boundary_id = previous_row_id
 
-        if previous_row_hash == "" and index > 0:
-            # First verifiable row after a legacy prefix: the previous row is
-            # the explicit boundary.
-            legacy_boundary_id = rows[index - 1].id
+            if row.previous_hash != previous_row_hash:
+                return (
+                    1,
+                    f"Audit hash chain broken at AuditLog id={row.id} "
+                    "(previous_hash does not match prior row_hash).",
+                )
 
-        if row.previous_hash != previous_row_hash:
-            return (
-                1,
-                f"Audit hash chain broken at AuditLog id={row.id} "
-                "(previous_hash does not match prior row_hash).",
+            computed = row.compute_hash()
+            if computed != row.row_hash:
+                return (
+                    1,
+                    f"Audit hash chain broken at AuditLog id={row.id} "
+                    "(row_hash does not match computed hash).",
+                )
+
+            previous_row_hash = row.row_hash
+            previous_row_id = row.id
+
+        if not row_seen:
+            return 0, "No audit log rows to verify."
+
+        parts = ["Audit hash chain verified."]
+        if legacy_boundary_id is not None:
+            parts.append(
+                f"Legacy boundary at AuditLog id={legacy_boundary_id}; "
+                "rows at or before this point are unverifiable."
             )
-
-        computed = row.compute_hash()
-        if computed != row.row_hash:
-            return (
-                1,
-                f"Audit hash chain broken at AuditLog id={row.id} "
-                "(row_hash does not match computed hash).",
-            )
-
-        previous_row_hash = row.row_hash
-
-    parts = ["Audit hash chain verified."]
-    if legacy_boundary_id is not None:
-        parts.append(
-            f"Legacy boundary at AuditLog id={legacy_boundary_id}; "
-            "rows at or before this point are unverifiable."
-        )
-    return 0, " ".join(parts)
+        return 0, " ".join(parts)
+    finally:
+        await stream.close()
 
 
 @app.command()
@@ -147,11 +164,7 @@ def verify_audit() -> None:
 
     async def _run() -> int:
         async with get_db_session() as db:
-            result = await db.execute(
-                select(AuditLog).order_by(AuditLog.id)
-            )
-            rows = list(result.scalars().all())
-            exit_code, message = _verify_audit_chain(rows)
+            exit_code, message = await _verify_audit_chain(db)
             typer.echo(message)
             return exit_code
 
