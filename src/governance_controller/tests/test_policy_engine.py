@@ -1925,6 +1925,33 @@ class TestPolicyEngineFinalReviewRegressions:
         assert result.allowed is False
         assert any("force push" in v.lower() for v in result.violations)
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push --force origin HEAD:refs/heads/main",
+            "git push --force-with-lease origin HEAD:refs/heads/main",
+            "git push --mirror origin",
+            "git push -f origin HEAD:refs/heads/main",
+            "git push --delete origin main",
+            "git push -d origin main",
+            "git push origin +main:main",
+            "git push origin :main",
+        ],
+    )
+    def test_verification_push_flags_cannot_bypass_declared_force_push_false(
+        self, command: str
+    ) -> None:
+        """#334: inspect verification argv, not only execution.force_push."""
+        contract = _make_contract(verification={"commands": [command]})
+        contract.execution.force_push = False
+        profile = _make_profile()
+        profile.git.force_push = "deny"
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("force push" in v.lower() for v in result.violations)
+
     @pytest.mark.parametrize("command", ["git add -u", "git status -uall"])
     def test_safe_git_short_u_controls_remain_allowed(self, command: str) -> None:
         contract = _make_contract(

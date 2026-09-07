@@ -1605,6 +1605,65 @@ test_git_push_force_flags_are_denied_by_profile if {
     }
 }
 
+test_git_push_verification_flags_cannot_bypass_declared_force_push_false if {
+    every test_case in [
+        {
+            "command": "git push --force origin HEAD:refs/heads/main",
+            "argv": ["git", "push", "--force", "origin", "HEAD:refs/heads/main"],
+        },
+        {
+            "command": "git push --force-with-lease origin HEAD:refs/heads/main",
+            "argv": [
+                "git",
+                "push",
+                "--force-with-lease",
+                "origin",
+                "HEAD:refs/heads/main",
+            ],
+        },
+        {
+            "command": "git push --mirror origin",
+            "argv": ["git", "push", "--mirror", "origin"],
+        },
+        {
+            "command": "git push -f origin HEAD:refs/heads/main",
+            "argv": ["git", "push", "-f", "origin", "HEAD:refs/heads/main"],
+        },
+        {
+            "command": "git push --delete origin main",
+            "argv": ["git", "push", "--delete", "origin", "main"],
+        },
+        {
+            "command": "git push -d origin main",
+            "argv": ["git", "push", "-d", "origin", "main"],
+        },
+        {
+            "command": "git push origin +main:main",
+            "argv": ["git", "push", "origin", "+main:main"],
+        },
+        {
+            "command": "git push origin :main",
+            "argv": ["git", "push", "origin", ":main"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "force push")
+    }
+}
+
 test_parsed_argv_must_match_raw_command if {
     command := "git apply --unsafe-paths patch"
     decision := data.governance.approve with input as object.union(
