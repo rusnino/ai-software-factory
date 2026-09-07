@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -526,6 +526,74 @@ class TestApprovalConcurrency:
                 for row in audits.scalars().all()
             )
 
+    async def test_start_failure_after_terminal_task_race_finalizes_execution(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A failed start must not leave a terminal task's execution active."""
+        _engine, local_session = isolated_db
+        task_id = "task-start-failure-terminal-race"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+
+        async def _race_to_terminal_then_fail(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.FAILED
+                )
+                assert won is True
+                await racer.commit()
+            raise RuntimeError("macro-agent unavailable")
+
+        fake_executor.start.side_effect = _race_to_terminal_then_fail
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                ).approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-start-failure-terminal-race",
+                )
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            assert execution.ended_at is not None
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "execution_start_failed" for row in audits
+            )
+
     async def test_concurrent_execution_approvals_do_not_double_trigger(
         self,
         isolated_db: tuple,
@@ -855,9 +923,9 @@ class TestApprovalConcurrency:
 
         ``approve()`` reaches ``_trigger_execution``, the executor starts, but
         the ``READY -> RUNNING`` CAS loses. The commit-before-raise must leave
-        both the task and the Execution row at ``READY`` (so a real macro-agent
-        run is not orphaned as RUNNING for a FAILED/READY task) and preserve
-        the ``concurrent_modification`` audit row (#262).
+        the task at ``READY`` while terminalizing the losing Execution row (so
+        a real macro-agent run is not orphaned as RUNNING for a FAILED/READY
+        task) and preserving the ``concurrent_modification`` audit row (#262).
         """
         engine, local_session = isolated_db
 
@@ -920,10 +988,362 @@ class TestApprovalConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            assert rows[0].state == TaskState.READY
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
             assert rows[0].macro_agent_run_id == "run-running-cas"
             assert rows[0].cancellation_pending is False
             fake_executor.cancel.assert_awaited_once_with("run-running-cas")
+
+    async def test_running_cas_loss_cancels_run_when_terminal_task_keeps_pointer(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A terminal task must not make a matching external run look owned."""
+        _engine, local_session = isolated_db
+        task_id = "task-terminal-pointer-cancel"
+        run_id = "run-terminal-pointer-cancel"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    state=TaskState.EXEC_APPROVED,
+                    proposed_by="agent-1",
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+
+        async def _start_then_terminalize(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.state == TaskState.READY.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        fake_executor.start.side_effect = _start_then_terminalize
+        fake_executor.cancel.return_value = {}
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await ApprovalService(db=db, executor=fake_executor)._trigger_execution(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    actor="admin",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+
+        fake_executor.cancel.assert_awaited_once_with(run_id)
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="poller-first interleave requires PostgreSQL row locks",
+    )
+    async def test_running_cas_cleanup_rechecks_pending_claim_after_poller_cleanup(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Approval must not duplicate a poller's durable cancellation outcome."""
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+
+        _engine, local_session = isolated_db
+        task_id = "task-approval-cleanup-poller-race"
+        run_id = "run-approval-cleanup-poller-race"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    state=TaskState.EXEC_APPROVED,
+                    proposed_by="agent-1",
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                current = await racer.scalar(select(Task).where(Task.id == task_id))
+                assert current is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == current.version,  # type: ignore[arg-type]
+                        Task.state == TaskState.READY.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        cancel_sources: list[str] = []
+
+        async def _cancel(source: str) -> dict[str, object]:
+            cancel_sources.append(source)
+            return {}
+
+        async def _approval_cancel(_run_id: str) -> dict[str, object]:
+            return await _cancel("approval")
+
+        async def _poller_cancel(_run_id: str) -> dict[str, object]:
+            return await _cancel("poller")
+
+        approval_executor = AsyncMock(spec=MacroAgentExecutor)
+        approval_executor.start.side_effect = _start_then_lose
+        approval_executor.cancel.side_effect = _approval_cancel
+        poller_executor = AsyncMock(spec=MacroAgentExecutor)
+        poller_executor.cancel.side_effect = _poller_cancel
+
+        original_transition = StateMachine.atomic_transition
+
+        async def _lose_running_cas(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original_transition(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine,
+            "atomic_transition",
+            staticmethod(_lose_running_cas),
+        )
+
+        cleanup_paused = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleanup_seen = False
+
+        async with local_session() as db:
+            original_execute = db.execute
+
+            async def _execute(*args: object, **kwargs: object):
+                nonlocal cleanup_seen
+                statement = str(args[0]).lower() if args else ""
+                if not cleanup_seen and "from execution" in statement:
+                    cleanup_seen = True
+                    cleanup_paused.set()
+                    await release_cleanup.wait()
+                return await original_execute(*args, **kwargs)
+
+            monkeypatch.setattr(db, "execute", _execute)
+            operation = asyncio.create_task(
+                ApprovalService(
+                    db=db,
+                    executor=approval_executor,
+                )._trigger_execution(
+                    task=await db.scalar(select(Task).where(Task.id == task_id)),
+                    contract=contract,
+                    profile=profile,
+                    actor="system",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+            )
+            await asyncio.wait_for(cleanup_paused.wait(), timeout=5)
+
+            async with local_session() as poller_db:
+                actions = await StuckExecutionPoller(
+                    poller_db,
+                    executor=poller_executor,
+                )._poll_pending_cancellations()
+
+            release_cleanup.set()
+            with pytest.raises(ValueError, match="Concurrent modification"):
+                await asyncio.wait_for(operation, timeout=5)
+
+        assert actions[0]["action"] == "execution_cancel_completed"
+        assert cancel_sources == ["poller"]
+        approval_executor.cancel.assert_not_awaited()
+        poller_executor.cancel.assert_awaited_once_with(run_id)
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+            assert task.latest_macro_agent_run_id == run_id
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.cancellation_pending is False
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert (
+                len(
+                    [
+                        row
+                        for row in audits
+                        if row.event_type == "execution_cancel_completed"
+                    ]
+                )
+                    == 1
+            )
+
+    @pytest.mark.skipif(
+        os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="targets SQLite writer-lock behavior",
+    )
+    async def test_sqlite_approval_cleanup_is_single_flight_with_poller(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """SQLite must not let the poller duplicate an approval cleanup call."""
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+
+        _engine, local_session = isolated_db
+        task_id = "task-sqlite-approval-cleanup-single-flight"
+        run_id = "run-sqlite-approval-cleanup-single-flight"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    state=TaskState.EXEC_APPROVED,
+                    proposed_by="agent-1",
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        approval_cancel_started = asyncio.Event()
+        poller_cancel_started = asyncio.Event()
+        release_approval_cancel = asyncio.Event()
+        cancel_sources: list[str] = []
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                current = await racer.scalar(select(Task).where(Task.id == task_id))
+                assert current is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == current.version,  # type: ignore[arg-type]
+                        Task.state == TaskState.READY.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        async def _approval_cancel(_run_id: str) -> dict[str, object]:
+            cancel_sources.append("approval")
+            approval_cancel_started.set()
+            await release_approval_cancel.wait()
+            return {}
+
+        async def _poller_cancel(_run_id: str) -> dict[str, object]:
+            cancel_sources.append("poller")
+            poller_cancel_started.set()
+            return {}
+
+        approval_executor = AsyncMock(spec=MacroAgentExecutor)
+        approval_executor.start.side_effect = _start_then_lose
+        approval_executor.cancel.side_effect = _approval_cancel
+        poller_executor = AsyncMock(spec=MacroAgentExecutor)
+        poller_executor.cancel.side_effect = _poller_cancel
+
+        original_transition = StateMachine.atomic_transition
+
+        async def _lose_running_cas(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original_transition(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine,
+            "atomic_transition",
+            staticmethod(_lose_running_cas),
+        )
+
+        async with local_session() as approval_db:
+            task = await approval_db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            approval_operation = asyncio.create_task(
+                ApprovalService(
+                    db=approval_db,
+                    executor=approval_executor,
+                )._trigger_execution(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    actor="system",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+            )
+            await asyncio.wait_for(approval_cancel_started.wait(), timeout=5)
+
+            async with local_session() as poller_db:
+                poller_operation = asyncio.create_task(
+                    StuckExecutionPoller(
+                        poller_db,
+                        executor=poller_executor,
+                    )._poll_pending_cancellations()
+                )
+                # With the fix, BEGIN IMMEDIATE blocks until approval commits.
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(poller_cancel_started.wait(), timeout=1)
+
+                release_approval_cancel.set()
+                with pytest.raises(ValueError, match="Concurrent modification"):
+                    await asyncio.wait_for(approval_operation, timeout=5)
+                actions = await asyncio.wait_for(poller_operation, timeout=5)
+
+        assert cancel_sources == ["approval"]
+        approval_executor.cancel.assert_awaited_once_with(run_id)
+        poller_executor.cancel.assert_not_awaited()
+        assert actions == []
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
@@ -988,7 +1408,8 @@ class TestApprovalConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            assert rows[0].state == TaskState.READY
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
             assert rows[0].macro_agent_run_id == "run-orphan-293"
             assert rows[0].cancellation_pending is False
 
@@ -1002,6 +1423,185 @@ class TestApprovalConcurrency:
             ]
             assert concurrent
             assert concurrent[-1].payload["macro_agent_run_id"] == "run-orphan-293"
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_running_cas_loss_crash_after_run_id_commit_leaves_cancel_pending(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#293: a crash cannot leave a started run outside cancellation recovery."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        _engine, local_session = isolated_db
+        task_id = "task-orphaned-start-crash-293"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.FAILED
+                )
+                assert won is True
+                await racer.commit()
+            return {"run_id": "run-orphan-crash-293"}
+
+        fake_executor.start.side_effect = _start_then_lose
+
+        async with local_session() as db:
+            real_commit = db.commit
+            commit_count = 0
+
+            async def _commit_then_crash() -> None:
+                nonlocal commit_count
+                await real_commit()
+                commit_count += 1
+                # The pre-fix third commit contains only macro_agent_run_id.
+                if commit_count == 3:
+                    raise asyncio.CancelledError
+
+            monkeypatch.setattr(db, "commit", _commit_then_crash)
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(asyncio.CancelledError):
+                await ApprovalService(db=db, executor=fake_executor).approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-orphan-crash-293",
+                )
+            assert commit_count == 3
+
+        async with local_session() as check:
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.macro_agent_run_id == "run-orphan-crash-293"
+            assert execution.cancellation_pending is True
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "execution_cancel_pending"
+                and row.payload["macro_agent_run_id"] == "run-orphan-crash-293"
+                for row in audits
+            )
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_cancellation_cleanup_locks_execution_before_task(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup must acquire Execution then Task to match the poller order."""
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        engine, local_session = isolated_db
+        task_id = "task-cancel-lock-order"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    state=TaskState.EXEC_APPROVED,
+                    proposed_by="agent-1",
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.return_value = {"run_id": "run-lock-order"}
+        fake_executor.cancel.return_value = {}
+
+        original_transition = StateMachine.atomic_transition
+
+        async def _lose_running_cas(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original_transition(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine,
+            "atomic_transition",
+            staticmethod(_lose_running_cas),
+        )
+
+        lock_queries: list[str] = []
+
+        def _capture_lock_query(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.lower()
+            if "for update" not in normalized:
+                return
+            if "from execution" in normalized or "from task" in normalized:
+                lock_queries.append(normalized)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_lock_query)
+        try:
+            async with local_session() as db:
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                with pytest.raises(ValueError, match="Concurrent modification"):
+                    await ApprovalService(
+                        db=db, executor=fake_executor
+                    )._trigger_execution(
+                        task=task,
+                        contract=contract,
+                        profile=profile,
+                        actor="system",
+                        source="test",
+                        previous_state=TaskState.EXEC_APPROVED,
+                    )
+        finally:
+            event.remove(
+                engine.sync_engine, "before_cursor_execute", _capture_lock_query
+            )
+
+        execution_lock = next(
+            index
+            for index, query in enumerate(lock_queries)
+            if "from execution" in query
+        )
+        task_lock = next(
+            index for index, query in enumerate(lock_queries) if "from task" in query
+        )
+        assert execution_lock < task_lock
 
     async def test_failed_cas_cleanup_leaves_pending_cancellation(
         self,

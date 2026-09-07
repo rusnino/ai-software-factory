@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
+from governance_controller.db import begin_sqlite_cancellation_claim
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
 from governance_controller.schemas.macro_agent import MacroAgentStartResponse
@@ -570,26 +571,30 @@ class ApprovalService:
                 result
             ).run_id
         except Exception as exc:  # pragma: no cover - broad error shield
-            if await StateMachine.atomic_transition(self.db, task, TaskState.FAILED):
-                execution.state = TaskState.FAILED
-                execution.ended_at = datetime.now(UTC)
-                await self.db.flush()
+            transitioned = await StateMachine.atomic_transition(
+                self.db, task, TaskState.FAILED
+            )
+            # The external start failed, so this local execution is terminal
+            # regardless of whether another writer won the task CAS.
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            await self.db.flush()
 
-                await AuditService.log(
-                    db=self.db,
-                    event_type="execution_start_failed",
-                    task_id=task.id,
-                    actor=actor,
-                    source=source,
-                    execution_id=execution.id,
-                    payload={
-                        "approval_type": ApprovalType.EXECUTION.value,
-                        "execution_id": execution.id,
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    },
-                )
-            else:
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_start_failed",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,
+                payload={
+                    "approval_type": ApprovalType.EXECUTION.value,
+                    "execution_id": execution.id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            if not transitioned:
                 await AuditService.log(
                     db=self.db,
                     event_type="concurrent_modification",
@@ -612,9 +617,12 @@ class ApprovalService:
         # FAILED task and orphan the real macro-agent run (#262).
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
             # The external run already exists even though this caller lost the
-            # task CAS. Persist its ID on the pre-RUNNING execution before any
-            # cleanup request so a cancellation failure remains recoverable.
+            # task CAS. Persist its ID and cleanup intent together before any
+            # cleanup request so a crash cannot strand the run outside recovery.
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
             execution.macro_agent_run_id = macro_agent_run_id
+            execution.cancellation_pending = True
             await self.db.flush()
             await AuditService.log(
                 db=self.db,
@@ -630,34 +638,58 @@ class ApprovalService:
                     "macro_agent_run_id": macro_agent_run_id,
                 },
             )
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_cancel_pending",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,
+                payload={
+                    "macro_agent_run_id": macro_agent_run_id,
+                    "reason": "execution_start_cas_lost",
+                },
+            )
             await self.db.commit()
 
             # Do not cancel a run if a concurrent winner legitimately attached
-            # this exact ID while the CAS result was being handled.
-            fresh_result = await self.db.execute(
+            # this exact ID while the CAS result was being handled. Match the
+            # poller's lock order before holding both rows through cleanup.
+            await begin_sqlite_cancellation_claim(self.db)
+            execution_stmt = (
+                select(Execution)
+                .where(Execution.id == execution.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
+                execution_stmt = execution_stmt.with_for_update()
+            execution = (await self.db.execute(execution_stmt)).scalar_one()
+
+            # Lock the authoritative task row through the cleanup decision so a
+            # pointer update cannot race between this check and cancellation.
+            fresh_stmt = (
                 select(Task)
                 .where(Task.id == task.id)  # type: ignore[arg-type]
                 .execution_options(populate_existing=True)
             )
+            if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
+                fresh_stmt = fresh_stmt.with_for_update()
+            fresh_result = await self.db.execute(fresh_stmt)
             fresh_task = fresh_result.scalar_one_or_none()
-            if fresh_task is None or (
-                fresh_task.latest_macro_agent_run_id != macro_agent_run_id
-            ):
-                execution.cancellation_pending = True
-                await self.db.flush()
-                await AuditService.log(
-                    db=self.db,
-                    event_type="execution_cancel_pending",
-                    task_id=task.id,
-                    actor=actor,
-                    source=source,
-                    execution_id=execution.id,
-                    payload={
-                        "macro_agent_run_id": macro_agent_run_id,
-                        "reason": "execution_start_cas_lost",
-                    },
-                )
+            if not execution.cancellation_pending:
+                # The poller completed this durable cleanup intent while the
+                # loser was reacquiring its rows. Do not repeat its cancel or
+                # completion audit.
                 await self.db.commit()
+            elif fresh_task is None or (
+                fresh_task.state is not TaskState.RUNNING
+                or fresh_task.latest_macro_agent_run_id != macro_agent_run_id
+            ):
+                # The execution row is the durable single-flight claim. Keep
+                # the existing execution -> task lock order and retain those
+                # locks through cancellation; without an outbox or a separate
+                # claim state, releasing them would let the poller duplicate
+                # the external request.
                 try:
                     await self.executor.cancel(macro_agent_run_id)
                 except Exception as cleanup_exc:  # pragma: no cover - boundary shield
@@ -688,6 +720,22 @@ class ApprovalService:
                         payload={"macro_agent_run_id": macro_agent_run_id},
                     )
                     await self.db.commit()
+            else:
+                execution.cancellation_pending = False
+                await self.db.flush()
+                await AuditService.log(
+                    db=self.db,
+                    event_type="execution_cancel_completed",
+                    task_id=task.id,
+                    actor=actor,
+                    source=source,
+                    execution_id=execution.id,
+                    payload={
+                        "macro_agent_run_id": macro_agent_run_id,
+                        "reason": "run_attached_to_current_task",
+                    },
+                )
+                await self.db.commit()
             raise ValueError(
                 "Concurrent modification detected: task state changed before RUNNING"
             )

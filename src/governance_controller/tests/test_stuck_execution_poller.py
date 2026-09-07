@@ -180,6 +180,70 @@ class TestStuckExecutionPoller:
         assert refreshed is not None
         assert refreshed.status_error == "RuntimeError"
 
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_status_error_is_not_persisted_when_blocked_cas_loses(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#329: a losing timeout recovery cannot persist its status diagnostic."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, execution = await _running_task_with_execution(
+                seed,
+                started_at=datetime.now(UTC) - timedelta(minutes=300),
+                timeout_minutes=1,
+                macro_agent_run_id="run-status-race-329",
+            )
+            await seed.commit()
+
+        class _RacingFailingClient:
+            async def status(self, _run_id: str) -> dict[str, Any]:
+                async with local_session() as racer:
+                    result = await racer.execute(
+                        update(Task)
+                        .where(Task.id == task.id)
+                        .values(
+                            state=TaskState.FAILED.value,
+                            version=Task.version + 1,
+                        )
+                    )
+                    assert result.rowcount == 1  # type: ignore[attr-defined]
+                    await racer.commit()
+                raise RuntimeError("macro-agent unreachable")
+
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(
+                db,
+                client=_RacingFailingClient(),  # type: ignore[arg-type]
+            ).poll()
+
+        assert actions == []
+
+        async with local_session() as check:
+            task_row = await check.scalar(select(Task).where(Task.id == task.id))
+            assert task_row is not None
+            assert task_row.state == TaskState.FAILED
+            assert task_row.version == 1
+
+            execution_row = await check.scalar(
+                select(Execution).where(Execution.id == execution.id)
+            )
+            assert execution_row is not None
+            assert execution_row.state == TaskState.RUNNING
+            assert execution_row.ended_at is None
+            assert execution_row.status_error is None
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task.id))
+            ).scalars().all()
+            assert not any(
+                row.event_type == "execution_blocked_timeout" for row in audits
+            )
+
     @pytest.mark.parametrize("status_code", [404, 500])
     async def test_status_http_error_persists_status_code(
         self,
@@ -326,6 +390,50 @@ class TestStuckExecutionPoller:
 
 
 class TestPendingRecovery:
+    async def test_terminal_task_with_matching_pointer_still_cancels_run(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A terminal task pointer is stale ownership, not a live attachment."""
+        task_id = "task-terminal-pointer-poller"
+        execution_id = "execution-terminal-pointer-poller"
+        run_id = "run-terminal-pointer-poller"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+                latest_macro_agent_run_id=run_id,
+            )
+        )
+        db_session.add(
+            Execution(
+                id=execution_id,
+                task_id=task_id,
+                state=TaskState.FAILED,
+                started_at=datetime.now(UTC) - timedelta(hours=1),
+                macro_agent_run_id=run_id,
+                cancellation_pending=True,
+            )
+        )
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.return_value = {}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        )._poll_pending_cancellations()
+
+        executor.cancel.assert_awaited_once_with(run_id)
+        assert actions[0]["action"] == "execution_cancel_completed"
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.id == execution_id)
+        )
+        assert execution is not None
+        assert execution.cancellation_pending is False
+
     async def test_dry_run_does_not_retry_pending_cancellation(
         self,
         db_session: AsyncSession,
@@ -579,12 +687,12 @@ class TestPendingRecovery:
         )
         executor.start.assert_awaited_once()
 
-    async def test_retry_start_failure_can_recover_same_attempt(
+    async def test_retry_start_failure_does_not_reopen_same_attempt(
         self,
         db_session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A failed external start must leave the same retry marker recoverable."""
+        """An ambiguous external start failure must be terminal for the attempt."""
         monkeypatch.setattr(
             StuckExecutionPoller,
             "_retry_recovery_backoff",
@@ -609,17 +717,17 @@ class TestPendingRecovery:
         assert failed.execution_attempts == 1
 
         executor.start.side_effect = None
-        executor.start.return_value = {"run_id": "run-after-start-failure"}
+        executor.start.return_value = {"run_id": "must-not-start"}
         second_actions = await StuckExecutionPoller(
             db_session,
             executor=executor,
         ).poll()
 
-        assert any(
+        assert not any(
             action["action"] == "verification_retry_recovered"
             for action in second_actions
         )
-        assert executor.start.await_count == 2
+        executor.start.assert_awaited_once()
 
     async def test_dry_run_malformed_retry_contract_does_not_write_audit(
         self,
@@ -1611,6 +1719,117 @@ class TestCancellationLargeHistory:
 class TestCancellationConcurrency:
     @pytest.mark.skipif(
         not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="task-pointer revalidation requires PostgreSQL row locking",
+    )
+    async def test_pending_cancellation_revalidates_locked_task_pointer(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#293: a concurrent task attachment wins before cancellation."""
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+
+        writer = local_session()
+        await writer.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(
+                state=TaskState.RUNNING.value,
+                latest_macro_agent_run_id=run_id,
+            )
+        )
+
+        task_query_started = asyncio.Event()
+        task_query_read = asyncio.Event()
+        query_for_update = False
+        lock_order: list[str] = []
+
+        def _capture_task_query(
+            _connection: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            nonlocal query_for_update
+            normalized = statement.lower()
+            if normalized.lstrip().startswith("select") and "from task" in normalized:
+                query_for_update = "for update" in normalized
+                task_query_started.set()
+            if "for update" in normalized:
+                if "from execution" in normalized:
+                    lock_order.append("execution")
+                elif "from task" in normalized:
+                    lock_order.append("task")
+
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_task_query)
+        poller_session = local_session()
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        cancel_release = asyncio.Event()
+
+        async def _cancel(_run_id: str) -> dict[str, Any]:
+            await cancel_release.wait()
+            return {}
+
+        executor.cancel.side_effect = _cancel
+        original_scalar = poller_session.scalar
+
+        async def _scalar(*args: Any, **kwargs: Any) -> Any:
+            result = await original_scalar(*args, **kwargs)
+            if isinstance(result, Task):
+                task_query_read.set()
+            return result
+
+        poller_session.scalar = _scalar  # type: ignore[method-assign]
+        poller_task = asyncio.create_task(
+            StuckExecutionPoller(
+                poller_session,
+                executor=executor,
+            )._poll_pending_cancellations()
+        )
+        try:
+            await asyncio.wait_for(task_query_started.wait(), timeout=5)
+            if query_for_update:
+                # The locked query is waiting on the writer's uncommitted
+                # attachment. Releasing it lets the poller observe the pointer.
+                await writer.commit()
+            else:
+                # The unlocked parent query must finish and capture the old
+                # pointer before the concurrent attachment commits.
+                await asyncio.wait_for(task_query_read.wait(), timeout=5)
+                await writer.commit()
+            cancel_release.set()
+            actions = await asyncio.wait_for(poller_task, timeout=5)
+        finally:
+            event.remove(
+                engine.sync_engine, "before_cursor_execute", _capture_task_query
+            )
+            cancel_release.set()
+            if not poller_task.done():
+                poller_task.cancel()
+            await asyncio.gather(poller_task, return_exceptions=True)
+            await poller_session.close()
+            await writer.close()
+
+        assert len(actions) == 1
+        assert actions[0]["task_id"] == task.id
+        assert actions[0]["action"] == "execution_cancel_completed"
+        executor.cancel.assert_not_awaited()
+        assert actions[0]["reason"] == "run_attached_to_current_task"
+        assert lock_order[:2] == ["execution", "task"]
+
+        async with local_session() as check:
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            assert execution.cancellation_pending is False
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
         reason="SKIP LOCKED concurrency test requires PostgreSQL",
     )
     async def test_overlapping_pollers_do_not_double_process_cancellations(
@@ -1705,6 +1924,60 @@ class TestCancellationConcurrency:
         task_ids = [action["task_id"] for action in completed]
         assert len(completed) == 5
         assert len(task_ids) == len(set(task_ids))
+
+    @pytest.mark.skipif(
+        _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="SQLite cancellation concurrency test requires SQLite",
+    )
+    async def test_sqlite_pollers_claim_cancellation_once(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """SQLite pollers must not call the external cancel operation twice."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            _task, _run_id = await _pending_cancel_task(seed)
+
+        calls = 0
+        first_call = asyncio.Event()
+        second_call = asyncio.Event()
+        release_call = asyncio.Event()
+
+        class _CountingExecutor:
+            async def cancel(self, _run_id: str) -> dict[str, Any]:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    first_call.set()
+                else:
+                    second_call.set()
+                await release_call.wait()
+                return {}
+
+        async def poll() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                return await StuckExecutionPoller(
+                    db,
+                    executor=_CountingExecutor(),  # type: ignore[arg-type]
+                )._poll_pending_cancellations()
+
+        first = asyncio.create_task(poll())
+        await asyncio.wait_for(first_call.wait(), timeout=5)
+        second = asyncio.create_task(poll())
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(second_call.wait(), timeout=0.25)
+        finally:
+            release_call.set()
+
+        first_actions, second_actions = await asyncio.gather(first, second)
+
+        assert calls == 1
+        assert [
+            action["action"]
+            for action in first_actions + second_actions
+        ] == ["execution_cancel_completed"]
 
 
 class TestExecutionStartRecovery:
@@ -1968,6 +2241,358 @@ class TestExecutionStartRecovery:
 
 
 class TestPlaneProjectionSweeper:
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="sweeper/producer lock-order test requires PostgreSQL",
+    )
+    async def test_sweeper_does_not_hold_audit_tip_while_waiting_for_next_event(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A batch sweep must not deadlock with the next marker's producer."""
+        _engine, local_session = isolated_db
+        task_ids = [
+            "task-plane-lock-order-first",
+            "task-plane-lock-order-second",
+        ]
+        pending_event_ids = [
+            "pending-plane-lock-order-first",
+            "pending-plane-lock-order-second",
+        ]
+
+        async with local_session() as seed:
+            for task_id, pending_event_id in zip(
+                task_ids, pending_event_ids, strict=True
+            ):
+                seed.add(
+                    Task(
+                        id=task_id,
+                        project_id="proj-1",
+                        proposed_by="agent-1",
+                        state=TaskState.DONE,
+                    )
+                )
+                seed.add(
+                    AuditLog(
+                        event_id=pending_event_id,
+                        event_type="plane_projection_pending",
+                        task_id=task_id,
+                        actor="system",
+                        source="reconciliation_service",
+                        timestamp=datetime.now(UTC) - timedelta(hours=1),
+                        payload={
+                            "operation": "update_state",
+                            "state": TaskState.RUNNING.value,
+                        },
+                    )
+                )
+            await seed.commit()
+
+        second_sweeper_lock_requested = asyncio.Event()
+        producer_holds_second_event = asyncio.Event()
+        release_sweeper = asyncio.Event()
+
+        from governance_controller.services import audit_service as audit_module
+        from governance_controller.services import (
+            stuck_execution_poller as poller_module,
+        )
+
+        original_audit_lock = audit_module.acquire_plane_projection_event_lock
+        original_poller_lock = poller_module.acquire_plane_projection_event_lock
+
+        async def observe_producer_lock(db: Any, pending_event_id: str) -> None:
+            await original_audit_lock(db, pending_event_id)
+            if pending_event_id == pending_event_ids[1]:
+                producer_holds_second_event.set()
+
+        async def pause_sweeper_lock(db: Any, pending_event_id: str) -> None:
+            if pending_event_id == pending_event_ids[1]:
+                second_sweeper_lock_requested.set()
+                await release_sweeper.wait()
+            await original_poller_lock(db, pending_event_id)
+
+        monkeypatch.setattr(
+            audit_module,
+            "acquire_plane_projection_event_lock",
+            observe_producer_lock,
+        )
+        monkeypatch.setattr(
+            poller_module,
+            "acquire_plane_projection_event_lock",
+            pause_sweeper_lock,
+        )
+
+        async def produce_terminal() -> str:
+            async with local_session() as producer:
+                entry = await AuditService.log(
+                    db=producer,
+                    event_type="plane_projection_failed",
+                    task_id=task_ids[1],
+                    actor="system",
+                    source="verification_service",
+                    payload={"pending_event_id": pending_event_ids[1]},
+                )
+                await producer.commit()
+                return entry.event_id
+
+        sweeper_session = local_session()
+        sweep_task = asyncio.create_task(
+            StuckExecutionPoller(
+                sweeper_session, batch_size=2
+            )._poll_plane_projection_pending()
+        )
+        producer_task: asyncio.Task[str] | None = None
+        try:
+            await asyncio.wait_for(second_sweeper_lock_requested.wait(), timeout=5)
+            producer_task = asyncio.create_task(produce_terminal())
+            await asyncio.wait_for(producer_holds_second_event.wait(), timeout=5)
+            release_sweeper.set()
+
+            sweep_actions, producer_event_id = await asyncio.wait_for(
+                asyncio.gather(sweep_task, producer_task), timeout=2
+            )
+        except TimeoutError as exc:
+            raise AssertionError(
+                "sweeper and producer deadlocked on audit tip/event locks"
+            ) from exc
+        finally:
+            release_sweeper.set()
+            if not sweep_task.done():
+                sweep_task.cancel()
+            if producer_task is not None and not producer_task.done():
+                producer_task.cancel()
+            await asyncio.gather(sweep_task, return_exceptions=True)
+            if producer_task is not None:
+                await asyncio.gather(producer_task, return_exceptions=True)
+            await sweeper_session.close()
+
+        assert len(
+            [
+                action
+                for action in sweep_actions
+                if action["action"] == "plane_projection_resolved"
+            ]
+        ) == 1
+        async with local_session() as check:
+            rows = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_ids[1],
+                        AuditLog.payload["pending_event_id"].as_string()
+                        == pending_event_ids[1],
+                    )
+                )
+            ).scalars().all()
+            assert {row.event_id for row in rows} == {producer_event_id}
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="sweeper/producer interleaving requires PostgreSQL",
+    )
+    async def test_producer_completion_wins_after_sweeper_claims_marker(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A producer completing after claim must prevent sweeper insertion."""
+        _engine, local_session = isolated_db
+        task_id = "task-plane-sweep-producer-race"
+        pending_event_id = "pending-plane-sweep-producer-race"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            seed.add(
+                AuditLog(
+                    event_id=pending_event_id,
+                    event_type="plane_projection_pending",
+                    task_id=task_id,
+                    actor="system",
+                    source="reconciliation_service",
+                    timestamp=datetime.now(UTC) - timedelta(hours=1),
+                    payload={
+                        "operation": "update_state",
+                        "state": TaskState.EXEC_APPROVED.value,
+                    },
+                )
+            )
+            await seed.commit()
+
+        marker_claimed = asyncio.Event()
+        release_sweeper = asyncio.Event()
+        sweeper_session = local_session()
+        original_execute = sweeper_session.execute
+
+        async def execute_and_pause(
+            statement: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            result = await original_execute(statement, *args, **kwargs)
+            if getattr(statement, "_for_update_arg", None) is not None:
+                marker_claimed.set()
+                await release_sweeper.wait()
+            return result
+
+        sweeper_session.execute = execute_and_pause  # type: ignore[method-assign]
+        sweep_task = asyncio.create_task(
+            StuckExecutionPoller(
+                sweeper_session, batch_size=1
+            )._poll_plane_projection_pending()
+        )
+        producer_task: asyncio.Task[str] | None = None
+        try:
+            await asyncio.wait_for(marker_claimed.wait(), timeout=5)
+
+            async def produce_terminal() -> str:
+                async with local_session() as producer:
+                    entry = await AuditService.log(
+                        db=producer,
+                        event_type="plane_projection_completed",
+                        task_id=task_id,
+                        actor="system",
+                        source="verification_service",
+                        payload={"pending_event_id": pending_event_id},
+                    )
+                    await producer.commit()
+                    return entry.event_id
+
+            producer_task = asyncio.create_task(produce_terminal())
+            await asyncio.wait_for(producer_task, timeout=5)
+            release_sweeper.set()
+            sweep_actions = await asyncio.wait_for(sweep_task, timeout=5)
+        finally:
+            release_sweeper.set()
+            if producer_task is not None and not producer_task.done():
+                producer_task.cancel()
+            if not sweep_task.done():
+                sweep_task.cancel()
+            await asyncio.gather(producer_task, sweep_task, return_exceptions=True)
+            await sweeper_session.close()
+
+        assert sweep_actions == []
+        async with local_session() as check:
+            rows = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "plane_projection_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].payload["pending_event_id"] == pending_event_id
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="concurrent sweeper locking requires PostgreSQL",
+    )
+    async def test_concurrent_sweepers_complete_pending_marker_once(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#330: one pending marker produces one completion audit."""
+        engine, local_session = isolated_db
+        internal_id = str(uuid4())
+        task_id = f"task-plane-sweep-race-{internal_id[:8]}"
+        pending_event_id = f"evt-plane-sweep-race-{internal_id[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            seed.add(
+                AuditLog(
+                    event_id=pending_event_id,
+                    event_type="plane_projection_pending",
+                    task_id=task_id,
+                    actor="system",
+                    source="reconciliation_service",
+                    timestamp=datetime.now(UTC) - timedelta(hours=1),
+                    payload={
+                        "operation": "update_state",
+                        "state": TaskState.EXEC_APPROVED.value,
+                    },
+                )
+            )
+            await seed.commit()
+
+        first_completion_entered = asyncio.Event()
+        second_poller_finished = asyncio.Event()
+        completion_calls = 0
+        original_log = AuditService.log
+
+        async def _gated_log(*args: Any, **kwargs: Any) -> AuditLog:
+            nonlocal completion_calls
+            if kwargs.get("event_type") == "plane_projection_completed":
+                completion_calls += 1
+                if completion_calls == 1:
+                    first_completion_entered.set()
+                    await second_poller_finished.wait()
+            return await original_log(*args, **kwargs)
+
+        monkeypatch.setattr(AuditService, "log", staticmethod(_gated_log))
+
+        async def _poll() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                actions = await StuckExecutionPoller(
+                    db,
+                    batch_size=1,
+                )._poll_plane_projection_pending()
+            second_poller_finished.set()
+            return actions
+
+        first = asyncio.create_task(_poll())
+        second: asyncio.Task[list[dict[str, Any]]] | None = None
+        try:
+            await asyncio.wait_for(first_completion_entered.wait(), timeout=5)
+            second = asyncio.create_task(_poll())
+            await asyncio.wait_for(second_poller_finished.wait(), timeout=5)
+            first_actions = await asyncio.wait_for(first, timeout=5)
+            assert second is not None
+            second_actions = await asyncio.wait_for(second, timeout=5)
+        finally:
+            second_poller_finished.set()
+            pending_tasks = [first]
+            if second is not None:
+                pending_tasks.append(second)
+            for poller_task in pending_tasks:
+                if not poller_task.done():
+                    poller_task.cancel()
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        actions = first_actions + second_actions
+        assert len(
+            [
+                action
+                for action in actions
+                if action["action"] == "plane_projection_resolved"
+            ]
+        ) == 1
+        assert completion_calls == 1
+
+        async with local_session() as check:
+            completed = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "plane_projection_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(completed) == 1
+            assert completed[0].payload["pending_event_id"] == pending_event_id
+
     async def test_terminal_failure_alert_is_not_resolved_by_terminal_state(
         self,
         db_session: AsyncSession,
@@ -2116,6 +2741,75 @@ class TestPlaneProjectionSweeper:
         assert len(completed) == 1
         assert completed[0].payload["reason"] == "resolved_independently"
         assert completed[0].payload["pending_event_id"] == pending.event_id
+
+    async def test_synthetic_completion_does_not_hide_real_failure(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A sweeper marker cannot suppress a later authoritative failure."""
+        internal_id = str(uuid4())
+        task_id = f"task-plane-real-failure-{internal_id[:8]}"
+        pending_event_id = f"evt-plane-real-failure-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.DONE,
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=pending_event_id,
+                event_type="plane_projection_pending",
+                task_id=task_id,
+                actor="system",
+                source="reconciliation_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=1),
+                payload={
+                    "operation": "update_state",
+                    "state": TaskState.RUNNING.value,
+                },
+            )
+        )
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+        assert any(
+            action["action"] == "plane_projection_resolved" for action in actions
+        )
+
+        failed = await AuditService.log(
+            db=db_session,
+            event_type="plane_projection_failed",
+            task_id=task_id,
+            actor="system",
+            source="verification_service",
+            payload={
+                "pending_event_id": pending_event_id,
+                "error": "Plane unavailable",
+            },
+        )
+        await db_session.commit()
+
+        assert failed.event_type == "plane_projection_failed"
+        audits = (
+            await db_session.execute(
+                select(AuditLog)
+                .where(AuditLog.task_id == task_id)
+                .order_by(AuditLog.id)
+            )
+        ).scalars().all()
+        assert [
+            audit.event_type
+            for audit in audits
+            if audit.event_type
+            in {
+                "plane_projection_completed",
+                "plane_projection_failed",
+            }
+            if audit.payload.get("pending_event_id") == pending_event_id
+        ] == ["plane_projection_completed", "plane_projection_failed"]
 
     async def test_sweeper_ignores_recent_plane_projection_pending(
         self,

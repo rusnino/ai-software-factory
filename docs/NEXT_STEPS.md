@@ -1,6 +1,33 @@
 # Next Steps
 
-## Current State
+## Current Worktree (2026-09-07)
+
+**Phase 2 remains not gate-clean.** This worktree contains an uncommitted hardening batch for
+the policy-parser, OPA, approval/recovery CAS, Plane marker, audit-chain, SQLite, and migration
+paths. The latest verification evidence is:
+
+- SQLite controller suite: `790 passed, 45 skipped, 2 xfailed`.
+- PostgreSQL controller suite: `828 passed, 7 skipped, 2 xfailed`.
+- OPA: `check` passed and `test` reports `68/68`.
+- Ruff and mypy: clean; `git diff --check` clean.
+- macro-agent service suite: `10 passed` when run from its own uv project.
+
+The latest policy work added: a restricted `uv run` child allowlist; recursive child-path
+extraction; Git long-option abbreviation matching; `git --config-env` separate-form handling;
+`git config --edit/-e` and `--co` blocking; `git apply --unsafe-paths` and `git clone --template`
+blocking; executable git-config key families (`diff.*.command`, `credential.*.helper`,
+`submodule.*.update`, `gpg.ssh.*`, `core.alternateRefsCommand`, `difftool/mergetool.*.cmd`);
+sed whitespace and `!`-negated address handling; npm tool-specific path extraction; and OPA
+parsed-argv validation.
+
+The live issue gate is still open and is the source of truth. `#301` remains an architectural
+blocker because exact-once recovery after macro-agent response loss requires a macro-agent
+idempotency contract or an outbox, and `#293` documents the SQLite `BEGIN IMMEDIATE` external-I/O
+availability risk; both are outside this batch's constraints.
+
+Do not mark Phase 2 complete until the critical/high queries are empty after independent review.
+
+## Historical Round 18 State
 
 **Current status (2026-09-07): Round 19 — methodology changed, coverage widened, still not
 gate-clean.** This round's kickoff prompt was redesigned specifically because the prior one relied

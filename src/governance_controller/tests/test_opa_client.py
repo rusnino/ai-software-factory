@@ -7,7 +7,15 @@ import pytest
 
 from governance_controller.adapters.opa_client import OPAClient, OPAClientError
 from governance_controller.constants import ApprovalType
-from governance_controller.schemas import ProjectProfile, RepositoryConfig
+from governance_controller.schemas import (
+    Check,
+    CompletionContract,
+    ProjectExecutionConfig,
+    ProjectProfile,
+    RepositoryConfig,
+    ScopeCheck,
+    SecurityConfig,
+)
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.policy_engine import PolicyResult
 from governance_controller.services.policy_engine_backend import PolicyEngineBackend
@@ -157,6 +165,163 @@ async def test_opa_input_contains_policy_parity_facts(
     assert captured["forbidden_path_conflicts"] == []
 
 
+def test_opa_input_extracts_no_space_sed_output_path() -> None:
+    forbidden = "/tmp/blocked"
+    command = "sed -n '1w/tmp/blocked/marker' input"
+    contract = TaskContract(
+        task_id="T-sed-path",
+        project_id="P-sed-path",
+        proposed_by="agent",
+        objective="Check sed output path",
+        acceptance=["path is checked"],
+        execution=ExecutionConfig(harness="opencode"),
+        forbidden_paths=[forbidden],
+        completion_contract=CompletionContract(
+            task_id="T-sed-path",
+            required=[Check(type="command", command=command)],
+            scope_check=ScopeCheck(description="sed output path"),
+        ),
+    )
+    profile = ProjectProfile(
+        project_id="P-sed-path",
+        project_name="SedPathProject",
+        repository=RepositoryConfig(path="/repo"),
+        execution=ProjectExecutionConfig(allowed_harnesses=["opencode"]),
+        security=SecurityConfig(forbidden_paths=[forbidden]),
+    )
+
+    input_data = PolicyEngineBackend._minimal_opa_input(
+        contract, profile, ApprovalType.EXECUTION
+    )
+
+    assert input_data["forbidden_path_conflicts"] == ["/tmp/blocked/marker"]
+
+
+def test_opa_input_extracts_attached_tar_archive_path() -> None:
+    forbidden = "/tmp/blocked"
+    command = "tar -cf/tmp/blocked/archive.tar input"
+    contract = TaskContract(
+        task_id="T-tar-path",
+        project_id="P-tar-path",
+        proposed_by="agent",
+        objective="Check tar archive path",
+        acceptance=["path is checked"],
+        execution=ExecutionConfig(harness="opencode"),
+        forbidden_paths=[forbidden],
+        completion_contract=CompletionContract(
+            task_id="T-tar-path",
+            required=[Check(type="command", command=command)],
+            scope_check=ScopeCheck(description="tar archive path"),
+        ),
+    )
+    profile = ProjectProfile(
+        project_id="P-tar-path",
+        project_name="TarPathProject",
+        repository=RepositoryConfig(path="/repo"),
+        execution=ProjectExecutionConfig(allowed_harnesses=["opencode"]),
+        security=SecurityConfig(forbidden_paths=[forbidden]),
+    )
+
+    input_data = PolicyEngineBackend._minimal_opa_input(
+        contract, profile, ApprovalType.EXECUTION
+    )
+
+    assert input_data["forbidden_path_conflicts"] == ["/tmp/blocked/archive.tar"]
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_path"),
+    [
+        ("tar --dir=/tmp/blocked -tf archive.tar", "/tmp/blocked"),
+        ("tar --dire=/tmp/blocked -tf archive.tar", "/tmp/blocked"),
+        (
+            "tar --files-from=/tmp/blocked/list -cf archive.tar input",
+            "/tmp/blocked/list",
+        ),
+        ("tar -T /tmp/blocked/list -cf archive.tar input", "/tmp/blocked/list"),
+        ("tar cf/tmp/blocked/archive.tar input", "/tmp/blocked/archive.tar"),
+        (
+            "cp --targe=/tmp/blocked/.git source",
+            "/tmp/blocked/.git",
+        ),
+        (
+            "git config --fil=/tmp/blocked/.git/config filter.pwn.clean touch",
+            "/tmp/blocked/.git/config",
+        ),
+        ("go build -o=/tmp/blocked/tool ./cmd", "/tmp/blocked/tool"),
+        ("go build -o /tmp/blocked/tool ./cmd", "/tmp/blocked/tool"),
+        ("pytest --basetemp=/tmp/blocked/tmp", "/tmp/blocked/tmp"),
+        ("pytest --junitxml=/tmp/blocked/result.xml", "/tmp/blocked/result.xml"),
+        ("pytest --log-file=/tmp/blocked/test.log", "/tmp/blocked/test.log"),
+        ("pytest --debug=/tmp/blocked/debug.log", "/tmp/blocked/debug.log"),
+        ("make -f/tmp/blocked/Makefile", "/tmp/blocked/Makefile"),
+    ],
+)
+def test_opa_input_extracts_abbreviated_tar_paths(
+    command: str, expected_path: str
+) -> None:
+    forbidden = "/tmp/blocked"
+    contract = TaskContract(
+        task_id="T-tar-path",
+        project_id="P-tar-path",
+        proposed_by="agent",
+        objective="Check tar path",
+        acceptance=["path is checked"],
+        execution=ExecutionConfig(harness="opencode"),
+        forbidden_paths=[forbidden],
+        completion_contract=CompletionContract(
+            task_id="T-tar-path",
+            required=[Check(type="command", command=command)],
+            scope_check=ScopeCheck(description="tar path"),
+        ),
+    )
+    profile = ProjectProfile(
+        project_id="P-tar-path",
+        project_name="TarPathProject",
+        repository=RepositoryConfig(path="/repo"),
+        execution=ProjectExecutionConfig(allowed_harnesses=["opencode"]),
+        security=SecurityConfig(forbidden_paths=[forbidden]),
+    )
+
+    input_data = PolicyEngineBackend._minimal_opa_input(
+        contract, profile, ApprovalType.EXECUTION
+    )
+
+    assert input_data["forbidden_path_conflicts"] == [expected_path]
+
+
+def test_opa_input_extracts_bare_relative_positional_path() -> None:
+    forbidden = "secret.txt"
+    command = "cat secret.txt"
+    contract = TaskContract(
+        task_id="T-bare-path",
+        project_id="P-bare-path",
+        proposed_by="agent",
+        objective="Check bare path",
+        acceptance=["path is checked"],
+        execution=ExecutionConfig(harness="opencode"),
+        forbidden_paths=[forbidden],
+        completion_contract=CompletionContract(
+            task_id="T-bare-path",
+            required=[Check(type="command", command=command)],
+            scope_check=ScopeCheck(description="bare path"),
+        ),
+    )
+    profile = ProjectProfile(
+        project_id="P-bare-path",
+        project_name="BarePathProject",
+        repository=RepositoryConfig(path="/repo"),
+        execution=ProjectExecutionConfig(allowed_harnesses=["opencode"]),
+        security=SecurityConfig(forbidden_paths=[forbidden]),
+    )
+
+    input_data = PolicyEngineBackend._minimal_opa_input(
+        contract, profile, ApprovalType.EXECUTION
+    )
+
+    assert input_data["forbidden_path_conflicts"] == [forbidden]
+
+
 async def test_opa_client_raises_on_http_error(httpx_mock) -> None:
     client = OPAClient(base_url="http://opa.example.com")
     httpx_mock.add_response(status_code=500, text="boom")
@@ -220,6 +385,37 @@ async def test_backend_uses_opa_when_configured(
     assert result.allowed is True
     assert result.violations == []
     assert fake.calls[0]["approval_type"] == "plan"
+
+
+async def test_backend_denies_malformed_opa_violations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed OPA decisions must fail closed instead of silently allowing."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "opa_base_url", "http://opa.example.com")
+
+    fake = _FakeOPAClient({"allow": True, "violations": "not-a-list"})
+    backend = PolicyEngineBackend(opa_client=fake)
+    contract = TaskContract(
+        task_id="T-malformed-opa",
+        project_id="P-1",
+        proposed_by="agent",
+        objective="Do work",
+        acceptance=["Pass"],
+        execution=ExecutionConfig(harness="opencode"),
+    )
+    profile = ProjectProfile(
+        project_id="P-1",
+        project_name="Test",
+        repository=RepositoryConfig(path="/repo"),
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    result = await backend.evaluate(contract, profile, ApprovalType.PLAN)
+
+    assert result.allowed is False
+    assert any("malformed" in violation.lower() for violation in result.violations)
 
 
 async def test_backend_runs_embedded_before_opa(

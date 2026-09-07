@@ -88,12 +88,18 @@ class PolicyEngineBackend:
             )
 
         allow_value = result.get("allow")
-        allowed = allow_value is True
         violations = result.get("violations")
-        if not isinstance(violations, list):
-            violations = []
-        violations = [str(v) for v in violations]
-        return PolicyResult(allowed=allowed, violations=violations)
+        if not isinstance(allow_value, bool) or not isinstance(violations, list):
+            return PolicyResult(
+                allowed=False,
+                violations=["OPA returned a malformed policy decision"],
+            )
+        if not all(isinstance(violation, str) for violation in violations):
+            return PolicyResult(
+                allowed=False,
+                violations=["OPA returned a malformed policy decision"],
+            )
+        return PolicyResult(allowed=allow_value, violations=violations)
 
     @staticmethod
     def _minimal_opa_input(

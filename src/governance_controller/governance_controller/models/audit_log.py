@@ -7,6 +7,7 @@ from typing import Any, cast
 from sqlalchemy import DDL, Column, DateTime, Index, event, text
 from sqlalchemy.dialects.postgresql import JSON
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Mapper
 from sqlalchemy.sql.expression import ColumnElement
 from sqlmodel import Field, SQLModel
@@ -98,6 +99,27 @@ class AuditLog(SQLModel, table=True):
 # namespace for audit-log writes. ponytail: global lock; split by chain only
 # when audit throughput makes serialization measurable.
 _AUDITLOG_TIP_LOCK_KEY: int = 0xA471_100_0_0001
+_SQLITE_AUDIT_TRANSACTION_KEY = "auditlog_sqlite_transaction"
+
+
+def _acquire_sqlite_audit_transaction(connection: Connection) -> None:
+    """Take SQLite's writer lock without committing the caller's transaction.
+
+    A flush may already have written another table before this mapper hook runs;
+    in that case SQLite already holds its writer lock and rejects a second
+    ``BEGIN IMMEDIATE``. That rejection is safe to ignore, but other SQLite
+    errors must still propagate.
+    """
+    transaction = connection.get_transaction()
+    if connection.info.get(_SQLITE_AUDIT_TRANSACTION_KEY) is transaction:
+        return
+
+    try:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+    except OperationalError as exc:
+        if "cannot start a transaction within a transaction" not in str(exc):
+            raise
+    connection.info[_SQLITE_AUDIT_TRANSACTION_KEY] = connection.get_transaction()
 
 
 @event.listens_for(AuditLog, "before_insert")
@@ -121,6 +143,8 @@ def _audit_log_before_insert(
                     text("SELECT pg_advisory_xact_lock(:key)"),
                     {"key": _AUDITLOG_TIP_LOCK_KEY},
                 )
+            elif connection.dialect.name == "sqlite":
+                _acquire_sqlite_audit_transaction(connection)
             stmt = (
                 select(cast(ColumnElement[str], AuditLog.row_hash))
                 .order_by(cast(ColumnElement[int], AuditLog.id).desc())

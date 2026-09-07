@@ -3,19 +3,47 @@ package governance.approve_test
 import rego.v1
 
 _base_input := {
+    "task_id": "task-1",
+    "project_id": "project-1",
     "proposed_by": "agent-1",
     "approval_type": "execution",
     "has_objective": true,
     "has_acceptance": true,
-    "approval": {"actor": "human-1"},
+    "approval": {"actor": "human-1", "type": "execution"},
     "execution": {
         "harness": "opencode",
         "role": "worker",
+        "uses_docker_socket": false,
+        "destructive_shell": false,
+        "network_access": "restricted",
+        "spawn_subagents": false,
+        "force_push": false,
+        "signed_commits": false,
+        "timeout_minutes": 60,
+        "max_retries": 2,
     },
     "commands": [],
+    "parsed_commands": [],
     "allowed_harnesses": ["opencode"],
-    "security": {},
-    "git": {},
+    "forbidden_path_conflicts": [],
+    "forbidden_paths": [],
+    "security": {
+        "docker_socket": "deny",
+        "destructive_shell": "deny",
+        "network": "restricted",
+        "spawn_subagents": "deny",
+        "forbidden_paths": [],
+    },
+    "git": {
+        "merge_requires_human": true,
+        "force_push": "deny",
+        "signed_commits": "optional",
+    },
+    "profile_execution": {
+        "timeout_minutes": 60,
+        "max_retries": 2,
+    },
+    "harness_roles": {"opencode": ["worker"]},
 }
 
 test_sudo_command_is_denied if {
@@ -107,7 +135,14 @@ test_sed_attached_and_abbreviated_options_are_denied if {
     every command in cases {
         decision := data.governance.approve with input as object.union(
             _base_input,
-            {"commands": [command]},
+            {
+                "commands": [command],
+                "parsed_commands": [{
+                    "raw": command,
+                    "argv": split(command, " "),
+                    "error": "",
+                }],
+            },
         )
 
         decision.allow == false
@@ -359,6 +394,28 @@ test_tar_execution_hook_options_are_denied if {
     }
 }
 
+test_tar_positional_filenames_are_not_option_clusters if {
+    cases := [
+        "tar -cf archive.tar fileF",
+        "tar -cf archive.tar xfile",
+    ]
+    every command in cases {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [command],
+                "parsed_commands": [{
+                    "raw": command,
+                    "argv": split(command, " "),
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == true
+    }
+}
+
 test_nul_command_is_denied if {
     decision := data.governance.approve with input as object.union(
         _base_input,
@@ -595,6 +652,11 @@ test_forbidden_path_sibling_is_allowed if {
         _base_input,
         {
             "commands": ["echo /tmp/secret_backup"],
+            "parsed_commands": [{
+                "raw": "echo /tmp/secret_backup",
+                "argv": ["echo", "/tmp/secret_backup"],
+                "error": "",
+            }],
             "forbidden_paths": ["/tmp/secret"],
         },
     )
@@ -692,4 +754,919 @@ test_find_fprintf_is_denied if {
     decision.allow == false
     some violation in decision.violations
     contains(lower(violation), "dangerous")
+}
+
+test_command_execution_bypasses_are_denied if {
+    every test_case in [
+        {
+            "command": "git -c alias.pwn=!touch /tmp/marker pwn",
+            "argv": ["git", "-c", "alias.pwn=!touch", "/tmp/marker", "pwn"],
+        },
+        {
+            "command": "git -c core.hooksPath=/tmp/hooks commit --amend --allow-empty",
+            "argv": [
+                "git",
+                "-c",
+                "core.hooksPath=/tmp/hooks",
+                "commit",
+                "--amend",
+                "--allow-empty",
+            ],
+        },
+        {
+            "command": "git clone --upload-pack=touch https://example.invalid/repo",
+            "argv": [
+                "git",
+                "clone",
+                "--upload-pack=touch",
+                "https://example.invalid/repo",
+            ],
+        },
+        {
+            "command": "git --config-env core.editor=TERM status",
+            "argv": ["git", "--config-env", "core.editor=TERM", "status"],
+        },
+        {
+            "command": "git config --edit",
+            "argv": ["git", "config", "--edit"],
+        },
+        {
+            "command": "git config -e",
+            "argv": ["git", "config", "-e"],
+        },
+        {
+            "command": "git apply --unsafe-paths patch",
+            "argv": ["git", "apply", "--unsafe-paths", "patch"],
+        },
+        {
+            "command": "git clone --template=/tmp/template https://example.invalid/repo",
+            "argv": [
+                "git",
+                "clone",
+                "--template=/tmp/template",
+                "https://example.invalid/repo",
+            ],
+        },
+        {
+            "command": "git clone --u=touch https://example.invalid/repo",
+            "argv": [
+                "git",
+                "clone",
+                "--u=touch",
+                "https://example.invalid/repo",
+            ],
+        },
+        {
+            "command": "git fetch --upl=touch origin",
+            "argv": ["git", "fetch", "--upl=touch", "origin"],
+        },
+        {
+            "command": "git push --rece=touch origin HEAD:refs/heads/main",
+            "argv": [
+                "git",
+                "push",
+                "--rece=touch",
+                "origin",
+                "HEAD:refs/heads/main",
+            ],
+        },
+        {
+            "command": "git push --e=touch origin HEAD:refs/heads/main",
+            "argv": [
+                "git",
+                "push",
+                "--e=touch",
+                "origin",
+                "HEAD:refs/heads/main",
+            ],
+        },
+        {
+            "command": "git apply --uns patch",
+            "argv": ["git", "apply", "--uns", "patch"],
+        },
+        {
+            "command": "git clone --te=/tmp/template https://example.invalid/repo",
+            "argv": [
+                "git",
+                "clone",
+                "--te=/tmp/template",
+                "https://example.invalid/repo",
+            ],
+        },
+        {
+            "command": "git config submodule.pwn.update !touch",
+            "argv": ["git", "config", "submodule.pwn.update", "!touch"],
+        },
+        {
+            "command": "git config gpg.ssh.defaultKeyCommand touch",
+            "argv": ["git", "config", "gpg.ssh.defaultKeyCommand", "touch"],
+        },
+        {
+            "command": "git config gpg.ssh.program touch",
+            "argv": ["git", "config", "gpg.ssh.program", "touch"],
+        },
+        {
+            "command": "git config --co comment core.editor touch",
+            "argv": [
+                "git",
+                "config",
+                "--co",
+                "comment",
+                "core.editor",
+                "touch",
+            ],
+        },
+        {
+            "command": "git -c protocol.ext.allow=always ls-remote ext::touch%20/tmp/marker",
+            "argv": [
+                "git",
+                "-c",
+                "protocol.ext.allow=always",
+                "ls-remote",
+                "ext::touch%20/tmp/marker",
+            ],
+        },
+        {
+            "command": "unzip -o payload.zip",
+            "argv": ["unzip", "-o", "payload.zip"],
+        },
+        {
+            "command": "sed -n '1w/tmp/marker' input",
+            "argv": ["sed", "-n", "1w/tmp/marker", "input"],
+        },
+        {
+            "command": "uv run sh -c 'touch /tmp/marker'",
+            "argv": ["uv", "run", "sh", "-c", "touch /tmp/marker"],
+        },
+        {
+            "command": "uv run ./payload",
+            "argv": ["uv", "run", "./payload"],
+        },
+        {
+            "command": "uv run /bin/printf payload",
+            "argv": ["uv", "run", "/bin/printf", "payload"],
+        },
+        {
+            "command": "uv run uv run /usr/bin/printf NESTED_UNALLOWLISTED",
+            "argv": [
+                "uv",
+                "run",
+                "uv",
+                "run",
+                "/usr/bin/printf",
+                "NESTED_UNALLOWLISTED",
+            ],
+        },
+        {
+            "command": "uv run rm -rf /",
+            "argv": ["uv", "run", "rm", "-rf", "/"],
+        },
+        {
+            "command": "uv run git clean -fdx",
+            "argv": ["uv", "run", "git", "clean", "-fdx"],
+        },
+        {
+            "command": "uv run git -c core.sshCommand=touch status",
+            "argv": ["uv", "run", "git", "-c", "core.sshCommand=touch", "status"],
+        },
+        {
+            "command": "uv run tar -xf archive.tar",
+            "argv": ["uv", "run", "tar", "-xf", "archive.tar"],
+        },
+        {
+            "command": "sed -i.bak s/a/b/ file",
+            "argv": ["sed", "-i.bak", "s/a/b/", "file"],
+        },
+        {
+            "command": "sed -ibak s/a/b/ file",
+            "argv": ["sed", "-ibak", "s/a/b/", "file"],
+        },
+        {
+            "command": "sed r file input",
+            "argv": ["sed", "r", "file", "input"],
+        },
+        {
+            "command": "sed w file input",
+            "argv": ["sed", "w", "file", "input"],
+        },
+        {
+            "command": "tar vxf archive.tar",
+            "argv": ["tar", "vxf", "archive.tar"],
+        },
+        {
+            "command": "tar fx archive.tar",
+            "argv": ["tar", "fx", "archive.tar"],
+        },
+        {
+            "command": "git config -f.git/config advice.detachedHead false",
+            "argv": ["git", "config", "-f.git/config", "advice.detachedHead", "false"],
+        },
+        {
+            "command": "git -c credential.https://example.com.helper=!printf username=pwn credential fill",
+            "argv": ["git", "-c", "credential.https://example.com.helper=!printf", "username=pwn", "credential", "fill"],
+        },
+        {
+            "command": "git config credential.https://example.com.helper !touch",
+            "argv": ["git", "config", "credential.https://example.com.helper", "!touch"],
+        },
+        {
+            "command": "git config diff.pwn.command touch",
+            "argv": ["git", "config", "diff.pwn.command", "touch"],
+        },
+        {
+            "command": "git config core.alternateRefsCommand touch",
+            "argv": ["git", "config", "core.alternateRefsCommand", "touch"],
+        },
+    ] {
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [test_case.command],
+            "parsed_commands": [{
+                "raw": test_case.command,
+                "argv": test_case.argv,
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+}
+
+test_safe_git_config_and_read_only_sed_are_allowed if {
+    every test_case in [
+        {
+            "command": "git -c advice.detachedHead=false status",
+            "argv": ["git", "-c", "advice.detachedHead=false", "status"],
+        },
+        {
+            "command": "sed -n '1,10p' source",
+            "argv": ["sed", "-n", "1,10p", "source"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == true
+    }
+}
+
+test_sed_no_space_write_path_conflict_is_denied if {
+    command := "sed -n '1w/tmp/blocked/marker' input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "1w/tmp/blocked/marker", "input"],
+                "error": "",
+            }],
+            "forbidden_path_conflicts": ["/tmp/blocked/marker"],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "forbidden path")
+}
+
+test_parsed_git_shell_alias_config_forms_are_denied if {
+    every test_case in [
+        {
+            "command": "git config --global alias.pwn !touch",
+            "argv": ["git", "config", "--global", "alias.pwn", "!touch"],
+        },
+        {
+            "command": "git --config=alias.pwn=!touch pwn",
+            "argv": ["git", "--config=alias.pwn=!touch", "pwn"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+    }
+}
+
+test_parsed_read_only_sed_filename_is_allowed if {
+    command := "sed -n '1,10p' w /tmp/other-input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "1,10p", "w", "/tmp/other-input"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == true
+}
+
+test_sed_escaped_address_file_write_is_denied if {
+    command := "sed -n '\\%foo%w /tmp/marker' input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "\\%foo%w /tmp/marker", "input"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_sed_spaced_address_file_write_is_denied if {
+    command := "sed -n '1 w /tmp/marker' input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "1 w /tmp/marker", "input"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_sed_negated_address_file_write_is_denied if {
+    command := "sed -n '1!w /tmp/marker' input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "1!w /tmp/marker", "input"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_residual_command_execution_forms_are_denied if {
+    every test_case in [
+        {
+            "command": "git config set core.editor touch",
+            "argv": ["git", "config", "set", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --type string core.editor touch",
+            "argv": ["git", "config", "--type", "string", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --value foo core.editor touch",
+            "argv": ["git", "config", "--value", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --default foo core.editor touch",
+            "argv": ["git", "config", "--default", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --value foo core.editor touch",
+            "argv": ["git", "config", "set", "--value", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "cp --target-directory=/repo/.git source",
+            "argv": ["cp", "--target-directory=/repo/.git", "source"],
+        },
+        {
+            "command": "cp -t/repo/.git source",
+            "argv": ["cp", "-t/repo/.git", "source"],
+        },
+        {
+            "command": "sed --i input",
+            "argv": ["sed", "--i", "input"],
+        },
+        {
+            "command": "sed --in input",
+            "argv": ["sed", "--in", "input"],
+        },
+        {
+            "command": "sed --inp input",
+            "argv": ["sed", "--inp", "input"],
+        },
+        {
+            "command": "tar xvPf archive.tar",
+            "argv": ["tar", "xvPf", "archive.tar"],
+        },
+        {
+            "command": "tar --extr archive.tar",
+            "argv": ["tar", "--extr", "archive.tar"],
+        },
+        {
+            "command": "git clone -u touch https://example.invalid/repo",
+            "argv": ["git", "clone", "-u", "touch", "https://example.invalid/repo"],
+        },
+        {
+            "command": "git fetch --upload-pack=touch origin",
+            "argv": ["git", "fetch", "--upload-pack=touch", "origin"],
+        },
+        {
+            "command": "git ls-remote --upload-pack=touch origin",
+            "argv": ["git", "ls-remote", "--upload-pack=touch", "origin"],
+        },
+        {
+            "command": "git difftool --no-prompt -x 'touch /tmp/marker' HEAD^ HEAD",
+            "argv": ["git", "difftool", "--no-prompt", "-x", "touch /tmp/marker", "HEAD^", "HEAD"],
+        },
+        {
+            "command": "git rebase -x 'touch /tmp/marker' HEAD^",
+            "argv": ["git", "rebase", "-x", "touch /tmp/marker", "HEAD^"],
+        },
+        {
+            "command": "git filter-branch --tree-filter 'touch /tmp/marker' -- --all",
+            "argv": ["git", "filter-branch", "--tree-filter", "touch /tmp/marker", "--", "--all"],
+        },
+        {
+            "command": "git -c 'difftool.pwn.cmd=touch /tmp/marker' difftool --tool=pwn HEAD^ HEAD",
+            "argv": ["git", "-c", "difftool.pwn.cmd=touch /tmp/marker", "difftool", "--tool=pwn", "HEAD^", "HEAD"],
+        },
+        {
+            "command": "git config mergetool.pwn.cmd 'touch /tmp/marker'",
+            "argv": ["git", "config", "mergetool.pwn.cmd", "touch /tmp/marker"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+    }
+}
+
+test_tar_attached_archive_path_conflict_is_denied if {
+    command := "tar -cf/tmp/secret/archive.tar input"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["tar", "-cf/tmp/secret/archive.tar", "input"],
+                "error": "",
+            }],
+            "forbidden_path_conflicts": ["/tmp/secret/archive.tar"],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "forbidden path")
+}
+
+test_safe_git_short_u_controls_are_allowed if {
+    every test_case in [
+        {
+            "command": "git add -u",
+            "argv": ["git", "add", "-u"],
+        },
+        {
+            "command": "git status -uall",
+            "argv": ["git", "status", "-uall"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == true
+    }
+}
+
+test_dangerous_git_key_after_option_argument_is_denied if {
+    every test_case in [
+        {
+            "command": "git config --file /tmp/config core.editor touch",
+            "argv": ["git", "config", "--file", "/tmp/config", "core.editor", "touch"],
+        },
+        {
+            "command": "git config -f /tmp/config core.editor touch",
+            "argv": ["git", "config", "-f", "/tmp/config", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --blob HEAD:config core.editor touch",
+            "argv": ["git", "config", "--blob", "HEAD:config", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --type string core.editor touch",
+            "argv": ["git", "config", "--type", "string", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --value foo core.editor touch",
+            "argv": ["git", "config", "--value", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "git config --default foo core.editor touch",
+            "argv": ["git", "config", "--default", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --file /tmp/config core.editor touch",
+            "argv": ["git", "config", "set", "--file", "/tmp/config", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --type string core.editor touch",
+            "argv": ["git", "config", "set", "--type", "string", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --value foo core.editor touch",
+            "argv": ["git", "config", "set", "--value", "foo", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set -t path core.editor touch",
+            "argv": ["git", "config", "set", "-t", "path", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --t path core.editor touch",
+            "argv": ["git", "config", "set", "--t", "path", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --ty path core.editor touch",
+            "argv": ["git", "config", "set", "--ty", "path", "core.editor", "touch"],
+        },
+        {
+            "command": "git config set --comment note core.editor touch",
+            "argv": ["git", "config", "set", "--comment", "note", "core.editor", "touch"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+    }
+}
+
+test_git_push_transport_helper_overrides_are_denied if {
+    every command in [
+        "git push --receive-pack touch origin HEAD:refs/heads/main",
+        "git push --receive-pack=touch origin HEAD:refs/heads/main",
+        "git push --receiv=touch origin HEAD:refs/heads/main",
+        "git push --exec touch origin HEAD:refs/heads/main",
+        "git push --exec=touch origin HEAD:refs/heads/main",
+        "git push --ex=touch origin HEAD:refs/heads/main",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_zip_test_command_override_is_denied if {
+    every test_case in [
+        {
+            "command": "zip -q -T -TT touch archive.zip input.txt",
+            "argv": ["zip", "-q", "-T", "-TT", "touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip -q -T -TT=touch archive.zip input.txt",
+            "argv": ["zip", "-q", "-T", "-TT=touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip -q -T -TTtouch archive.zip input.txt",
+            "argv": ["zip", "-q", "-T", "-TTtouch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip --test-command=touch archive.zip input.txt",
+            "argv": ["zip", "--test-command=touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip --test-c=touch archive.zip input.txt",
+            "argv": ["zip", "--test-c=touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip --test-command touch archive.zip input.txt",
+            "argv": ["zip", "--test-command", "touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip --test-c touch archive.zip input.txt",
+            "argv": ["zip", "--test-c", "touch", "archive.zip", "input.txt"],
+        },
+        {
+            "command": "zip -qTTtouch archive.zip input.txt",
+            "argv": ["zip", "-qTTtouch", "archive.zip", "input.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+    }
+}
+
+test_tool_output_paths_targeting_git_control_files_are_denied if {
+    every test_case in [
+        {
+            "command": "git diff -o.git/config",
+            "argv": ["git", "diff", "-o.git/config"],
+        },
+        {
+            "command": "go build -o=.git/hooks/pre-commit ./cmd",
+            "argv": ["go", "build", "-o=.git/hooks/pre-commit", "./cmd"],
+        },
+        {
+            "command": "pytest --basetemp=.git/pytest-tmp",
+            "argv": ["pytest", "--basetemp=.git/pytest-tmp"],
+        },
+        {
+            "command": "pytest --junitxml=.git/results.xml",
+            "argv": ["pytest", "--junitxml=.git/results.xml"],
+        },
+        {
+            "command": "pytest --log-file=.git/test.log",
+            "argv": ["pytest", "--log-file=.git/test.log"],
+        },
+        {
+            "command": "pytest --debug=.git/debug.log",
+            "argv": ["pytest", "--debug=.git/debug.log"],
+        },
+        {
+            "command": "uv run pytest --junitxml=.git/results.xml",
+            "argv": ["uv", "run", "pytest", "--junitxml=.git/results.xml"],
+        },
+        {
+            "command": "cp -t=.git source",
+            "argv": ["cp", "-t=.git", "source"],
+        },
+        {
+            "command": "tar -C.git -tf archive.tar",
+            "argv": ["tar", "-C.git", "-tf", "archive.tar"],
+        },
+        {
+            "command": "npm --prefix=.git install --offline",
+            "argv": ["npm", "--prefix=.git", "install", "--offline"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+    }
+}
+
+test_executable_git_config_key_families_are_denied if {
+    every command in [
+        "git config filter.pwn.clean touch",
+        "git config filter.pwn.smudge touch",
+        "git config filter.pwn.process touch",
+        "git config diff.pwn.textconv touch",
+        "git config diff.external touch",
+        "git config merge.pwn.driver touch",
+        "git config gpg.program touch",
+        "git config sequence.editor touch",
+        "git config includeIf.pwn.path /tmp/include",
+        "git config core.askPass touch",
+        "git config difftool.pwn.cmd touch",
+        "git config mergetool.pwn.cmd touch",
+        "git -c credential.https://example.com.helper=!printf username=pwn credential fill",
+        "git config credential.https://example.com.helper !touch",
+        "git config diff.pwn.command touch",
+        "git config core.alternateRefsCommand touch",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_safe_zip_positional_archive_names_are_allowed if {
+    every test_case in [
+        {
+            "command": "zip -q -T battery.zip input.txt",
+            "argv": ["zip", "-q", "-T", "battery.zip", "input.txt"],
+        },
+        {
+            "command": "zip -q -T matter.zip input.txt",
+            "argv": ["zip", "-q", "-T", "matter.zip", "input.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == true
+    }
+}
+
+test_old_style_tar_helper_clusters_are_denied if {
+    every command in [
+        "tar vI touch -c -f archive.tar input.txt",
+        "tar vF touch -c -f archive.tar input.txt",
+        "tar vIP touch -c -f archive.tar input.txt",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_git_push_force_flags_are_denied_by_profile if {
+    every command in [
+        "git push --force origin HEAD:refs/heads/main",
+        "git push --force-with-lease origin HEAD:refs/heads/main",
+        "git push --mirror origin",
+        "git push --mir origin",
+        "git push -f origin HEAD:refs/heads/main",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_parsed_argv_must_match_raw_command if {
+    command := "git apply --unsafe-paths patch"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["echo", "safe"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_git_push_destructive_refs_are_denied_by_profile if {
+    every command in [
+        "git push origin +main:main",
+        "git push origin :main",
+        "git push --delete origin main",
+        "git push -d origin main",
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {"commands": [command]},
+        )
+
+        decision.allow == false
+    }
+}
+
+test_sed_alternate_delimiter_write_is_denied if {
+    command := "sed -n 's@foo@bar@w/tmp/x' input.txt"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": ["sed", "-n", "s@foo@bar@w/tmp/x", "input.txt"],
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+}
+
+test_sed_safe_text_containing_w_remains_allowed if {
+    every test_case in [
+        {
+            "command": "sed -n 's/foo/w bar/g' input.txt",
+            "argv": ["sed", "-n", "s/foo/w bar/g", "input.txt"],
+        },
+        {
+            "command": "sed -n '/w foo/p' input.txt",
+            "argv": ["sed", "-n", "/w foo/p", "input.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == true
+    }
+}
+
+test_incomplete_input_documents_are_denied if {
+    every document in [
+        {},
+        {"commands": []},
+        {"has_objective": true, "has_acceptance": true},
+    ] {
+        decision := data.governance.approve with input as document
+
+        decision.allow == false
+        count(decision.violations) > 0
+    }
+}
+
+test_commands_require_matching_parsed_argv_records if {
+    command := "git p\"ush\" origin +main:main"
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {"commands": [command]},
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "parsed_commands")
 }

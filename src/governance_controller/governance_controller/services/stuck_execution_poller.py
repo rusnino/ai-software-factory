@@ -22,12 +22,16 @@ from sqlalchemy.orm import aliased
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
+from governance_controller.db import begin_sqlite_cancellation_claim
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.plane_projection import (
+    acquire_plane_projection_event_lock,
+)
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.task_service import TaskService
 
@@ -133,90 +137,81 @@ class StuckExecutionPoller:
     async def _poll_pending_cancellations(self) -> list[dict[str, Any]]:
         """Retry external cancellations that failed after a CAS loser."""
         actions: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        for _ in range(self._batch_size):
-            # The mutable queue flag is indexed on Execution. AuditLog remains
-            # append-only and is not consulted during polling.
-            stmt = (
-                select(Execution)
-                .where(
-                    Execution.__table__.c.cancellation_pending.is_(True)  # type: ignore[attr-defined]
-                )
-                .order_by(Execution.__table__.c.id)  # type: ignore[attr-defined]
-                .limit(1)
+        if not self._dry_run:
+            await begin_sqlite_cancellation_claim(self.db)
+        stmt = (
+            select(Execution)
+            .where(
+                Execution.__table__.c.cancellation_pending.is_(True)  # type: ignore[attr-defined]
             )
-            if seen_ids:
-                stmt = stmt.where(
-                    Execution.__table__.c.id.notin_(seen_ids)  # type: ignore[attr-defined]
-                )
-            if self._is_postgres():
-                stmt = stmt.with_for_update(of=Execution, skip_locked=True)
-            stmt = stmt.execution_options(populate_existing=True)
-            result = await self.db.execute(stmt)
-            execution = result.scalar_one_or_none()
-            if execution is None:
-                break
-            seen_ids.add(execution.id)
+            .order_by(Execution.__table__.c.id)  # type: ignore[attr-defined]
+            .limit(self._batch_size)
+            .execution_options(populate_existing=True)
+        )
+        if self._is_postgres() and not self._dry_run:
+            # Hold the bounded batch claim until all external calls finish.
+            stmt = stmt.with_for_update(of=Execution, skip_locked=True)
+        executions = (await self.db.execute(stmt)).scalars().all()
 
+        # Keep external work outside the audit-tip critical section. The row
+        # claims remain held, while audit outcomes are written in one short DB
+        # phase after all cancellation requests return.
+        outcomes: list[tuple[Execution, bool, dict[str, Any], dict[str, Any]]] = []
+        for execution in executions:
             run_id = execution.macro_agent_run_id
             if not isinstance(run_id, str) or not run_id:
-                await self.db.commit()
                 continue
 
-            task = await self.db.scalar(
+            task_stmt = (
                 select(Task)
                 .where(Task.id == execution.task_id)  # type: ignore[arg-type]
                 .execution_options(populate_existing=True)
             )
-            if task is not None and task.latest_macro_agent_run_id == run_id:
+            if self._is_postgres() and not self._dry_run:
+                # Keep the authoritative pointer decision ordered with any
+                # concurrent attachment until the cleanup transaction commits.
+                task_stmt = task_stmt.with_for_update()
+            task = await self.db.scalar(task_stmt)
+            if (
+                task is not None
+                and task.state is TaskState.RUNNING
+                and task.latest_macro_agent_run_id == run_id
+            ):
+                action = {
+                    "task_id": execution.task_id,
+                    "execution_id": execution.id,
+                    "action": (
+                        "would_complete_execution_cancel"
+                        if self._dry_run
+                        else "execution_cancel_completed"
+                    ),
+                    "macro_agent_run_id": run_id,
+                    "reason": "run_attached_to_current_task",
+                }
                 if self._dry_run:
-                    actions.append(
-                        {
-                            "task_id": execution.task_id,
-                            "execution_id": execution.id,
-                            "action": "would_complete_execution_cancel",
-                            "macro_agent_run_id": run_id,
-                            "reason": "run_attached_to_current_task",
-                        }
+                    actions.append(action)
+                else:
+                    outcomes.append(
+                        (
+                            execution,
+                            True,
+                            {
+                                "macro_agent_run_id": run_id,
+                                "reason": "run_attached_to_current_task",
+                            },
+                            action,
+                        )
                     )
-                    await self.db.commit()
-                    continue
-                execution.cancellation_pending = False
-                await self.db.flush()
-                await AuditService.log(
-                    db=self.db,
-                    event_type="execution_cancel_completed",
-                    task_id=execution.task_id,
-                    actor="system",
-                    source="stuck_execution_poller",
-                    execution_id=execution.id,
-                    payload={
-                        "macro_agent_run_id": run_id,
-                        "reason": "run_attached_to_current_task",
-                    },
-                )
-                await self.db.commit()
-                actions.append(
-                    {
-                        "task_id": execution.task_id,
-                        "execution_id": execution.id,
-                        "action": "execution_cancel_completed",
-                        "macro_agent_run_id": run_id,
-                        "reason": "run_attached_to_current_task",
-                    }
-                )
                 continue
 
+            action = {
+                "task_id": execution.task_id,
+                "execution_id": execution.id,
+                "action": "would_cancel_pending_execution",
+                "macro_agent_run_id": run_id,
+            }
             if self._dry_run:
-                actions.append(
-                    {
-                        "task_id": execution.task_id,
-                        "execution_id": execution.id,
-                        "action": "would_cancel_pending_execution",
-                        "macro_agent_run_id": run_id,
-                    }
-                )
-                await self.db.commit()
+                actions.append(action)
                 continue
 
             try:
@@ -226,75 +221,68 @@ class StuckExecutionPoller:
                     isinstance(exc, httpx.HTTPStatusError)
                     and exc.response.status_code == 404
                 ):
-                    execution.cancellation_pending = False
-                    await self.db.flush()
-                    await AuditService.log(
-                        db=self.db,
-                        event_type="execution_cancel_completed",
-                        task_id=execution.task_id,
-                        actor="system",
-                        source="stuck_execution_poller",
-                        execution_id=execution.id,
-                        payload={
-                            "macro_agent_run_id": run_id,
-                            "reason": "run_not_found",
-                        },
-                    )
-                    await self.db.commit()
-                    actions.append(
-                        {
-                            "task_id": execution.task_id,
-                            "execution_id": execution.id,
-                            "action": "execution_cancel_completed",
-                            "macro_agent_run_id": run_id,
-                            "reason": "run_not_found",
-                        }
+                    action = {
+                        **action,
+                        "action": "execution_cancel_completed",
+                        "reason": "run_not_found",
+                    }
+                    outcomes.append(
+                        (
+                            execution,
+                            True,
+                            {
+                                "macro_agent_run_id": run_id,
+                                "reason": "run_not_found",
+                            },
+                            action,
+                        )
                     )
                     continue
+                outcomes.append(
+                    (
+                        execution,
+                        False,
+                        {
+                            "macro_agent_run_id": run_id,
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                        {
+                            **action,
+                            "action": "execution_cancel_failed",
+                        },
+                    )
+                )
+                continue
+
+            outcomes.append(
+                (
+                    execution,
+                    True,
+                    {"macro_agent_run_id": run_id},
+                    {**action, "action": "execution_cancel_completed"},
+                )
+            )
+
+        if not self._dry_run:
+            for execution, completed, payload, action in outcomes:
+                if completed:
+                    execution.cancellation_pending = False
                 await AuditService.log(
                     db=self.db,
-                    event_type="execution_cancel_failed",
+                    event_type=(
+                        "execution_cancel_completed"
+                        if completed
+                        else "execution_cancel_failed"
+                    ),
                     task_id=execution.task_id,
                     actor="system",
                     source="stuck_execution_poller",
                     execution_id=execution.id,
-                    payload={
-                        "macro_agent_run_id": run_id,
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                    },
+                    payload=payload,
                 )
-                await self.db.commit()
-                actions.append(
-                    {
-                        "task_id": execution.task_id,
-                        "execution_id": execution.id,
-                        "action": "execution_cancel_failed",
-                        "macro_agent_run_id": run_id,
-                    }
-                )
-                continue
-
-            execution.cancellation_pending = False
-            await self.db.flush()
-            await AuditService.log(
-                db=self.db,
-                event_type="execution_cancel_completed",
-                task_id=execution.task_id,
-                actor="system",
-                source="stuck_execution_poller",
-                execution_id=execution.id,
-                payload={"macro_agent_run_id": run_id},
-            )
+                actions.append(action)
             await self.db.commit()
-            actions.append(
-                {
-                    "task_id": execution.task_id,
-                    "execution_id": execution.id,
-                    "action": "execution_cancel_completed",
-                    "macro_agent_run_id": run_id,
-                }
-            )
 
         return actions
 
@@ -923,10 +911,11 @@ class StuckExecutionPoller:
             if now < deadline:
                 continue
 
-            if await self._execution_is_still_alive(
+            alive, status_error = await self._execution_is_still_alive(
                 execution,
                 record_errors=not self._dry_run,
-            ):
+            )
+            if alive:
                 actions.append(
                     {
                         "task_id": task.id,
@@ -951,7 +940,12 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            await self._mark_blocked(task, execution)
+            if not await self._mark_blocked(
+                task,
+                execution,
+                status_error=status_error,
+            ):
+                continue
             actions.append(
                 {
                     "task_id": task.id,
@@ -1133,17 +1127,46 @@ class StuckExecutionPoller:
         )
         grace = self._plane_projection_sweep_grace()
         now = datetime.now(UTC)
-        result = await self.db.execute(
+        stmt = (
             select(AuditLog)
             .where(AuditLog.event_type == "plane_projection_pending")  # type: ignore[arg-type]
             .where(~terminal_exists)
             .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
             .limit(self._batch_size)
         )
+        if self._is_postgres() and not self._dry_run:
+            stmt = stmt.with_for_update(of=AuditLog, skip_locked=True)
+        result = await self.db.execute(stmt)
 
         actions: list[dict[str, Any]] = []
-        for marker in result.scalars().all():
+        markers = result.scalars().all()
+        for marker in markers:
+            if not self._dry_run:
+                await acquire_plane_projection_event_lock(self.db, marker.event_id)
+                terminal_result = await self.db.execute(
+                    select(AuditLog)
+                    .where(
+                        AuditLog.task_id == marker.task_id,  # type: ignore[arg-type]
+                        AuditLog.__table__.c.event_type.in_(  # type: ignore[attr-defined]
+                            [
+                                "plane_projection_completed",
+                                "plane_projection_failed",
+                                "plane_projection_skipped",
+                            ]
+                        ),
+                        AuditLog.payload["pending_event_id"].as_string()
+                        == marker.event_id,
+                    )
+                    .limit(1)
+                    .execution_options(populate_existing=True)
+                )
+                if terminal_result.scalar_one_or_none() is not None:
+                    await self.db.commit()
+                    continue
+
             if now - self._as_utc(marker.timestamp) < grace:
+                if not self._dry_run:
+                    await self.db.commit()
                 continue
             task = await self.db.scalar(
                 select(Task)
@@ -1151,6 +1174,8 @@ class StuckExecutionPoller:
                 .execution_options(populate_existing=True)
             )
             if task is None:
+                if not self._dry_run:
+                    await self.db.commit()
                 continue
 
             operation = marker.payload.get("operation")
@@ -1178,6 +1203,8 @@ class StuckExecutionPoller:
                 )
 
             if not resolved:
+                if not self._dry_run:
+                    await self.db.commit()
                 continue
 
             if self._dry_run:
@@ -1200,6 +1227,7 @@ class StuckExecutionPoller:
                     "operation": operation,
                     "pending_event_id": marker.event_id,
                     "reason": "resolved_independently",
+                    "synthetic": True,
                 },
             )
             await self.db.commit()
@@ -1259,16 +1287,17 @@ class StuckExecutionPoller:
         self,
         execution: Execution,
         record_errors: bool = True,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         """Return True if the macro-agent run is actively progressing.
 
         A status check that succeeds and reports a terminal state is treated as
         a delivery that handled the stuck detection itself; an exception or a
-        non-terminal active state means we should block the task.
+        non-terminal active state means we should block the task. Any diagnostic
+        is returned for the caller to persist only after it wins the task CAS.
         """
         run_id = execution.macro_agent_run_id
         if not run_id:
-            return False
+            return False, None
 
         status: dict[str, Any] | None = None
         status_error: str | None = None
@@ -1291,13 +1320,11 @@ class StuckExecutionPoller:
         # The macro-agent service returns status under the key "status".
         run_status = status.get("status") if isinstance(status, dict) else None
         if run_status in {"running", "allocated", "active", "queued"}:
-            return True
+            return True, None
         # A genuine exception from the macro-agent service (timeout,
         # connection refused, 404 after a restart) is recorded so the audit
         # trail can distinguish a lost run from a merely slow one (#261).
-        if status_error is not None and record_errors:
-            execution.status_error = status_error
-        return False
+        return False, status_error if record_errors else None
 
 
     async def _mark_blocked(
@@ -1306,14 +1333,17 @@ class StuckExecutionPoller:
         execution: Execution,
         reason_code: str = "execution_timed_out",
         detail: dict[str, Any] | None = None,
-    ) -> None:
+        status_error: str | None = None,
+    ) -> bool:
         """Transition task to BLOCKED and record a human-alert audit entry."""
         success = await StateMachine.atomic_transition(self.db, task, TaskState.BLOCKED)
         if not success:
-            return
+            return False
 
         execution.state = TaskState.BLOCKED
         execution.ended_at = datetime.now(UTC)
+        if status_error is not None:
+            execution.status_error = status_error
         await self.db.flush()
 
         payload: dict[str, Any] = {
@@ -1333,6 +1363,7 @@ class StuckExecutionPoller:
             execution_id=execution.id,
             payload=payload,
         )
+        return True
 
     async def _mark_failed(
         self,

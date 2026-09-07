@@ -23,6 +23,14 @@ def _plane_projection_lock_key(controller_task_id: str) -> int:
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
+def _plane_projection_event_lock_key(pending_event_id: str) -> int:
+    """Return a stable advisory-lock key for one pending projection event."""
+    digest = hashlib.sha256(
+        b"plane-projection-event:" + pending_event_id.encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
 async def acquire_plane_projection_lock(
     db: AsyncSession, controller_task_id: str
 ) -> None:
@@ -39,6 +47,34 @@ async def acquire_plane_projection_lock(
         text("SELECT pg_advisory_xact_lock(:key)"),
         {"key": _plane_projection_lock_key(controller_task_id)},
     )
+
+
+async def acquire_plane_projection_event_lock(
+    db: AsyncSession, pending_event_id: str
+) -> None:
+    """Serialize terminal audit outcomes for one pending projection event.
+
+    The caller must commit or roll back after checking or recording the
+    terminal outcome. SQLite uses an immediate write transaction because it has
+    no advisory-lock equivalent; the database-wide writer lock is intentional
+    for its test/development deployment.
+    """
+    bind = db.bind
+    if bind is None:
+        return
+    if bind.dialect.name == "postgresql":
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _plane_projection_event_lock_key(pending_event_id)},
+        )
+    elif bind.dialect.name == "sqlite":
+        # SQLite cannot upgrade an existing read transaction to IMMEDIATE.
+        # Terminal projection callers have already completed their external
+        # work, so ending that transaction is safer than allowing an
+        # unprotected check-then-insert race.
+        if db.in_transaction():
+            await db.commit()
+        await db.execute(text("BEGIN IMMEDIATE"))
 
 # Mapping from Controller state name to Plane state display name. Plane CE state
 # UUIDs are fetched at runtime per project.

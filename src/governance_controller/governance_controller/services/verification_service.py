@@ -17,10 +17,13 @@ from uuid import uuid4
 import structlog
 from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import set_committed_value
 
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
+from governance_controller.db import begin_sqlite_cancellation_claim
+from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
 from governance_controller.schemas.completion_contract import Check
@@ -632,19 +635,24 @@ class VerificationService:
                     if started is False:
                         return report
                 except Exception as exc:
-                    await AuditService.log(
-                        db=db,
-                        event_type="verification_retry_failed",
+                    if not await service._retry_failure_is_recorded(
+                        db,
                         task_id=task.id,
-                        actor="system",
-                        source="verification_service",
-                        payload={
-                            "pending_event_id": retry_pending.event_id,
-                            "attempt": retry_attempt,
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                        },
-                    )
+                        pending_event_id=retry_pending.event_id,
+                    ):
+                        await AuditService.log(
+                            db=db,
+                            event_type="verification_retry_failed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            payload={
+                                "pending_event_id": retry_pending.event_id,
+                                "attempt": retry_attempt,
+                                "error": str(exc),
+                                "error_type": type(exc).__name__,
+                            },
+                        )
                     await db.commit()
                     raise
                 await AuditService.log(
@@ -748,6 +756,44 @@ class VerificationService:
                 "new_state": state.value,
                 "ended_at": now.isoformat(),
             },
+        )
+
+    @staticmethod
+    async def _retry_pending_marker(
+        db: AsyncSession,
+        task_id: str,
+        attempt: int,
+    ) -> AuditLog | None:
+        """Return the durable marker for a verification retry attempt."""
+        result = await db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                AuditLog.event_type == "verification_retry_pending",  # type: ignore[arg-type]
+            )
+            .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
+        )
+        for marker in result.scalars().all():
+            if marker.payload.get("attempt") == attempt:
+                return marker
+        return None
+
+    @staticmethod
+    async def _retry_failure_is_recorded(
+        db: AsyncSession,
+        task_id: str,
+        pending_event_id: str,
+    ) -> bool:
+        """Return whether a retry marker already has a terminal failure audit."""
+        result = await db.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                AuditLog.event_type == "verification_retry_failed",  # type: ignore[arg-type]
+            )
+        )
+        return any(
+            entry.payload.get("pending_event_id") == pending_event_id
+            for entry in result.scalars().all()
         )
 
     async def _start_retry_execution(
@@ -857,6 +903,21 @@ class VerificationService:
                 execution.state = TaskState.FAILED
                 execution.ended_at = datetime.now(UTC)
                 await db.flush()
+                retry_attempt = task.execution_attempts
+                retry_marker = await self._retry_pending_marker(
+                    db,
+                    task_id=task.id,
+                    attempt=retry_attempt,
+                )
+                failure_payload: dict[str, object] = {
+                    "execution_id": execution.id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "verification_report": report,
+                    "attempt": retry_attempt,
+                }
+                if retry_marker is not None:
+                    failure_payload["pending_event_id"] = retry_marker.event_id
                 await AuditService.log(
                     db=db,
                     event_type="retry_execution_start_failed",
@@ -864,16 +925,31 @@ class VerificationService:
                     actor="system",
                     source="verification_service",
                     execution_id=execution.id,
-                    payload={
-                        "execution_id": execution.id,
-                        "error": str(exc),
-                        "error_type": type(exc).__name__,
-                        "verification_report": report,
-                    },
+                    payload=failure_payload,
                 )
+                if retry_marker is not None:
+                    await AuditService.log(
+                        db=db,
+                        event_type="verification_retry_failed",
+                        task_id=task.id,
+                        actor="system",
+                        source="verification_service",
+                        payload={
+                            "pending_event_id": retry_marker.event_id,
+                            "attempt": retry_attempt,
+                            "reason": "retry_execution_start_failed",
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                        },
+                    )
                 await db.commit()
                 raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
 
+            # The local start failed even though another writer owns the task.
+            # Finalize only this execution; do not copy the competing task state.
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            await db.flush()
             await AuditService.log(
                 db=db,
                 event_type="concurrent_modification",
@@ -895,7 +971,9 @@ class VerificationService:
             ) from None
 
         execution.macro_agent_run_id = macro_agent_run_id
-        await db.flush()
+        # Keep this change in memory until the task attachment CAS has run. A
+        # pre-CAS flush holds the Execution row while the CAS may wait on Task,
+        # allowing a concurrent Task -> Execution writer to deadlock.
 
         # Attach the external run only if the task is still the RUNNING retry
         # this method started. The sentinel prevents another execution from
@@ -922,9 +1000,21 @@ class VerificationService:
                 .execution_options(populate_existing=True)
             )
             fresh_task = fresh_result.scalar_one_or_none()
-            if fresh_task is None or (
-                fresh_task.latest_macro_agent_run_id != macro_agent_run_id
-            ):
+            # Re-read under a row lock after the initial observation. A writer
+            # racing between those reads must win or be observed before success.
+            locked_result = await db.execute(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            fresh_task = locked_result.scalar_one_or_none()
+            task_owns_run = (
+                fresh_task is not None
+                and fresh_task.state is TaskState.RUNNING
+                and fresh_task.latest_macro_agent_run_id == macro_agent_run_id
+            )
+            if not task_owns_run:
                 execution.state = (
                     fresh_task.state
                     if fresh_task is not None
@@ -932,6 +1022,7 @@ class VerificationService:
                     else TaskState.FAILED
                 )
                 execution.ended_at = datetime.now(UTC)
+                execution.cancellation_pending = True
                 await db.flush()
                 await AuditService.log(
                     db=db,
@@ -949,10 +1040,6 @@ class VerificationService:
                         ),
                     },
                 )
-                await db.commit()
-
-                execution.cancellation_pending = True
-                await db.flush()
                 await AuditService.log(
                     db=db,
                     event_type="execution_cancel_pending",
@@ -966,23 +1053,82 @@ class VerificationService:
                     },
                 )
                 await db.commit()
-                try:
-                    await self.executor.cancel(macro_agent_run_id)
-                except Exception as cleanup_exc:  # pragma: no cover - boundary shield
-                    await AuditService.log(
-                        db=db,
-                        event_type="execution_cancel_failed",
-                        task_id=task.id,
-                        actor="system",
-                        source="verification_service",
-                        execution_id=execution.id,
-                        payload={
-                            "macro_agent_run_id": macro_agent_run_id,
-                            "error": str(cleanup_exc),
-                            "error_type": type(cleanup_exc).__name__,
-                        },
-                    )
+
+                # Reacquire the same execution -> task locks used by the
+                # poller. The execution flag is the durable single-flight
+                # claim; without an outbox or a separate claim state, retain
+                # these locks through cancellation so a poller cannot issue a
+                # second external request after this decision.
+                await begin_sqlite_cancellation_claim(db)
+                cleanup_execution_stmt = (
+                    select(Execution)
+                    .where(Execution.id == execution.id)  # type: ignore[arg-type]
+                    .execution_options(populate_existing=True)
+                )
+                if db.bind is not None and db.bind.dialect.name == "postgresql":
+                    cleanup_execution_stmt = cleanup_execution_stmt.with_for_update()
+                execution = (await db.execute(cleanup_execution_stmt)).scalar_one()
+
+                cleanup_task_stmt = (
+                    select(Task)
+                    .where(Task.id == task.id)  # type: ignore[arg-type]
+                    .execution_options(populate_existing=True)
+                )
+                if db.bind is not None and db.bind.dialect.name == "postgresql":
+                    cleanup_task_stmt = cleanup_task_stmt.with_for_update()
+                cleanup_task = (
+                    await db.execute(cleanup_task_stmt)
+                ).scalar_one_or_none()
+                task_owns_run = (
+                    cleanup_task is not None
+                    and cleanup_task.state is TaskState.RUNNING
+                    and cleanup_task.latest_macro_agent_run_id == macro_agent_run_id
+                )
+
+                if not execution.cancellation_pending:
+                    # The poller completed this intent while the retry loser
+                    # was reacquiring its rows. Do not repeat its cancel or
+                    # completion audit.
                     await db.commit()
+                    if not task_owns_run:
+                        raise ValueError(
+                            "Concurrent modification detected during retry "
+                            "execution start"
+                        )
+                elif not task_owns_run:
+                    try:
+                        await self.executor.cancel(macro_agent_run_id)
+                    except Exception as cleanup_exc:  # pragma: no cover
+                        await AuditService.log(
+                            db=db,
+                            event_type="execution_cancel_failed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            execution_id=execution.id,
+                            payload={
+                                "macro_agent_run_id": macro_agent_run_id,
+                                "error": str(cleanup_exc),
+                                "error_type": type(cleanup_exc).__name__,
+                            },
+                        )
+                        await db.commit()
+                    else:
+                        execution.cancellation_pending = False
+                        await db.flush()
+                        await AuditService.log(
+                            db=db,
+                            event_type="execution_cancel_completed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            execution_id=execution.id,
+                            payload={"macro_agent_run_id": macro_agent_run_id},
+                        )
+                        await db.commit()
+                    raise ValueError(
+                        "Concurrent modification detected during retry execution start"
+                    )
                 else:
                     execution.cancellation_pending = False
                     await db.flush()
@@ -993,26 +1139,31 @@ class VerificationService:
                         actor="system",
                         source="verification_service",
                         execution_id=execution.id,
-                        payload={"macro_agent_run_id": macro_agent_run_id},
+                        payload={
+                            "macro_agent_run_id": macro_agent_run_id,
+                            "reason": "run_attached_to_current_task",
+                        },
                     )
                     await db.commit()
-                raise ValueError(
-                    "Concurrent modification detected during retry execution start"
-                )
 
-            # Another writer attached this exact run while the CAS was being
-            # resolved. Refresh the local object and continue without canceling.
-            task.latest_macro_agent_run_id = macro_agent_run_id
-            if fresh_task is not None:
-                task.version = fresh_task.version
+                # Another writer attached this exact run while the CAS was
+                # being resolved. Keep the identity map current without
+                # staging a blind ORM UPDATE.
+                if cleanup_task is not None:
+                    set_committed_value(
+                        task,
+                        "latest_macro_agent_run_id",
+                        macro_agent_run_id,
+                    )
+                    set_committed_value(task, "version", cleanup_task.version)
 
         # Persist the new run ID on the task so feedback has a target even when
         # the relationship is not loaded.
-        task.latest_macro_agent_run_id = macro_agent_run_id
         if cas_result.rowcount:  # type: ignore[attr-defined]
-            task.version = expected_task_version + 1
-        await db.flush()
+            set_committed_value(task, "latest_macro_agent_run_id", macro_agent_run_id)
+            set_committed_value(task, "version", expected_task_version + 1)
 
+        await db.flush()
         await AuditService.log(
             db=db,
             event_type="retry_execution_start",

@@ -12,8 +12,9 @@ validates every ``Check.command`` before approval. The checks below are applied 
    metacharacters/operators after parsing (redirections, pipes, command
    substitution, globbing, variable expansion, etc.).
 3. Reject common wrappers and interpreters at ``argv[0]`` (``bash -c``,
-   ``env``, ``xargs``, ``nice``, ``nohup``, ``ssh``, ``python``, ``node``, etc.)
-   because their payloads bypass token-level policy checks.
+    ``env``, ``xargs``, ``nice``, ``nohup``, ``ssh``, ``python``, ``node``, etc.)
+    and nested interpreters launched by ``uv run`` because their payloads bypass
+    token-level policy checks.
 4. Require an explicit allowlist match for ``argv[0]``. Only a small set of
    common verification binaries is permitted.
  5. Reject common destructive file-system operations inside the resolved argv:
@@ -22,12 +23,13 @@ validates every ``Check.command`` before approval. The checks below are applied 
     ``find -delete``/``-exec``/``-ok``/``-fprintf``,
     ``tar --to-command``/``--remove-files``/``--absolute-names``/
     ``--transform``/``--xform``, and ``git clean -f``/``-x``/``-d``.
- 6. Reject command-execution primitives on allowlisted binaries: ``git -c``
+6. Reject command-execution primitives on allowlisted binaries: ``git -c``
      overrides and persistent ``git config`` for dangerous config keys
      (``core.sshCommand``, ``core.fsmonitor``, ``core.editor``,
-     ``credential.helper``, etc.) and
-    ``git --config-env``, protected ``.git/config``/``.git/hooks`` writes, tar
-    extraction, and sed file I/O/``s///e``/``<addr>e`` primitives.
+     ``core.hooksPath``, ``protocol.ext.allow``, ``credential.helper``, etc.),
+     shell aliases, upload-pack overrides, and ``ext::`` transports; also
+     ``git --config-env``, protected ``.git`` control-directory writes, tar
+     extraction, and sed file I/O/``s///e``/``<addr>e`` primitives.
 7. Reject container isolation escape flags (``--privileged``,
    ``--network=host``, ``--volume``, ``--mount``, etc.) as defense-in-depth in
    case a future allowed helper wraps a container binary. ``docker``/``podman``/
@@ -132,7 +134,8 @@ _FORBIDDEN_CONTROL_CHARACTERS: set[str] = {"\n", "\r", "\x00"}
 # ``_FORBIDDEN_WRAPPER_COMMANDS`` and that check runs *before* the allowlist,
 # so any ``python ...`` command is rejected as a wrapper/interpreter (e.g.
 # ``python -c`` is arbitrary code execution). Prefixing with an allowlisted
-# runner such as ``uv`` (``uv run python -m pytest``) remains permitted.
+# runner such as ``uv`` remains permitted for direct tools (``uv run pytest``),
+# but not for nested interpreters.
 _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
     {
         # Build tools / package managers.
@@ -216,7 +219,8 @@ _ALLOWED_VERIFICATION_COMMANDS: frozenset[str] = frozenset(
         "touch",
         "tr",
         "uniq",
-        "unzip",
+        # unzip is intentionally omitted: extraction writes untrusted archive
+        # members and cannot be made safe with this argv-level policy.
         "wc",
         "which",
         "whoami",
@@ -263,6 +267,10 @@ _FORBIDDEN_WRAPPER_COMMANDS: frozenset[str] = frozenset(
     }
 )
 
+_UV_RUN_CHILD_COMMANDS: frozenset[str] = frozenset(
+    {"bandit", "black", "flake8", "mypy", "pylint", "pyright", "pytest", "ruff"}
+)
+
 # Docker-socket access substrings (checked against resolved argv tokens).
 # NOTE: docker/podman/kubectl are intentionally absent from
 # ``_ALLOWED_VERIFICATION_COMMANDS`` because bind-mount and privileged flags
@@ -299,8 +307,10 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
         "core.fsmonitor",
         "core.editor",
         "core.pager",
+        "core.hookspath",
         "credential.helper",
         "include.path",
+        "protocol.ext.allow",
     }
 )
 
@@ -308,10 +318,20 @@ _FORBIDDEN_GIT_CONFIG_KEYS: frozenset[str] = frozenset(
 # A later git command can execute values read from them, so checking only git's
 # own argv is insufficient.
 _GIT_CONTROL_FILE_WRITERS: frozenset[str] = frozenset(
-    {"cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed"}
-)
-_GIT_CONTROL_FILE_NAMES: frozenset[str] = frozenset(
-    {"config", "config.worktree", "hooks"}
+    {
+        "cp",
+        "mv",
+        "mkdir",
+        "tee",
+        "touch",
+        "tar",
+        "unzip",
+        "zip",
+        "sed",
+        "go",
+        "npm",
+        "pytest",
+    }
 )
 
 # Options whose values select a filesystem location. The values are included in
@@ -320,7 +340,9 @@ _PATH_ARGUMENT_OPTIONS: frozenset[str] = frozenset(
     {
         "--directory",
         "--target-directory",
+        "--files-from",
         "--git-dir",
+        "--output",
         "--work-tree",
         "--file",
         "--include",
@@ -329,8 +351,38 @@ _PATH_ARGUMENT_OPTIONS: frozenset[str] = frozenset(
         "-I",
         "-f",
         "-t",
+        "-T",
     }
 )
+_COMMAND_PATH_ARGUMENT_OPTIONS: dict[str, frozenset[str]] = {
+    "git": frozenset({"-o"}),
+    "go": frozenset({"-o"}),
+    "pytest": frozenset(
+        {
+            "--basetemp",
+            "--junitxml",
+            "--junit-xml",
+            "--result-log",
+            "--log-file",
+            "--debug",
+        }
+    ),
+    "npm": frozenset(
+        {"--prefix", "--userconfig", "--globalconfig", "--cache", "--logs-dir"}
+    ),
+}
+_UNPARSEABLE_COMMAND_PATH = "<unparseable-command>"
+
+_GIT_CONFIG_VALUE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("--file", "--fil"),
+    ("--blob", "--blo"),
+    ("--type", "--t"),
+    ("--value", "--val"),
+    ("--default", "--def"),
+    ("--comment", "--co"),
+)
+
+_TAR_OLD_STYLE_OPTION_STARTS: frozenset[str] = frozenset("acdfrtuvx")
 
 # Dangerous tar flags that execute arbitrary commands, delete files, or rewrite
 # extracted paths outside the worktree.
@@ -398,6 +450,11 @@ def _forbidden_path_conflicts(
     """Return the subset of *touched_paths* that fall under any forbidden path."""
     conflicts: set[str] = set()
     for touched in touched_paths:
+        # Keep command-parser failures fail closed for verification preflight,
+        # even when no explicit forbidden path was configured.
+        if touched == _UNPARSEABLE_COMMAND_PATH:
+            conflicts.add(touched)
+            continue
         for forbidden in forbidden_paths:
             if _is_inside(touched, forbidden):
                 conflicts.add(touched)
@@ -415,33 +472,110 @@ def _extract_command_paths(command: str) -> set[str]:
     """
     argv, _ = _parse_command_to_argv(command)
     if argv is None:
-        return set()
+        # Callers use this result during verification preflight as well as
+        # policy evaluation, so an uninspectable command must not disappear.
+        return {_UNPARSEABLE_COMMAND_PATH}
+    return _extract_argv_paths(argv)
+
+
+def _is_path_argument_option(option: str, command: str = "") -> bool:
+    """Return True for path options, including long-option abbreviations."""
+    lowered = option.lower()
+    command_options = _COMMAND_PATH_ARGUMENT_OPTIONS.get(command, frozenset())
+    if lowered in {value.lower() for value in command_options}:
+        return True
+    if lowered.startswith("--") and any(
+        canonical.lower().startswith(lowered)
+        for canonical in command_options
+        if canonical.startswith("--")
+    ):
+        return True
+    if lowered in {value.lower() for value in _PATH_ARGUMENT_OPTIONS}:
+        return True
+    return lowered.startswith("--") and any(
+        canonical.lower().startswith(lowered)
+        for canonical in _PATH_ARGUMENT_OPTIONS
+        if canonical.startswith("--")
+    )
+
+
+def _extract_argv_paths(argv: list[str]) -> set[str]:
+    """Return path-like values from an already parsed argv."""
     paths: set[str] = set()
+    base_command = _base_command(argv[0])
     for index, token in enumerate(argv[1:], start=1):
         lowered = token.lower()
-        if token in _PATH_ARGUMENT_OPTIONS and index + 1 < len(argv):
+        option = lowered.split("=", 1)[0]
+        if (
+            _is_path_argument_option(option, base_command)
+            and index + 1 < len(argv)
+            and "=" not in token
+        ):
             paths.add(argv[index + 1])
             continue
         if token.startswith("--") and "=" in token:
             option, candidate = token.split("=", 1)
-            if option.lower() in {
-                option_name.lower() for option_name in _PATH_ARGUMENT_OPTIONS
-            } and candidate:
+            if _is_path_argument_option(option, base_command) and candidate:
                 paths.add(candidate)
                 continue
         if token.startswith("-C") and len(token) > 2:
-            paths.add(token[2:])
+            paths.add(token[2:].lstrip("="))
             continue
         if token.startswith("-I") and len(token) > 2:
+            paths.add(token[2:].lstrip("="))
+            continue
+        if token.startswith("-f") and len(token) > 2:
             paths.add(token[2:].lstrip("="))
             continue
         if token.startswith("-t") and len(token) > 2:
             paths.add(token[2:].lstrip("="))
             continue
+        if (
+            base_command in {"git", "go"}
+            and token.lower().startswith("-o")
+            and len(token) > 2
+        ):
+            paths.add(token[2:].lstrip("="))
+            continue
+        if (
+            _base_command(argv[0]) == "tar"
+            and token.startswith("-")
+            and not token.startswith("--")
+        ):
+            short_options = token[1:]
+            file_option_index = short_options.lower().find("f")
+            if file_option_index >= 0:
+                candidate = short_options[file_option_index + 1 :].lstrip("=")
+                if candidate:
+                    paths.add(candidate)
+                elif index + 1 < len(argv):
+                    paths.add(argv[index + 1])
+                continue
+        if (
+            index == 1
+            and base_command == "tar"
+            and token
+            and not token.startswith("-")
+            and token[0].lower() in _TAR_OLD_STYLE_OPTION_STARTS
+        ):
+            file_option_index = token.lower().find("f")
+            if file_option_index >= 0:
+                candidate = token[file_option_index + 1 :].lstrip("=")
+                if candidate:
+                    paths.add(candidate)
+                elif index + 1 < len(argv):
+                    paths.add(argv[index + 1])
+                continue
         if token.startswith("-"):
             # Some flags carry an inline path: -I/path, --file=/path, -I=path.
             for sep in ("=", ""):
-                for flag_prefix in ("-I", "--include", "--exclude", "--file"):
+                for flag_prefix in (
+                    "-I",
+                    "-T",
+                    "--include",
+                    "--exclude",
+                    "--file",
+                ):
                     prefix = flag_prefix + sep
                     if lowered.startswith(prefix.lower()):
                         candidate = token[len(prefix) :]
@@ -449,15 +583,16 @@ def _extract_command_paths(command: str) -> set[str]:
                             paths.add(candidate)
                             break
             continue
-        # Keep tokens that resemble filesystem paths.
-        if token.startswith(("/", "~", ".")) or "/" in token:
-            paths.add(token)
-    if _base_command(argv[0]) == "sed":
+        # A positional operand can be a bare relative filename, so do not
+        # discard it just because it has no slash.
+        paths.add(token)
+    child_index = _uv_run_child_index(argv)
+    if child_index is not None:
+        paths.update(_extract_argv_paths(argv[child_index:]))
+    if base_command == "sed":
         for token in argv[1:]:
-            for match in re.finditer(
-                r"(?i)(?:^|[;\n])[^;\n]*?[rRwW]\s+([^\s;]+)", token
-            ):
-                paths.add(match.group(1))
+            _, sed_paths = _sed_file_io_paths(token)
+            paths.update(sed_paths)
     return paths
 
 
@@ -536,18 +671,13 @@ def _git_subcommand_index(argv: list[str]) -> int | None:
 
 
 def _is_git_control_file_path(path: str) -> bool:
-    """Return True for paths inside repository config or hooks controls."""
+    """Return True for paths inside a repository's git control directory."""
     try:
         normalized = _normalize_path(path)
     except ValueError:
         return True
     parts = [part for part in normalized.split("/") if part]
-    return any(
-        part == ".git"
-        and index + 1 < len(parts)
-        and parts[index + 1] in _GIT_CONTROL_FILE_NAMES
-        for index, part in enumerate(parts)
-    )
+    return any(part == ".git" for part in parts)
 
 
 def _is_allowed_argv0(argv: list[str]) -> bool:
@@ -556,8 +686,47 @@ def _is_allowed_argv0(argv: list[str]) -> bool:
 
 
 def _is_forbidden_wrapper(argv: list[str]) -> bool:
-    """Return True if argv[0] is a known wrapper/interpreter."""
-    return _base_command(argv[0]) in _FORBIDDEN_WRAPPER_COMMANDS
+    """Return True if argv contains an opaque wrapper/interpreter payload."""
+    if _base_command(argv[0]) in _FORBIDDEN_WRAPPER_COMMANDS:
+        return True
+    if _base_command(argv[0]) != "uv":
+        return False
+    try:
+        run_index = argv.index("run", 1)
+    except ValueError:
+        return False
+    return any(
+        _base_command(token) in _FORBIDDEN_WRAPPER_COMMANDS
+        for token in argv[run_index + 1 :]
+    )
+
+
+def _uv_run_child_index(argv: list[str]) -> int | None:
+    """Return the direct child index for the restricted ``uv run`` form."""
+    if _base_command(argv[0]) != "uv":
+        return None
+    try:
+        run_index = argv.index("run", 1)
+    except ValueError:
+        return None
+    child_index = run_index + 1
+    if child_index < len(argv) and argv[child_index] == "--":
+        child_index += 1
+    if child_index >= len(argv) or argv[child_index].startswith("-"):
+        return None
+    return child_index
+
+
+def _has_unsafe_uv_run(argv: list[str]) -> bool:
+    """Return True if uv would execute an unallowlisted child command."""
+    if _base_command(argv[0]) != "uv" or "run" not in argv[1:]:
+        return False
+    child_index = _uv_run_child_index(argv)
+    return (
+        child_index is None
+        or _base_command(argv[child_index]) == "uv"
+        or _base_command(argv[child_index]) not in _UV_RUN_CHILD_COMMANDS
+    )
 
 
 def _is_privilege_escalation(argv: list[str]) -> bool:
@@ -584,48 +753,136 @@ def _is_container_escape_flag(argv: list[str]) -> bool:
     )
 
 
+def _git_config_option_takes_value(token: str) -> bool:
+    """Return True for git-config options with separate or attached values."""
+    option = token.lower().split("=", 1)[0]
+    if option in {"-f", "-t"}:
+        return True
+    return any(
+        len(option) >= len(prefix) and canonical.startswith(option)
+        for canonical, prefix in _GIT_CONFIG_VALUE_OPTIONS
+    )
+
+
+def _is_git_config_edit_option(token: str) -> bool:
+    """Return True for git-config options that launch the configured editor."""
+    option = token.lower().split("=", 1)[0]
+    return option == "-e" or (
+        option.startswith("--")
+        and len(option) >= len("--e")
+        and "--edit".startswith(option)
+    )
+
+
+def _git_long_option_matches(option: str, canonical: str) -> bool:
+    """Return True when a Git long option is an unambiguous prefix."""
+    return (
+        option.startswith("--")
+        and len(option) >= len("--x")
+        and canonical.startswith(option)
+    )
+
+
 def _has_git_dangerous_config(argv: list[str]) -> bool:
     """Return True if git sets a dangerous config key via -c or git config."""
     if _base_command(argv[0]) != "git":
         return False
+
+    def is_dangerous(key: str, value: str | None = None) -> bool:
+        normalized_key = key.lower().strip()
+        return normalized_key in _FORBIDDEN_GIT_CONFIG_KEYS or (
+            normalized_key.startswith("alias.")
+            and (value is None or value.lstrip().startswith("!"))
+        ) or normalized_key == "core.gitproxy" or (
+            normalized_key.startswith("remote.")
+            and normalized_key.endswith((".uploadpack", ".receivepack"))
+        ) or normalized_key == "core.askpass" or (
+            normalized_key.startswith("filter.")
+            and normalized_key.endswith((".clean", ".smudge", ".process"))
+        ) or (
+            normalized_key.startswith("diff.")
+            and normalized_key.endswith(".textconv")
+        ) or normalized_key == "diff.external" or (
+            normalized_key.startswith("merge.")
+            and normalized_key.endswith(".driver")
+        ) or normalized_key in {"gpg.program", "sequence.editor"} or (
+            normalized_key.startswith("includeif.")
+            and normalized_key.endswith(".path")
+        ) or (
+            normalized_key.startswith("difftool.")
+            and normalized_key.endswith(".cmd")
+        ) or (
+            normalized_key.startswith("mergetool.")
+            and normalized_key.endswith(".cmd")
+        ) or (
+            normalized_key.startswith("submodule.")
+            and normalized_key.endswith(".update")
+        ) or normalized_key in {
+            "gpg.ssh.defaultkeycommand",
+            "gpg.ssh.program",
+            "core.alternaterefscommand",
+        } or (
+            normalized_key.startswith("credential.")
+            and normalized_key.endswith(".helper")
+        ) or (
+            normalized_key.startswith("diff.")
+            and normalized_key.endswith(".command")
+        )
+
     i = 1
     while i < len(argv):
         token = argv[i]
         if token in ("-c", "--config"):
             if i + 1 >= len(argv):
                 return False
-            key, _, _ = argv[i + 1].partition("=")
-            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+            key, separator, value = argv[i + 1].partition("=")
+            if is_dangerous(key, value if separator else None):
                 return True
             i += 2
             continue
+        if token.lower().startswith("--config="):
+            key, separator, value = token.split("=", 1)[1].partition("=")
+            if is_dangerous(key, value if separator else None):
+                return True
+            i += 1
+            continue
         if token.lower().startswith("-c"):
             config = token[2:]
-            key, _, _ = config.partition("=")
-            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+            key, separator, value = config.partition("=")
+            if is_dangerous(key, value if separator else None):
                 return True
             i += 1
             continue
         if token.lower().startswith("--config-env="):
             config = token.split("=", 1)[1]
             key, _, _ = config.partition("=")
-            if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+            if is_dangerous(key):
                 return True
             i += 1
+            continue
+        if token.lower() == "--config-env":
+            if i + 1 >= len(argv):
+                return False
+            key, _, _ = argv[i + 1].partition("=")
+            if is_dangerous(key):
+                return True
+            i += 2
             continue
         if token == "config" and i == _git_subcommand_index(argv):
             # #309: persistent ``git config [<options>] <key> <value>`` sets the
             # key just like a ``git -c`` override. Skip option tokens and any
-            # argument-taking options (--file/-f, --blob) before looking at
-            # the key argument.
+            # argument-taking options (--file/-f, --blob, --type/-t, --value,
+            # --default, --comment) before looking at the key argument.
             j = i + 1
             while j < len(argv):
                 opt = argv[j]
-                if opt in ("--file", "--blob"):
-                    j += 2
-                    continue
-                if opt.startswith("--file=") or opt.startswith("--blob="):
+                if opt == "set":
                     j += 1
+                    continue
+                if _is_git_config_edit_option(opt):
+                    return True
+                if _git_config_option_takes_value(opt):
+                    j += 1 if "=" in opt else 2
                     continue
                 if opt.startswith("-f"):
                     # -f <path>, -f<path>, or -f=<path> all consume the argument.
@@ -636,8 +893,10 @@ def _has_git_dangerous_config(argv: list[str]) -> bool:
                     continue
                 break
             if j < len(argv):
-                key, _, _ = argv[j].partition("=")
-                if key.lower().strip() in _FORBIDDEN_GIT_CONFIG_KEYS:
+                key, separator, value = argv[j].partition("=")
+                if not separator and j + 1 < len(argv):
+                    value = argv[j + 1]
+                if is_dangerous(key, value if separator or value else None):
                     return True
             # No further interesting subcommands after ``git config``.
             return False
@@ -645,18 +904,119 @@ def _has_git_dangerous_config(argv: list[str]) -> bool:
     return False
 
 
-def _has_git_control_file_target(argv: list[str]) -> bool:
-    """Return True when a non-git allowlisted writer targets git controls."""
-    if not argv or _base_command(argv[0]) not in _GIT_CONTROL_FILE_WRITERS:
+def _has_git_transport_execution(argv: list[str]) -> bool:
+    """Return True for git options or subcommands that execute a supplied command."""
+    if not argv or _base_command(argv[0]) != "git":
         return False
-    return any(_is_git_control_file_path(token) for token in argv[1:])
+    subcommand_index = _git_subcommand_index(argv)
+    subcommand = (
+        argv[subcommand_index].lower()
+        if subcommand_index is not None
+        else ""
+    )
+    for token in argv[1:]:
+        lowered = token.lower()
+        option = lowered.split("=", 1)[0]
+        if subcommand in {"difftool", "mergetool", "filter-branch"}:
+            return True
+        if subcommand == "submodule" and lowered == "foreach":
+            return True
+        if subcommand == "rebase" and (
+            option == "-x" or option.startswith("-x")
+        ):
+            return True
+        if option == "--exec-path":
+            return True
+        if subcommand == "bisect" and lowered == "run":
+            return True
+        if subcommand == "clone" and (
+            lowered == "-u" or (lowered.startswith("-u") and len(lowered) > 2)
+        ):
+            return True
+        if subcommand == "clone" and _git_long_option_matches(option, "--template"):
+            return True
+        if subcommand == "apply" and _git_long_option_matches(
+            option, "--unsafe-paths"
+        ):
+            return True
+        if _git_long_option_matches(option, "--upload-pack") or lowered.startswith(
+            "ext::"
+        ):
+            return True
+        if _git_long_option_matches(option, "--receive-pack"):
+            return True
+        if _git_long_option_matches(option, "--exec"):
+            return True
+    return False
+
+
+def _has_git_force_push(argv: list[str]) -> bool:
+    """Return True when ``git push`` can force-update or delete refs."""
+    if not argv or _base_command(argv[0]) != "git":
+        return False
+    subcommand_index = _git_subcommand_index(argv)
+    if subcommand_index is None or argv[subcommand_index].lower() != "push":
+        return False
+    for token in argv[subcommand_index + 1 :]:
+        lowered = token.lower().split("=", 1)[0]
+        if lowered in {"--force", "--force-with-lease", "-f"}:
+            return True
+        if _git_long_option_matches(lowered, "--force") or _git_long_option_matches(
+            lowered, "--force-with-lease"
+        ) or _git_long_option_matches(lowered, "--mirror"):
+            return True
+        if _git_long_option_matches(lowered, "--delete"):
+            return True
+        if token.startswith(("+", ":")) and len(token) > 1:
+            return True
+        if token.startswith("-") and not token.startswith("--") and any(
+            flag in lowered for flag in ("f", "d")
+        ):
+            return True
+    return False
+
+
+def _has_zip_command_execution(argv: list[str]) -> bool:
+    """Return True for zip's command-valued archive test option."""
+    if not argv or _base_command(argv[0]) != "zip":
+        return False
+    for token in argv[1:]:
+        lowered = token.lower()
+        if lowered.startswith("--"):
+            option = lowered.split("=", 1)[0]
+            if option == "--test-command" or (
+                option.startswith("--test-c")
+                and "--test-command".startswith(option)
+            ):
+                return True
+        elif (
+            lowered.startswith("-")
+            and not lowered.startswith("--")
+            and "tt" in lowered[1:]
+        ):
+            # zip permits bundled short options, so -qTT and -qTT<command>
+            # carry the same command-valued option as -TT.
+            return True
+    return False
+
+
+def _has_git_control_file_target(argv: list[str]) -> bool:
+    """Return True when an allowlisted command targets the git control directory."""
+    if not argv:
+        return False
+    base_command = _base_command(argv[0])
+    if base_command != "git" and base_command not in _GIT_CONTROL_FILE_WRITERS:
+        return False
+    return any(
+        _is_git_control_file_path(path) for path in _extract_argv_paths(argv)
+    )
 
 
 def _has_tar_dangerous_flag(argv: list[str]) -> bool:
     """Return True if tar uses a destructive or path-rewriting flag."""
     if _base_command(argv[0]) != "tar":
         return False
-    for token in argv[1:]:
+    for index, token in enumerate(argv[1:], start=1):
         for flag in _FORBIDDEN_TAR_FLAGS:
             if token.lower().split("=", 1)[0].startswith(flag):
                 return True
@@ -664,6 +1024,14 @@ def _has_tar_dangerous_flag(argv: list[str]) -> bool:
         # and --absolute-names are -F, -I, and -P, including attached values.
         if token.startswith("-") and not token.startswith("--") and any(
             option in token[1:] for option in ("F", "I", "P")
+        ):
+            return True
+        if (
+            index == 1
+            and token
+            and not token.startswith("-")
+            and token[0].lower() in _TAR_OLD_STYLE_OPTION_STARTS
+            and any(option in token for option in ("F", "I", "P"))
         ):
             return True
     return False
@@ -711,6 +1079,88 @@ def _has_git_clean_destructive(argv: list[str]) -> bool:
     return False
 
 
+def _sed_skip_address(script: str, index: int) -> int:
+    """Return the index after one sed address, if one starts at *index*."""
+    if index >= len(script):
+        return index
+    if script[index].isdigit():
+        while index < len(script) and script[index].isdigit():
+            index += 1
+        if index < len(script) and script[index] == "~":
+            index += 1
+            while index < len(script) and script[index].isdigit():
+                index += 1
+        return index
+    if script[index] == "$":
+        return index + 1
+    if script[index] not in ("/", "\\"):
+        return index
+
+    delimiter = script[index]
+    index += 1
+    if delimiter == "\\":
+        if index >= len(script):
+            return index
+        delimiter = script[index]
+        index += 1
+    escaped = False
+    while index < len(script):
+        current = script[index]
+        if escaped:
+            escaped = False
+        elif current == "\\":
+            escaped = True
+        elif current == delimiter:
+            return index + 1
+        index += 1
+    return index
+
+
+def _sed_file_io_paths(script: str) -> tuple[bool, set[str]]:
+    """Return whether a sed script reads/writes a file and any file paths."""
+    index = _sed_skip_address(script, 0)
+    if index < len(script) and script[index] == ",":
+        index = _sed_skip_address(script, index + 1)
+    while index < len(script) and script[index].isspace():
+        index += 1
+    if index < len(script) and script[index] == "!":
+        index += 1
+        while index < len(script) and script[index].isspace():
+            index += 1
+
+    paths: set[str] = set()
+    if index < len(script) and script[index] in "rRwW":
+        path = script[index + 1 :].lstrip().split(None, 1)
+        if path:
+            paths.add(path[0])
+        return True, paths
+
+    if index >= len(script) or script[index] != "s" or index + 1 >= len(script):
+        return False, paths
+
+    delimiter = script[index + 1]
+    delimiter_positions: list[int] = []
+    escaped = False
+    for position in range(index + 2, len(script)):
+        current = script[position]
+        if escaped:
+            escaped = False
+        elif current == "\\":
+            escaped = True
+        elif current == delimiter:
+            delimiter_positions.append(position)
+            if len(delimiter_positions) == 2:
+                flags = script[position + 1 :]
+                write_index = flags.lower().find("w")
+                if write_index < 0:
+                    return False, paths
+                path = flags[write_index + 1 :].lstrip().split(None, 1)
+                if path:
+                    paths.add(path[0])
+                return True, paths
+    return False, paths
+
+
 def _has_sed_dangerous_flag(argv: list[str]) -> bool:
     """Return True if sed uses the GNU `e` command or `s///e` flag.
 
@@ -726,7 +1176,9 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
     i = 1
     while i < len(argv):
         token = argv[i]
-        if token in ("-i", "--in-place") or token.startswith("--in-place="):
+        if token in ("-i", "--in-place", "--i", "--in", "--inp") or (
+            token.startswith("--in-place=") or token.startswith("--in-p")
+        ):
             return True
         if token.startswith("-i") and not token.startswith("--"):
             return True
@@ -802,10 +1254,8 @@ def _has_sed_dangerous_flag(argv: list[str]) -> bool:
                             return True
                         break
         # sed r/R reads a file and w/W writes one without invoking a shell.
-        if re.search(r"(?i)(?:^|[;\n])[^;\n]*?[rRwW]\s+[^\s;]+", script):
-            return True
-        # The w/W substitution flags also take a following output filename.
-        if re.search(r"(?i)[/]w\s+", script):
+        file_io, _ = _sed_file_io_paths(script)
+        if file_io:
             return True
         # Detect the bare 'e' command, e.g. '1e id', '$e touch /tmp/x', or
         # '/pattern/e touch /tmp/x'. A regex address can contain any text, so
@@ -823,12 +1273,25 @@ def _has_tar_write_operation(argv: list[str]) -> bool:
     """Return True for tar operations that write extracted archive members."""
     if _base_command(argv[0]) != "tar":
         return False
-    for token in argv[1:]:
-        if token.lower() in {"--extract", "--get"}:
+    for index, token in enumerate(argv[1:], start=1):
+        lowered = token.lower()
+        if lowered == "--get" or (
+            len(lowered) >= len("--ge") and "--get".startswith(lowered)
+        ):
+            return True
+        if len(lowered) >= len("--ext") and "--extract".startswith(lowered):
             return True
         if (
             token.startswith("-")
             and not token.startswith("--")
+            and "x" in token.lower()
+        ):
+            return True
+        if (
+            index == 1
+            and token
+            and not token.startswith("-")
+            and token[0].lower() in _TAR_OLD_STYLE_OPTION_STARTS
             and "x" in token.lower()
         ):
             return True
@@ -885,6 +1348,8 @@ def _has_command_execution_primitive(argv: list[str]) -> bool:
     """Return True if an allowlisted binary carries a command-execution hook."""
     return bool(
         _has_git_dangerous_config(argv)
+        or _has_git_transport_execution(argv)
+        or _has_zip_command_execution(argv)
         or _has_git_control_file_target(argv)
         or _has_tar_dangerous_flag(argv)
         or _has_tar_write_operation(argv)
@@ -931,6 +1396,12 @@ def _normalize_and_validate_command(command: str) -> tuple[bool, list[str]]:
     elif not _is_allowed_argv0(argv):
         local_violations.append(
             f"Command argv[0] is not in the verification allowlist: {command!r}"
+        )
+
+    if _has_unsafe_uv_run(argv):
+        local_violations.append(
+            "Command uses uv run with an unallowlisted wrapper/interpreter child: "
+            f"{command!r}"
         )
 
     if _is_privilege_escalation(argv):
@@ -986,6 +1457,9 @@ def _validate_command_against_profile(
         violations.append(
             f"Command is destructive but profile denies destructive_shell: {command!r}"
         )
+
+    if _has_git_force_push(argv) and profile.git.force_push == "deny":
+        violations.append(f"Force push is denied by project profile: {command!r}")
 
     return violations
 

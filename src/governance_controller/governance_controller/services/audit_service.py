@@ -4,11 +4,36 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.models.audit_log import AuditLog
+from governance_controller.services.plane_projection import (
+    acquire_plane_projection_event_lock,
+)
 
 logger = structlog.get_logger("governance_controller.audit")
+_PLANE_PROJECTION_TERMINAL_EVENTS = (
+    "plane_projection_completed",
+    "plane_projection_failed",
+    "plane_projection_skipped",
+)
+
+
+def _is_synthetic_plane_projection_terminal(
+    event_type: str,
+    source: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Identify a completion synthesized by the orphan-marker sweeper."""
+    return (
+        event_type == "plane_projection_completed"
+        and source == "stuck_execution_poller"
+        and (
+            payload.get("synthetic") is True
+            or payload.get("reason") == "resolved_independently"
+        )
+    )
 
 
 class AuditService:
@@ -38,6 +63,36 @@ class AuditService:
         Returns:
             The created AuditLog entry.
         """
+        event_payload = payload or {}
+        pending_event_id = event_payload.get("pending_event_id")
+        if (
+            event_type in _PLANE_PROJECTION_TERMINAL_EVENTS
+            and isinstance(pending_event_id, str)
+            and pending_event_id
+        ):
+            await acquire_plane_projection_event_lock(db, pending_event_id)
+            existing_result = await db.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.task_id == task_id,  # type: ignore[arg-type]
+                    AuditLog.__table__.c.event_type.in_(  # type: ignore[attr-defined]
+                        _PLANE_PROJECTION_TERMINAL_EVENTS
+                    ),
+                    AuditLog.payload["pending_event_id"].as_string()
+                    == pending_event_id,
+                )
+                .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
+                .execution_options(populate_existing=True)
+            )
+            incoming_is_synthetic = _is_synthetic_plane_projection_terminal(
+                event_type, source, event_payload
+            )
+            for existing in existing_result.scalars():
+                if incoming_is_synthetic or not _is_synthetic_plane_projection_terminal(
+                    existing.event_type, existing.source, existing.payload
+                ):
+                    return existing
+
         entry = AuditLog(
             event_id=str(uuid4()),
             event_type=event_type,
@@ -45,7 +100,7 @@ class AuditService:
             actor=actor,
             source=source,
             execution_id=execution_id,
-            payload=payload or {},
+            payload=event_payload,
         )
         db.add(entry)
         await db.flush()

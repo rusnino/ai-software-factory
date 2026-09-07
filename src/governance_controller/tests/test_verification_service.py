@@ -1,7 +1,7 @@
 import asyncio
 import os
-from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -824,6 +824,201 @@ async def test_malformed_retry_start_response_is_audited_and_fails_task(
         )
 
 
+async def test_external_retry_start_failure_is_terminal_for_pending_attempt(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed external retry start must not reopen the same retry marker."""
+    from governance_controller.models.project_profile import ProjectProfileModel
+    from governance_controller.schemas.project_profile import ProjectProfile
+    from governance_controller.services.stuck_execution_poller import (
+        StuckExecutionPoller,
+    )
+
+    monkeypatch.setattr(
+        StuckExecutionPoller,
+        "_retry_recovery_backoff",
+        timedelta(0),
+        raising=False,
+    )
+    _engine, session_local = isolated_db
+    task_id = "task-retry-start-terminal"
+    project_id = "project-retry-start-terminal"
+    marker_id = "event-retry-start-terminal"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id=project_id,
+        proposed_by="agent-1",
+        objective="Do not reopen a failed retry start",
+        acceptance=["one retry attempt is terminal after start failure"],
+        execution={"timeout_minutes": 1, "max_retries": 2},
+    )
+    profile = ProjectProfile(
+        project_id=project_id,
+        repository={"path": "/tmp/retry-start-terminal"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                state=TaskState.FAILED,
+                proposed_by=contract.proposed_by,
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            ProjectProfileModel(
+                project_id=project_id,
+                profile_json=profile.model_dump(mode="json"),
+            )
+        )
+        seed.add(
+            AuditLog(
+                event_id=marker_id,
+                event_type="verification_retry_pending",
+                task_id=task_id,
+                actor="system",
+                source="verification_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=2),
+                payload={
+                    "attempt": 1,
+                    "max_retries": 2,
+                    "verification_report": {"passed": False},
+                },
+            )
+        )
+        await seed.commit()
+
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.start.side_effect = RuntimeError("macro-agent unavailable")
+
+    async with session_local() as first:
+        first_actions = await StuckExecutionPoller(
+            first,
+            executor=executor,
+        ).poll()
+    assert any(
+        action["action"] == "verification_retry_recovery_failed"
+        for action in first_actions
+    )
+
+    async with session_local() as second:
+        second_actions = await StuckExecutionPoller(
+            second,
+            executor=executor,
+        ).poll()
+        task = await second.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        executions = (
+            await second.execute(select(Execution).where(Execution.task_id == task_id))
+        ).scalars().all()
+        audits = (
+            await second.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+        ).scalars().all()
+
+    assert not any(
+        action["action"] == "verification_retry_recovered"
+        for action in second_actions
+    )
+    executor.start.assert_awaited_once()
+    assert task.state == TaskState.FAILED
+    assert task.execution_attempts == 1
+    assert len(executions) == 1
+    assert executions[0].state == TaskState.FAILED
+    assert executions[0].ended_at is not None
+    assert any(
+        row.event_type == "retry_execution_start_failed" for row in audits
+    )
+    terminal = [
+        row
+        for row in audits
+        if row.event_type == "verification_retry_failed"
+        and row.payload.get("pending_event_id") == marker_id
+    ]
+    assert len(terminal) == 1
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#301: a lost macro-agent start response cannot be correlated "
+        "without macro-agent idempotency or lookup"
+    ),
+)
+async def test_accepted_retry_start_is_durably_attached_before_process_loss(
+    isolated_db,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expose the retry response-loss window before run-ID attachment commits."""
+    from governance_controller import config
+
+    monkeypatch.setattr(config.settings, "plane_base_url", "")
+    _engine, session_local = isolated_db
+    task_id = "task-retry-response-loss"
+    accepted_run_id = "run-retry-accepted-before-loss"
+    contract = TaskContract(
+        task_id=task_id,
+        project_id="project-retry-response-loss",
+        proposed_by="agent-1",
+        objective="Test retry response loss",
+        acceptance=["the accepted run is durably attached"],
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=contract.project_id,
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        await seed.commit()
+
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(  # type: ignore[method-assign]
+        return_value={"run_id": accepted_run_id}
+    )
+
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        original_execute = db.execute
+        execute_count = 0
+
+        async def _crash_before_attachment_commit(*args: object, **kwargs: object):
+            nonlocal execute_count
+            result = await original_execute(*args, **kwargs)
+            execute_count += 1
+            # The second explicit execute is the post-start task attachment CAS.
+            if execute_count == 2:
+                raise asyncio.CancelledError
+            return result
+
+        db.execute = _crash_before_attachment_commit  # type: ignore[method-assign]
+        with pytest.raises(asyncio.CancelledError):
+            await VerificationService(
+                executor=fake_executor
+            )._start_retry_execution(
+                db=db,
+                task=task,
+                contract=contract,
+                profile=None,
+                report={"passed": False},
+            )
+
+    async with session_local() as check:
+        execution = await check.scalar(
+            select(Execution).where(Execution.task_id == task_id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == accepted_run_id
+
+
 @pytest.mark.skipif(
     not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
     reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
@@ -1205,6 +1400,407 @@ class TestVerificationConcurrency:
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="lock interleaving requires PostgreSQL row locks",
+    )
+    async def test_retry_start_does_not_deadlock_on_task_execution_lock_interleave(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A retry CAS race must not hold Execution while waiting for Task."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-lock-interleave"
+        run_id = "run-retry-lock-interleave"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise retry lock ordering",
+            acceptance=["the retry does not deadlock"],
+        )
+        cas_about_to_start = asyncio.Event()
+        racer_has_task_lock = asyncio.Event()
+        racer_task: asyncio.Task[None] | None = None
+        racer_error: BaseException | None = None
+        start_returned = False
+
+        async def _start(*args: object, **_kwargs: object) -> dict[str, str]:
+            nonlocal racer_task, start_returned
+            execution_id = str(args[1])
+
+            async def _hold_task_then_wait_for_execution() -> None:
+                nonlocal racer_error
+                try:
+                    async with local_session() as racer:
+                        await racer.execute(
+                            update(Task)
+                            .where(
+                                Task.id == task_id,  # type: ignore[arg-type]
+                                Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                            )
+                            .values(
+                                state=TaskState.BLOCKED.value,
+                                version=Task.version + 1,
+                            )
+                        )
+                        racer_has_task_lock.set()
+                        await cas_about_to_start.wait()
+                        await racer.execute(
+                            update(Execution)
+                            .where(Execution.id == execution_id)  # type: ignore[arg-type]
+                            .values(status_error="lock-order-test")
+                        )
+                        await racer.commit()
+                except BaseException as exc:
+                    racer_error = exc
+
+            racer_task = asyncio.create_task(_hold_task_then_wait_for_execution())
+            await racer_has_task_lock.wait()
+            start_returned = True
+            return {"run_id": run_id}
+
+        executor = MacroAgentExecutor()
+        executor.start = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_start
+        )
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            original_execute = db.execute
+
+            async def _execute(*args: object, **kwargs: object):
+                if start_returned and not cas_about_to_start.is_set():
+                    # The next explicit execute is the post-start task CAS.
+                    # Let the racer request Execution immediately before that
+                    # CAS so an early execution flush creates a real cycle.
+                    cas_about_to_start.set()
+                return await original_execute(*args, **kwargs)
+
+            db.execute = _execute  # type: ignore[method-assign]
+            operation = asyncio.create_task(
+                VerificationService(executor=executor)._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+            )
+            try:
+                done, _pending = await asyncio.wait({operation}, timeout=2.0)
+                if not done:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+                    pytest.fail(
+                        "retry start deadlocked while acquiring Task after Execution"
+                    )
+                try:
+                    await operation
+                except ValueError as exc:
+                    assert "Concurrent modification detected" in str(exc)
+                else:
+                    pytest.fail("retry start ignored the concurrent task transition")
+            finally:
+                if not operation.done():
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
+
+        if racer_task is not None:
+            await asyncio.wait_for(racer_task, timeout=2.0)
+        assert racer_error is None, f"racer failed: {racer_error}"
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="poller-first interleave requires PostgreSQL row locks",
+    )
+    async def test_retry_cleanup_rechecks_pending_claim_after_poller_cleanup(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Verification must not cancel or audit after the poller claims cleanup."""
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+
+        _engine, session_local = isolated_db
+        task_id = "task-retry-cleanup-poller-race"
+        run_id = "run-retry-cleanup-poller-race"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Coordinate retry cleanup",
+            acceptance=["one cancellation is issued"],
+        )
+
+        async with session_local() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id=contract.project_id,
+                    proposed_by=contract.proposed_by,
+                    state=TaskState.RUNNING,
+                    execution_attempts=1,
+                )
+            )
+            await seed.commit()
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with session_local() as racer:
+                current = await racer.scalar(select(Task).where(Task.id == task_id))
+                assert current is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == current.version,  # type: ignore[arg-type]
+                        Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        cancel_sources: list[str] = []
+
+        async def _cancel(source: str) -> dict[str, object]:
+            cancel_sources.append(source)
+            return {}
+
+        async def _verifier_cancel(_run_id: str) -> dict[str, object]:
+            return await _cancel("verifier")
+
+        async def _poller_cancel(_run_id: str) -> dict[str, object]:
+            return await _cancel("poller")
+
+        verifier_executor = AsyncMock(spec=MacroAgentExecutor)
+        verifier_executor.start.side_effect = _start_then_lose
+        verifier_executor.cancel.side_effect = _verifier_cancel
+        poller_executor = AsyncMock(spec=MacroAgentExecutor)
+        poller_executor.cancel.side_effect = _poller_cancel
+
+        original_transition = StateMachine.atomic_transition
+
+        async def _lose_running_cas(
+            db: AsyncSession, task: Task, target_state: TaskState
+        ) -> bool:
+            if target_state == TaskState.RUNNING:
+                return False
+            return await original_transition(db, task, target_state)
+
+        monkeypatch.setattr(
+            StateMachine,
+            "atomic_transition",
+            staticmethod(_lose_running_cas),
+        )
+
+        pending_committed = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        commit_count = 0
+
+        async with session_local() as db:
+            real_commit = db.commit
+
+            async def _commit() -> None:
+                nonlocal commit_count
+                await real_commit()
+                commit_count += 1
+                if commit_count == 2:
+                    pending_committed.set()
+                    await release_cleanup.wait()
+
+            monkeypatch.setattr(db, "commit", _commit)
+            operation = asyncio.create_task(
+                VerificationService(
+                    executor=verifier_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=await db.scalar(select(Task).where(Task.id == task_id)),
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+            )
+            await asyncio.wait_for(pending_committed.wait(), timeout=5)
+
+            async with session_local() as poller_db:
+                actions = await StuckExecutionPoller(
+                    poller_db,
+                    executor=poller_executor,
+                )._poll_pending_cancellations()
+
+            release_cleanup.set()
+            with pytest.raises(ValueError, match="Concurrent modification"):
+                await asyncio.wait_for(operation, timeout=5)
+
+        assert actions[0]["action"] == "execution_cancel_completed"
+        assert cancel_sources == ["poller"]
+        verifier_executor.cancel.assert_not_awaited()
+        poller_executor.cancel.assert_awaited_once_with(run_id)
+
+        async with session_local() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+            assert task.latest_macro_agent_run_id == run_id
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.cancellation_pending is False
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert (
+                len(
+                    [
+                        row
+                        for row in audits
+                        if row.event_type == "execution_cancel_completed"
+                    ]
+                )
+                == 1
+            )
+
+    @pytest.mark.skipif(
+        os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="targets SQLite writer-lock behavior",
+    )
+    async def test_sqlite_retry_cleanup_is_single_flight_with_poller(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """SQLite must not let the poller duplicate a retry cleanup call."""
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+
+        _engine, local_session = isolated_db
+        task_id = "task-sqlite-retry-cleanup-single-flight"
+        run_id = "run-sqlite-retry-cleanup-single-flight"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Coordinate retry cleanup",
+            acceptance=["one cancellation is issued"],
+        )
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id=contract.project_id,
+                    proposed_by=contract.proposed_by,
+                    state=TaskState.RUNNING,
+                    execution_attempts=1,
+                )
+            )
+            await seed.commit()
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                current = await racer.scalar(select(Task).where(Task.id == task_id))
+                assert current is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == current.version,  # type: ignore[arg-type]
+                        Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        verifier_cancel_started = asyncio.Event()
+        poller_cancel_started = asyncio.Event()
+        release_verifier_cancel = asyncio.Event()
+        cancel_sources: list[str] = []
+
+        async def _verifier_cancel(_run_id: str) -> dict[str, object]:
+            cancel_sources.append("verifier")
+            verifier_cancel_started.set()
+            await release_verifier_cancel.wait()
+            return {}
+
+        async def _poller_cancel(_run_id: str) -> dict[str, object]:
+            cancel_sources.append("poller")
+            poller_cancel_started.set()
+            return {}
+
+        verifier_executor = AsyncMock(spec=MacroAgentExecutor)
+        verifier_executor.start.side_effect = _start_then_lose
+        verifier_executor.cancel.side_effect = _verifier_cancel
+        poller_executor = AsyncMock(spec=MacroAgentExecutor)
+        poller_executor.cancel.side_effect = _poller_cancel
+
+        async with local_session() as verifier_db:
+            task = await verifier_db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            verifier_operation = asyncio.create_task(
+                VerificationService(
+                    executor=verifier_executor
+                )._start_retry_execution(
+                    db=verifier_db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+            )
+            await asyncio.wait_for(verifier_cancel_started.wait(), timeout=5)
+
+            async with local_session() as poller_db:
+                poller_operation = asyncio.create_task(
+                    StuckExecutionPoller(
+                        poller_db,
+                        executor=poller_executor,
+                    )._poll_pending_cancellations()
+                )
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(poller_cancel_started.wait(), timeout=1)
+
+                release_verifier_cancel.set()
+                with pytest.raises(ValueError, match="Concurrent modification"):
+                    await asyncio.wait_for(verifier_operation, timeout=5)
+                actions = await asyncio.wait_for(poller_operation, timeout=5)
+
+        assert cancel_sources == ["verifier"]
+        verifier_executor.cancel.assert_awaited_once_with(run_id)
+        poller_executor.cancel.assert_not_awaited()
+        assert actions == []
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
     async def test_concurrent_retry_starts_have_one_external_claim(
@@ -1426,6 +2022,219 @@ class TestVerificationConcurrency:
                 for row in audits.scalars().all()
             )
 
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_retry_start_cas_loss_crash_persists_cancel_intent_atomically(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#293: a crash cannot separate finalization from cancellation intent."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-cas-loss-crash"
+        run_id = "run-retry-cas-loss-crash"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise atomic retry cleanup intent",
+            acceptance=["cleanup intent survives a crash"],
+        )
+
+        async def _start_then_lose(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.BLOCKED
+                )
+                assert won is True
+                await racer.commit()
+            return {"run_id": run_id}
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(side_effect=_start_then_lose)  # type: ignore[method-assign]
+        fake_executor.cancel = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+        async with local_session() as db:
+            real_commit = db.commit
+            commit_count = 0
+
+            async def _commit_then_crash() -> None:
+                nonlocal commit_count
+                await real_commit()
+                commit_count += 1
+                # The pre-fix second commit contains only finalization and its
+                # audit, leaving cancellation recovery unmarked.
+                if commit_count == 2:
+                    raise asyncio.CancelledError
+
+            monkeypatch.setattr(db, "commit", _commit_then_crash)
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(asyncio.CancelledError):
+                await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+            assert commit_count == 2
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.BLOCKED
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.BLOCKED
+            assert execution.ended_at is not None
+            assert execution.macro_agent_run_id == run_id
+            assert execution.cancellation_pending is True
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "retry_execution_start_cas_lost" for row in audits
+            )
+            assert any(
+                row.event_type == "execution_cancel_pending"
+                and row.payload["macro_agent_run_id"] == run_id
+                for row in audits
+            )
+        fake_executor.cancel.assert_not_awaited()
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_retry_start_matched_run_on_failed_task_is_cleaned_up(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A matching run pointer does not make a terminal task owned by retry."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-matched-failed"
+        run_id = "run-retry-matched-failed"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise matched run cleanup",
+            acceptance=["terminal task owns no active retry"],
+        )
+
+        async def _start_then_fail_elsewhere(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                result = await racer.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,  # type: ignore[arg-type]
+                        Task.version == racing_task.version,  # type: ignore[arg-type]
+                        Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                    )
+                    .values(
+                        state=TaskState.FAILED.value,
+                        latest_macro_agent_run_id=run_id,
+                        version=Task.version + 1,
+                    )
+                )
+                assert result.rowcount == 1  # type: ignore[attr-defined]
+                await racer.commit()
+            return {"run_id": run_id}
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_start_then_fail_elsewhere
+        )
+        fake_executor.cancel = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        fake_executor.cancel.assert_awaited_once_with(run_id)
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+            assert task.latest_macro_agent_run_id == run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            assert execution.ended_at is not None
+            assert execution.macro_agent_run_id == run_id
+            assert execution.cancellation_pending is False
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "retry_execution_start_cas_lost" for row in audits
+            )
+            assert any(
+                row.event_type == "execution_cancel_pending"
+                and row.payload["macro_agent_run_id"] == run_id
+                for row in audits
+            )
+
     async def test_cas_loss_commits_audit_before_raise(
         self,
         isolated_db: tuple,
@@ -1499,14 +2308,14 @@ class TestVerificationConcurrency:
         self,
         isolated_db: tuple,
     ) -> None:
-        """#266/#303/#313: a lost task CAS leaves the Execution row untouched.
+        """#266/#303/#305: a lost task CAS finalizes only the local execution.
 
         ``_start_retry_execution`` commits the new RUNNING ``Execution`` row and
         releases the task row lock before the outbound ``executor.start()``
         call. If that call raises and a concurrent session has already moved the
-        task elsewhere, the task CAS loses; the execution finalization is
-        gated behind the task transition so the local Execution is not mutated
-        under a lost CAS.
+        task elsewhere, the task CAS loses; the local Execution is finalized as
+        FAILED without copying the competing task state. No external run ID was
+        returned, so no cancellation is queued.
         """
         from unittest.mock import AsyncMock
 
@@ -1589,11 +2398,12 @@ class TestVerificationConcurrency:
             )
             rows = executions.scalars().all()
             assert len(rows) == 1
-            # Per #313 the execution row is only finalized when the task
-            # transition to FAILED actually wins; otherwise a concurrent winner
-            # owns the task state and the local execution must not be stomped.
-            assert rows[0].state == TaskState.RUNNING
-            assert rows[0].ended_at is None
+            # The local start failed, but the competing winner still owns the
+            # task state. Finalize this execution without copying BLOCKED.
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
+            assert rows[0].macro_agent_run_id is None
+            assert rows[0].cancellation_pending is False
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
@@ -1603,27 +2413,19 @@ class TestVerificationConcurrency:
         self,
         isolated_db: tuple,
     ) -> None:
-        """RISK-16 sweep: the CAS-lost 'same run id' branch flushes blindly.
+        """A matched run must be revalidated before the retry reports success.
 
         When ``cas_result`` (the run-ID attach CAS) loses because a second
         writer B already attached the *exact same* ``macro_agent_run_id``,
-        ``_start_retry_execution`` takes the "matched" branch (lines ~967-971
-        in the current file): it copies ``fresh_task.version`` onto the local
-        ``task`` object and falls through to an unconditional ``db.flush()``
-        with no further CAS guard. That flush's ORM UPDATE only carries the
-        dirty columns (``latest_macro_agent_run_id``, ``version``) and has no
-        WHERE-version predicate, unlike every other write path in this
-        method.
+        ``_start_retry_execution`` must verify that the current task is still
+        RUNNING and owns that pointer before treating the run as attached.
 
         This test seats a THIRD, independently-CAS'd writer C exactly between
-        the ``fresh_task`` re-read and that flush (via a live re-read hook,
-        not a mock/theoretical race). Writer C wins a real
+        the first fresh re-read and the ownership check (via a live re-read
+        hook, not a mock/theoretical race). Writer C wins a real
         ``StateMachine.atomic_transition`` to FAILED (version N -> N+1) and
-        commits. The matched-branch flush must not silently revert the
-        version counter C just committed to -- if it does, C's committed
-        transition becomes invisible to any future CAS that legitimately
-        expects version N+1, which is the same "blind write overwrites a
-        winning concurrent commit" shape as RISK-16's prior instances.
+        commits. The local execution must be finalized and the external run
+        cancelled without reverting C's task transition.
         """
         _engine, local_session = isolated_db
         task_id = "task-retry-matched-branch-race"
@@ -1679,6 +2481,7 @@ class TestVerificationConcurrency:
         fake_executor.start = AsyncMock(  # type: ignore[method-assign]
             side_effect=_start_then_attach_elsewhere
         )
+        fake_executor.cancel = AsyncMock(return_value={})  # type: ignore[method-assign]
 
         async with local_session() as db:
             task = await db.scalar(select(Task).where(Task.id == task_id))
@@ -1691,11 +2494,10 @@ class TestVerificationConcurrency:
                 result = await original_execute(*args, **kwargs)
                 call_count["n"] += 1
                 # The 3rd explicit db.execute() call in
-                # _start_retry_execution's CAS-lost path is the
-                # populate_existing fresh_task re-read. Seat writer C's
-                # real, independently-CAS'd commit immediately after that
-                # read returns, before the method's next statement
-                # (the unconditional flush) runs.
+                # _start_retry_execution's CAS-lost path is the initial
+                # populate_existing fresh-task read. Seat writer C's real,
+                # independently-CAS'd commit immediately after that read
+                # returns, before the ownership re-read runs.
                 if call_count["n"] == 3:
                     async with local_session() as writer_c:
                         current = await writer_c.scalar(
@@ -1711,46 +2513,52 @@ class TestVerificationConcurrency:
 
             db.execute = patched_execute  # type: ignore[method-assign]
             try:
-                started = await VerificationService(
-                    executor=fake_executor
-                )._start_retry_execution(
-                    db=db,
-                    task=task,
-                    contract=contract,
-                    profile=None,
-                    report={"passed": False},
-                )
+                with pytest.raises(
+                    ValueError, match="Concurrent modification detected"
+                ):
+                    await VerificationService(
+                        executor=fake_executor
+                    )._start_retry_execution(
+                        db=db,
+                        task=task,
+                        contract=contract,
+                        profile=None,
+                        report={"passed": False},
+                    )
             finally:
                 db.execute = original_execute  # type: ignore[method-assign]
             await db.commit()
 
-        assert call_count["n"] == 3, (
-            "setup error: expected exactly 3 db.execute calls "
-            "(claim, run-id CAS, fresh_task re-read) before this point"
+        fake_executor.cancel.assert_awaited_once_with(run_id)
+        assert call_count["n"] == 6, (
+            "setup error: expected exactly 6 db.execute calls "
+            "(claim, run-ID CAS, initial fresh read, initial task lock, "
+            "cleanup execution lock, cleanup task lock)"
         )
-        assert started is True
 
         async with local_session() as check:
             final = await check.scalar(select(Task).where(Task.id == task_id))
             assert final is not None
-            # Writer C's real transition is untouched in memory by A (A never
-            # assigns task.state), so it must survive regardless.
+            # Writer C's real transition must survive regardless of A's cleanup.
             assert final.state == TaskState.FAILED
-            # The matched branch must not blindly overwrite the version
-            # counter writer C already advanced past. If this fails with a
-            # LOWER version than writer C committed, the matched-branch
-            # flush reverted a genuinely newer, independently-CAS'd commit
-            # -- a new RISK-16-shaped instance.
-            audits = await check.execute(
-                select(AuditLog).where(AuditLog.task_id == task_id)
-            )
-            concurrent_mod_rows = [
-                row
-                for row in audits.scalars().all()
-                if row.event_type == "concurrent_modification"
-            ]
             assert final.version >= 3, (
-                "matched-branch flush reverted writer C's committed version "
-                f"advance: task.version={final.version}, state={final.state}, "
-                f"concurrent_modification audits recorded={len(concurrent_mod_rows)}"
+                "retry cleanup reverted writer C's committed version advance: "
+                f"task.version={final.version}, state={final.state}"
+            )
+            assert final.latest_macro_agent_run_id == run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            assert execution.ended_at is not None
+            assert execution.macro_agent_run_id == run_id
+            assert execution.cancellation_pending is False
+
+            audits = (
+                await check.execute(select(AuditLog).where(AuditLog.task_id == task_id))
+            ).scalars().all()
+            assert any(
+                row.event_type == "retry_execution_start_cas_lost" for row in audits
             )

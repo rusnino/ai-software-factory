@@ -14,7 +14,12 @@ from governance_controller.schemas import (
 )
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
-from governance_controller.services.policy_engine import PolicyEngine, PolicyResult
+from governance_controller.services.policy_engine import (
+    PolicyEngine,
+    PolicyResult,
+    _extract_command_paths,
+    _forbidden_path_conflicts,
+)
 
 
 def _make_contract(
@@ -244,6 +249,34 @@ class TestPolicyEngineRejections:
         assert result.allowed is False
         assert any("Force push" in v for v in result.violations)
         assert any("Signed commits" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push origin +main:main",
+            "git push origin :main",
+            "git push --delete origin main",
+            "git push -d origin main",
+        ],
+    )
+    def test_git_push_destructive_refs_rejected_when_force_push_denied(
+        self, command: str
+    ) -> None:
+        """Force-push denial covers destructive refspec and delete forms."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="destructive push refspec"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("Force push" in violation for violation in result.violations)
 
     def test_empty_objective_rejected_at_schema(self) -> None:
         """#234: objective must be non-empty at the schema layer."""
@@ -501,6 +534,14 @@ class TestPolicyEngineCompletionContractShellAllowlist:
             "ssh user@host rm -rf /",
             "env -i rm -rf /tmp/gcpoc_wrap7",
             "busybox rm -rf /tmp/gcpoc_wrap8",
+            "uv run sh -c 'touch /tmp/gcpoc_wrap9'",
+            "uv run ./payload",
+            "uv run /bin/printf payload",
+            "uv run uv run /usr/bin/printf NESTED_UNALLOWLISTED",
+            "uv run rm -rf /",
+            "uv run git clean -fdx",
+            "uv run git -c core.sshCommand=touch status",
+            "uv run tar -xf archive.tar",
         ],
     )
     def test_wrapper_interpreter_payloads_are_rejected(self, command: str) -> None:
@@ -562,7 +603,6 @@ class TestPolicyEngineCompletionContractShellAllowlist:
             "grep -v pattern file.txt",
             "rm -v file.txt",
             "cp -v a b",
-            "unzip -v archive.zip",
         ],
     )
     def test_bare_v_flag_is_allowed_for_common_tools(self, command: str) -> None:
@@ -838,6 +878,12 @@ class TestPolicyEngineCommandExecutionPrimitives:
             "sed --expr 's/foo/bar/e' file.txt",
             'sed -e "s/line/id/e" file.txt',
             "sed s/foo/bar/e file.txt",
+            "sed -n '1 w /tmp/marker' input",
+            "sed -n '1!w /tmp/marker' input",
+            "sed -i.bak s/a/b/ file",
+            "sed -ibak s/a/b/ file",
+            "sed r file input",
+            "sed w file input",
         ],
     )
     def test_sed_e_command_and_flag_rejected(self, command: str) -> None:
@@ -984,6 +1030,10 @@ class TestPolicyEngineCommandExecutionPrimitives:
             "tar -xf malicious.tar",
             "sed -n '1w /tmp/blocked/marker.txt' input.txt",
             "sed 's/foo/bar/W /tmp/blocked/marker.txt' input.txt",
+            "git diff -o.git/config",
+            "go build -o=.git/hooks/pre-commit ./cmd",
+            "pytest --basetemp=.git/pytest-tmp",
+            "pytest --junitxml=.git/config",
         ],
     )
     def test_control_file_and_sed_file_io_targets_are_rejected(
@@ -1028,9 +1078,21 @@ class TestPolicyEngineCommandExecutionPrimitives:
         "command_template",
         [
             "tar --directory={path} -tf archive.tar",
+            "tar --dire={path} -tf archive.tar",
+            "tar --files-from={path} -cf archive.tar input",
+            "tar -T {path} -cf archive.tar input",
+            "tar cf{path} input",
             "tar -C{path} -tf archive.tar",
             "cp --target-directory={path} source",
             "cp -t {path} source",
+            "go build -o {path} ./cmd",
+            "go build -o={path} ./cmd",
+            "pytest --basetemp={path}",
+            "pytest --junitxml={path}",
+            "pytest --log-file={path}",
+            "pytest --debug={path}",
+            "npm --prefix={path} install --offline",
+            "uv run pytest --junitxml={path}",
         ],
     )
     def test_path_option_values_are_checked_against_forbidden_paths(
@@ -1181,6 +1243,12 @@ class TestPolicyEngineCommandExecutionPrimitives:
 
 
 class TestPolicyEngineForbiddenPathsInCommands:
+    def test_unparseable_command_paths_fail_closed(self) -> None:
+        command_paths = _extract_command_paths("cat 'unterminated")
+
+        assert command_paths
+        assert _forbidden_path_conflicts(command_paths, []) == command_paths
+
     def test_command_argument_touching_forbidden_path_is_rejected(self) -> None:
         # #134: path-like argv tokens in Check.command must be checked against
         # forbidden_paths, not just declared inputs/deliverables.
@@ -1403,3 +1471,501 @@ class TestPolicyEngineRoleAllowlist:
             "Harness 'aider' is not registered; cannot validate role" in v
             for v in result.violations
         )
+
+
+class TestPolicyEngineCommandPolicyHardening:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -c alias.pwn=!touch /tmp/marker pwn",
+            "git config --global alias.pwn !touch",
+            "git --config=alias.pwn=!touch pwn",
+            "git -c core.hooksPath=/tmp/hooks commit --amend --allow-empty",
+            "git clone --upload-pack=touch https://example.invalid/repo",
+            "git --config-env core.editor=TERM status",
+            "git config --edit",
+            "git config -e",
+            "git apply --unsafe-paths patch",
+            "git clone --template=/tmp/template https://example.invalid/repo",
+            "git clone --u=touch https://example.invalid/repo",
+            "git fetch --upl=touch origin",
+            "git push --rece=touch origin HEAD:refs/heads/main",
+            "git push --e=touch origin HEAD:refs/heads/main",
+            "git apply --uns patch",
+            "git clone --te=/tmp/template https://example.invalid/repo",
+            "git config submodule.pwn.update !touch",
+            "git config gpg.ssh.defaultKeyCommand touch",
+            "git config gpg.ssh.program touch",
+            "git config --co comment core.editor touch",
+            "git -c protocol.ext.allow=always ls-remote ext::touch%20/tmp/marker",
+            "unzip -o payload.zip",
+            "sed -n '1w/tmp/marker' input",
+            "sed -i.bak s/a/b/ file",
+            "sed -ibak s/a/b/ file",
+            "sed r file input",
+            "sed w file input",
+            "tar vxf archive.tar",
+            "tar fx archive.tar",
+            "git config -f.git/config advice.detachedHead false",
+            (
+                "git -c 'credential.https://example.com.helper=!printf "
+                "username=pwn' credential fill"
+            ),
+            "git config credential.https://example.com.helper !touch",
+            "git config diff.pwn.command touch",
+            "git config core.alternateRefsCommand touch",
+        ],
+    )
+    def test_command_execution_bypasses_are_rejected(self, command: str) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="command-policy hardening"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git -c advice.detachedHead=false status",
+            "sed -n '1,10p' source",
+            "sed -n '1,10p' w /tmp/other-input",
+        ],
+    )
+    def test_safe_git_config_and_read_only_sed_remain_allowed(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="benign command controls"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+        assert result.violations == []
+
+    def test_sed_no_space_write_path_is_checked_against_forbidden_paths(self) -> None:
+        forbidden = "/tmp/blocked"
+        command = "sed -n '1w/tmp/blocked/marker' input"
+        contract = _make_contract(
+            forbidden_paths=[forbidden],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="sed forbidden output path"),
+            ),
+        )
+
+        result = PolicyEngine.evaluate(
+            contract,
+            _make_profile(forbidden_paths=[forbidden]),
+            ApprovalType.EXECUTION,
+        )
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path" in violation
+            and "/tmp/blocked/marker" in violation
+            for violation in result.violations
+        )
+
+
+class TestPolicyEngineResidualCommandPolicyHardening:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config set core.editor touch",
+            "git config --type string core.editor touch",
+            "git config --value foo core.editor touch",
+            "git config --default foo core.editor touch",
+            "git config set --value foo core.editor touch",
+            "cp --target-directory=/repo/.git source",
+            "cp -t/repo/.git source",
+            "sed --i input",
+            "sed --in input",
+            "sed --inp input",
+            "tar xvPf archive.tar",
+            "tar --extr archive.tar",
+            "git clone -u touch https://example.invalid/repo",
+            "git fetch --upload-pack=touch origin",
+            "git ls-remote --upload-pack=touch origin",
+            "git --exec-path=/tmp/tools probe",
+            "git difftool --no-prompt -x 'touch /tmp/marker' HEAD^ HEAD",
+            "git rebase -x 'touch /tmp/marker' HEAD^",
+            "git filter-branch --tree-filter 'touch /tmp/marker' -- --all",
+            (
+                "git -c 'difftool.pwn.cmd=touch /tmp/marker' difftool "
+                "--tool=pwn HEAD^ HEAD"
+            ),
+            "git config mergetool.pwn.cmd 'touch /tmp/marker'",
+            "git -c core.gitProxy=/tmp/helper ls-remote git://example.invalid/repo",
+            "git -c remote.origin.uploadpack=/tmp/helper fetch origin",
+            "git bisect run ./helper",
+            "git config --fil /tmp/config core.editor /tmp/helper",
+            "cp --target-directory=.git source",
+            "cp --target-directory=work/../.git source",
+            "git diff --output=.git/config",
+            "git diff --output=work/../.git/config",
+            "git apply --directory=.git patch",
+            "git apply --directory=work/../.git patch",
+            "tar x archive.tar",
+            "tar --ge archive.tar",
+            "tar --ext archive.tar",
+            "sed --in-p input",
+        ],
+    )
+    def test_residual_command_execution_forms_are_rejected(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="residual command-policy hardening"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+
+class TestPolicyEngineFinalReviewRegressions:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push --receive-pack touch origin HEAD:refs/heads/main",
+            "git push --receive-pack=touch origin HEAD:refs/heads/main",
+            "git push --receiv=touch origin HEAD:refs/heads/main",
+            "git push --exec touch origin HEAD:refs/heads/main",
+            "git push --exec=touch origin HEAD:refs/heads/main",
+            "git push --ex=touch origin HEAD:refs/heads/main",
+        ],
+    )
+    def test_git_push_transport_helper_overrides_are_rejected(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git push helper override"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "zip -q -T -TT touch archive.zip input.txt",
+            "zip -q -T -TT=touch archive.zip input.txt",
+            "zip -q -T -TTtouch archive.zip input.txt",
+            "zip --test-command=touch archive.zip input.txt",
+            "zip --test-c=touch archive.zip input.txt",
+            "zip --test-command touch archive.zip input.txt",
+            "zip --test-c touch archive.zip input.txt",
+            "zip -qTTtouch archive.zip input.txt",
+        ],
+    )
+    def test_zip_test_command_override_is_rejected(self, command: str) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="zip", command=command)],
+                scope_check=ScopeCheck(description="zip test command override"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "zip -q -T battery.zip input.txt",
+            "zip -q -T matter.zip input.txt",
+        ],
+    )
+    def test_zip_positional_archive_names_are_not_command_options(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="zip", command=command)],
+                scope_check=ScopeCheck(description="zip positional archive name"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config filter.pwn.clean touch",
+            "git config filter.pwn.smudge touch",
+            "git config filter.pwn.process touch",
+            "git config diff.pwn.textconv touch",
+            "git config diff.external touch",
+            "git config merge.pwn.driver touch",
+            "git config gpg.program touch",
+            "git config sequence.editor touch",
+            "git config includeIf.pwn.path /tmp/include",
+            "git config core.askPass touch",
+            (
+                "git -c 'difftool.pwn.cmd=touch /tmp/marker' difftool "
+                "--tool=pwn HEAD^ HEAD"
+            ),
+            "git config mergetool.pwn.cmd 'touch /tmp/marker'",
+        ],
+    )
+    def test_executable_git_config_key_families_are_rejected(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="executable git config key"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        ("command", "forbidden"),
+        [
+            ("cat secret.txt", "secret.txt"),
+            ("tar --dir=/tmp/blocked -tf archive.tar", "/tmp/blocked"),
+            ("make -f/tmp/blocked/Makefile", "/tmp/blocked"),
+            ("cp --targe=/tmp/blocked/.git source", "/tmp/blocked"),
+            (
+                "git config --fil=/tmp/blocked/.git/config "
+                "filter.pwn.clean touch",
+                "/tmp/blocked",
+            ),
+        ],
+    )
+    def test_positional_and_abbreviated_path_values_are_rejected(
+        self, command: str, forbidden: str
+    ) -> None:
+        contract = _make_contract(
+            forbidden_paths=[forbidden],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="path", command=command)],
+                scope_check=ScopeCheck(description="forbidden command path"),
+            ),
+        )
+
+        result = PolicyEngine.evaluate(
+            contract,
+            _make_profile(forbidden_paths=[forbidden]),
+            ApprovalType.EXECUTION,
+        )
+
+        assert result.allowed is False
+        assert any("Task touches forbidden path" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "tar vI touch -c -f archive.tar input.txt",
+            "tar vF touch -c -f archive.tar input.txt",
+            "tar vIP touch -c -f archive.tar input.txt",
+        ],
+    )
+    def test_old_style_tar_helper_clusters_are_rejected(self, command: str) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="tar", command=command)],
+                scope_check=ScopeCheck(description="old-style tar helper"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "tar -cf archive.tar fileF",
+            "tar -cf archive.tar xfile",
+        ],
+    )
+    def test_tar_positional_filenames_are_not_option_clusters(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="tar", command=command)],
+                scope_check=ScopeCheck(description="tar positional filename"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push --force origin HEAD:refs/heads/main",
+            "git push --force-with-lease origin HEAD:refs/heads/main",
+            "git push --mirror origin",
+            "git push -f origin HEAD:refs/heads/main",
+        ],
+    )
+    def test_git_push_force_flags_are_rejected_by_profile(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git force-push policy"),
+            )
+        )
+        profile = _make_profile()
+        profile.git.force_push = "deny"
+
+        result = PolicyEngine.evaluate(contract, profile, ApprovalType.EXECUTION)
+
+        assert result.allowed is False
+        assert any("force push" in v.lower() for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git push --force origin HEAD:refs/heads/main",
+            "git push --force-with-lease origin HEAD:refs/heads/main",
+            "git push --mirror origin",
+            "git push -f origin HEAD:refs/heads/main",
+        ],
+    )
+    def test_git_push_force_flags_are_rejected_in_verification_commands(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(verification={"commands": [command]})
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("force push" in v.lower() for v in result.violations)
+
+    @pytest.mark.parametrize("command", ["git add -u", "git status -uall"])
+    def test_safe_git_short_u_controls_remain_allowed(self, command: str) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="safe git short-u control"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+        assert result.violations == []
+
+    def test_tar_attached_archive_path_is_checked_against_forbidden_paths(self) -> None:
+        forbidden = "/tmp/secret"
+        command = "tar -cf/tmp/secret/archive.tar input"
+        contract = _make_contract(
+            forbidden_paths=[forbidden],
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="tar forbidden archive path"),
+            ),
+        )
+
+        result = PolicyEngine.evaluate(
+            contract,
+            _make_profile(forbidden_paths=[forbidden]),
+            ApprovalType.EXECUTION,
+        )
+
+        assert result.allowed is False
+        assert any(
+            "Task touches forbidden path" in violation
+            and "/tmp/secret/archive.tar" in violation
+            for violation in result.violations
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git config --file /tmp/config core.editor touch",
+            "git config -f /tmp/config core.editor touch",
+            "git config --blob HEAD:config core.editor touch",
+            "git config --type string core.editor touch",
+            "git config --value foo core.editor touch",
+            "git config --default foo core.editor touch",
+            "git config set --file /tmp/config core.editor touch",
+            "git config set --type string core.editor touch",
+            "git config set --value foo core.editor touch",
+            "git config set -t path core.editor touch",
+            "git config set --t path core.editor touch",
+            "git config set --ty path core.editor touch",
+            "git config set --comment note core.editor touch",
+        ],
+    )
+    def test_dangerous_git_key_after_option_argument_is_rejected(
+        self, command: str
+    ) -> None:
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="git config option scanning"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False

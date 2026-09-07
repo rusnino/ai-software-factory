@@ -25,6 +25,7 @@ violations := [v | v := _violation[_]]
 # Aggregate all violation sources.
 _violation contains _harness_violation[_]
 _violation contains _wrapper_violation[_]
+_violation contains _uv_run_violation[_]
 _violation contains _metachar_violation[_]
 _violation contains _destructive_violation[_]
 _violation contains _container_escape_violation[_]
@@ -38,12 +39,16 @@ _violation contains _command_allowlist_violation[_]
 _violation contains _privilege_violation[_]
 _violation contains _control_character_violation[_]
 _violation contains _command_execution_violation[_]
+_violation contains _git_transport_violation[_]
+_violation contains _git_command_execution_violation[_]
+_violation contains _git_force_push_violation[_]
 _violation contains _docker_socket_violation[_]
 _violation contains _harness_role_violation[_]
 _violation contains _resource_cap_violation[_]
 _violation contains _command_parse_violation[_]
 _violation contains _path_conflict_violation[_]
 _violation contains _control_file_violation[_]
+_violation contains _input_shape_violation[_]
 
 # ---------------------------------------------------------------------------
 # Input accessors (defensive defaults for missing keys)
@@ -55,6 +60,163 @@ _git := object.get(input, "git", {})
 _approval := object.get(input, "approval", {})
 _profile_execution := object.get(input, "profile_execution", {})
 _harness_roles := object.get(input, "harness_roles", {})
+
+_required_string_input_fields := {
+    "task_id",
+    "project_id",
+    "proposed_by",
+    "approval_type",
+}
+
+_required_boolean_input_fields := {"has_objective", "has_acceptance"}
+
+_required_array_input_fields := {
+    "commands",
+    "parsed_commands",
+    "allowed_harnesses",
+    "forbidden_path_conflicts",
+    "forbidden_paths",
+}
+
+_required_object_input_fields := {
+    "approval",
+    "execution",
+    "security",
+    "git",
+    "profile_execution",
+    "harness_roles",
+}
+
+_input_shape_violation contains msg if {
+    some key in _required_string_input_fields
+    type_name(object.get(input, key, null)) != "string"
+    msg := sprintf("OPA input field '%s' must be a string", [key])
+}
+
+_input_shape_violation contains msg if {
+    some key in _required_boolean_input_fields
+    type_name(object.get(input, key, null)) != "boolean"
+    msg := sprintf("OPA input field '%s' must be a boolean", [key])
+}
+
+_input_shape_violation contains msg if {
+    some key in _required_array_input_fields
+    type_name(object.get(input, key, null)) != "array"
+    msg := sprintf("OPA input field '%s' must be an array", [key])
+}
+
+_input_shape_violation contains msg if {
+    some cmd in _commands
+    not _has_parsed_command(cmd)
+    msg := sprintf("OPA input parsed_commands is missing command: %s", [cmd])
+}
+
+_input_shape_violation contains msg if {
+    some cmd in _commands
+    some record in _parsed_commands
+    object.get(record, "raw", "") == cmd
+    argv := object.get(record, "argv", [])
+    expected := _shlex_split(cmd)
+    count(argv) > 0
+    count(expected) > 0
+    lower(argv[0]) != lower(expected[0])
+    msg := sprintf("OPA parsed argv does not match command executable: %s", [cmd])
+}
+
+_input_shape_violation contains msg if {
+    some cmd in _commands
+    not contains(cmd, "'")
+    not contains(cmd, "\"")
+    not contains(cmd, "\\")
+    some record in _parsed_commands
+    object.get(record, "raw", "") == cmd
+    argv := object.get(record, "argv", [])
+    expected := _shlex_split(cmd)
+    argv != expected
+    msg := sprintf("OPA parsed argv does not match command tokens: %s", [cmd])
+}
+
+_input_shape_violation contains msg if {
+    some key in _required_object_input_fields
+    type_name(object.get(input, key, null)) != "object"
+    msg := sprintf("OPA input field '%s' must be an object", [key])
+}
+
+_required_approval_fields := {"actor", "type"}
+_required_execution_string_fields := {"harness", "role", "network_access"}
+_required_execution_boolean_fields := {
+    "uses_docker_socket",
+    "destructive_shell",
+    "spawn_subagents",
+    "force_push",
+    "signed_commits",
+}
+_required_execution_number_fields := {"timeout_minutes", "max_retries"}
+_required_security_string_fields := {
+    "docker_socket",
+    "destructive_shell",
+    "network",
+    "spawn_subagents",
+}
+_required_git_string_fields := {"force_push", "signed_commits"}
+_required_git_boolean_fields := {"merge_requires_human"}
+_required_profile_execution_number_fields := {"timeout_minutes", "max_retries"}
+
+_input_shape_violation contains msg if {
+    type_name(_approval) == "object"
+    some key in _required_approval_fields
+    type_name(object.get(_approval, key, null)) != "string"
+    msg := sprintf("OPA input approval field '%s' must be a string", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_execution) == "object"
+    some key in _required_execution_string_fields
+    type_name(object.get(_execution, key, null)) != "string"
+    msg := sprintf("OPA input execution field '%s' must be a string", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_execution) == "object"
+    some key in _required_execution_boolean_fields
+    type_name(object.get(_execution, key, null)) != "boolean"
+    msg := sprintf("OPA input execution field '%s' must be a boolean", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_execution) == "object"
+    some key in _required_execution_number_fields
+    type_name(object.get(_execution, key, null)) != "number"
+    msg := sprintf("OPA input execution field '%s' must be a number", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_security) == "object"
+    some key in _required_security_string_fields
+    type_name(object.get(_security, key, null)) != "string"
+    msg := sprintf("OPA input security field '%s' must be a string", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_git) == "object"
+    some key in _required_git_string_fields
+    type_name(object.get(_git, key, null)) != "string"
+    msg := sprintf("OPA input git field '%s' must be a string", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_git) == "object"
+    some key in _required_git_boolean_fields
+    type_name(object.get(_git, key, null)) != "boolean"
+    msg := sprintf("OPA input git field '%s' must be a boolean", [key])
+}
+
+_input_shape_violation contains msg if {
+    type_name(_profile_execution) == "object"
+    some key in _required_profile_execution_number_fields
+    type_name(object.get(_profile_execution, key, null)) != "number"
+    msg := sprintf("OPA input profile_execution field '%s' must be a number", [key])
+}
 
 # ---------------------------------------------------------------------------
 # Harness allowlist
@@ -87,6 +249,31 @@ _wrapper_violation contains msg if {
     msg := sprintf("Forbidden wrapper/interpreter command: %s", [_base_command(argv[0])])
 }
 
+_wrapper_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "uv"
+    some run_index, arg in argv
+    run_index > 0
+    arg == "run"
+    some child_index, child in argv
+    child_index > run_index
+    _base_command(child) in _forbidden_wrappers
+    msg := sprintf("Nested wrapper/interpreter command: %s", [cmd])
+}
+
+_uv_run_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "uv"
+    child_index := _uv_run_child_index(argv)
+    not _base_command(argv[child_index]) in _uv_run_child_commands
+    msg := sprintf("uv run child is not in the verification allowlist: %s", [cmd])
+}
+
+# unzip is intentionally omitted: archive extraction writes untrusted members.
 _allowed_commands := {
     "brew", "cargo", "cmake", "composer", "conan", "dotnet", "gem",
     "gradle", "make", "meson", "mix", "mvn", "npm", "npx", "nuget",
@@ -96,9 +283,11 @@ _allowed_commands := {
     "bandit", "black", "flake8", "mypy", "pylint", "pyright", "ruff",
     "cat", "cp", "cut", "date", "diff", "echo", "find", "grep", "head",
     "id", "ls", "mkdir", "mv", "pwd", "rm", "sed", "sort", "tail", "tar",
-    "tee", "test", "touch", "tr", "uniq", "unzip", "wc", "which", "whoami",
+    "tee", "test", "touch", "tr", "uniq", "wc", "which", "whoami",
     "zip",
 }
+
+_uv_run_child_commands := {"bandit", "black", "flake8", "mypy", "pylint", "pyright", "pytest", "ruff"}
 
 _command_allowlist_violation contains msg if {
     some cmd in _commands
@@ -229,9 +418,40 @@ _command_execution_violation contains msg if {
     some cmd in _commands
     argv := _command_argv(cmd)
     count(argv) > 0
+    _base_command(argv[0]) == "zip"
+    some arg in argv
+    _zip_test_command_option(arg)
+    msg := sprintf("Zip test command execution primitive: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
     _base_command(argv[0]) == "sed"
     some arg in argv
-    arg == "-i"
+    arg in {"-i", "--in-place", "--i", "--in", "--inp"}
+    msg := sprintf("Sed in-place file write cannot be inspected safely: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    some arg in argv
+    startswith(arg, "--in-p")
+    msg := sprintf("Sed in-place file write cannot be inspected safely: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    some arg in argv
+    startswith(arg, "-i")
+    not startswith(arg, "--")
     msg := sprintf("Sed in-place file write cannot be inspected safely: %s", [cmd])
 }
 
@@ -248,6 +468,10 @@ _command_execution_violation contains msg if {
 
 _command_execution_violation contains msg if {
     some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "sed"
+    not _has_parsed_command(cmd)
     regex.match(`(?i)(^|[[:space:]])[^[:space:]]*[rRwW][[:space:]]+[^[:space:]]+`, cmd)
     msg := sprintf("Sed file input/output primitive: %s", [cmd])
 }
@@ -257,8 +481,19 @@ _command_execution_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "tar"
-    some arg in argv
+    some index, arg in argv
     _tar_extract_operation(arg)
+    msg := sprintf("Tar archive extraction writes untrusted files: %s", [cmd])
+}
+
+_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "tar"
+    some index, arg in argv
+    index == 1
+    _tar_old_style_extract_operation(arg)
     msg := sprintf("Tar archive extraction writes untrusted files: %s", [cmd])
 }
 
@@ -300,8 +535,19 @@ _destructive_violation contains msg if {
     argv := _command_argv(cmd)
     count(argv) > 0
     _base_command(argv[0]) == "tar"
-    some arg in argv
+    some index, arg in argv
     _tar_short_dangerous_flag(arg)
+    msg := sprintf("Dangerous tar option in command: %s", [cmd])
+}
+
+_destructive_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "tar"
+    some index, arg in argv
+    index == 1
+    _tar_old_style_short_dangerous_flag(arg)
     msg := sprintf("Dangerous tar option in command: %s", [cmd])
 }
 
@@ -332,8 +578,11 @@ _git_config_violation contains msg if {
         "core.fsmonitor",
         "core.editor",
         "core.pager",
+        "core.gitproxy",
+        "core.hookspath",
         "credential.helper",
         "include.path",
+        "protocol.ext.allow",
     }
     msg := sprintf("Dangerous git config override in command: %s", [cmd])
 }
@@ -352,8 +601,11 @@ _git_config_violation contains msg if {
         "core.fsmonitor",
         "core.editor",
         "core.pager",
+        "core.gitproxy",
+        "core.hookspath",
         "credential.helper",
         "include.path",
+        "protocol.ext.allow",
     }
     msg := sprintf("Dangerous git config-env override in command: %s", [cmd])
 }
@@ -375,19 +627,285 @@ _git_config_violation contains msg if {
         "core.fsmonitor",
         "core.editor",
         "core.pager",
+        "core.gitproxy",
+        "core.hookspath",
         "credential.helper",
         "include.path",
+        "protocol.ext.allow",
     }
     msg := sprintf("Dangerous git config subcommand in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_key(argv, index)
+    _is_executable_git_config_key(key)
+    msg := sprintf("Executable git config key in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_env_key(argv, index)
+    _is_executable_git_config_key(key)
+    msg := sprintf("Executable git config-env key in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, arg in argv
+    index >= 1
+    arg == "config"
+    index == _git_subcommand_index(argv)
+    key := _git_config_subcommand_key(argv, index)
+    _is_executable_git_config_key(key)
+    msg := sprintf("Executable git config subcommand key in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_key(argv, index)
+    startswith(lower(key), "alias.")
+    value := _git_config_value(argv, index)
+    startswith(trim(value, " \t"), "!")
+    msg := sprintf("Shell git alias config in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_env_key(argv, index)
+    startswith(lower(key), "alias.")
+    msg := sprintf("Shell git alias config-env in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, arg in argv
+    index >= 1
+    arg == "config"
+    index == _git_subcommand_index(argv)
+    key := _git_config_subcommand_key(argv, index)
+    startswith(lower(key), "alias.")
+    value := _git_config_subcommand_value(argv, index)
+    startswith(trim(value, " \t"), "!")
+    msg := sprintf("Shell git alias config subcommand in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_key(argv, index)
+    _git_remote_command_config_key(key)
+    msg := sprintf("Git remote command config in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, _ in argv
+    index >= 1
+    key := _git_config_env_key(argv, index)
+    _git_remote_command_config_key(key)
+    msg := sprintf("Git remote command config-env in command: %s", [cmd])
+}
+
+_git_config_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some index, arg in argv
+    index >= 1
+    arg == "config"
+    index == _git_subcommand_index(argv)
+    key := _git_config_subcommand_key(argv, index)
+    _git_remote_command_config_key(key)
+    msg := sprintf("Git remote command config subcommand in command: %s", [cmd])
+}
+
+_git_transport_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some arg in argv
+    _git_upload_pack_option(argv, arg)
+    msg := sprintf("Git upload-pack command option: %s", [cmd])
+}
+
+_git_transport_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some arg in argv
+    startswith(lower(arg), "ext::")
+    msg := sprintf("Git ext transport command: %s", [cmd])
+}
+
+_git_transport_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some arg in argv
+    _git_exec_path_option(arg)
+    msg := sprintf("Git executable path command option: %s", [cmd])
+}
+
+_git_transport_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    some arg in argv
+    _git_transport_helper_option(argv, arg)
+    msg := sprintf("Git transport helper override: %s", [cmd])
+}
+
+_git_transport_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    _git_bisect_run(argv)
+    msg := sprintf("Git bisect run command: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) in {"difftool", "mergetool", "filter-branch"}
+    msg := sprintf("Git subcommand executes external commands: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) == "rebase"
+    some index, arg in argv
+    index > subcommand_index
+    startswith(split(lower(arg), "=")[0], "-x")
+    msg := sprintf("Git rebase command execution option: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) == "submodule"
+    some index, arg in argv
+    index > subcommand_index
+    lower(arg) == "foreach"
+    msg := sprintf("Git submodule foreach command: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) == "apply"
+    some index, arg in argv
+    index > subcommand_index
+    _git_long_option_matches(split(lower(arg), "=")[0], "--unsafe-paths")
+    msg := sprintf("Git apply unsafe path option: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) == "clone"
+    some index, arg in argv
+    index > subcommand_index
+    _git_long_option_matches(split(lower(arg), "=")[0], "--template")
+    msg := sprintf("Git clone template hook option: %s", [cmd])
+}
+
+_git_command_execution_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    subcommand_index := _git_subcommand_index(argv)
+    subcommand_index > 0
+    lower(argv[subcommand_index]) == "config"
+    some index, arg in argv
+    index > subcommand_index
+    _git_config_edit_option(arg)
+    msg := sprintf("Git config editor option: %s", [cmd])
+}
+
+_git_force_push_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "git"
+    object.get(_git, "force_push", "deny") == "deny"
+    _git_push_force_option(argv)
+    msg := sprintf("Force push is denied by project profile: %s", [cmd])
 }
 
 _control_file_violation contains msg if {
     some cmd in _commands
     argv := _command_argv(cmd)
     count(argv) > 0
-    _base_command(argv[0]) in {"cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed"}
+    _base_command(argv[0]) in {"git", "cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed", "go", "npm", "pytest", "uv"}
     some arg in argv
     _is_git_control_file_path(arg)
+    msg := sprintf("Command targets protected git control file: %s", [cmd])
+}
+
+_control_file_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) in {"git", "cp", "mv", "mkdir", "tee", "touch", "tar", "unzip", "zip", "sed", "go", "npm", "pytest", "uv"}
+    some arg in argv
+    path := _git_control_file_option_path(argv, arg)
+    _is_git_control_file_path(path)
     msg := sprintf("Command targets protected git control file: %s", [cmd])
 }
 
@@ -593,8 +1111,26 @@ _tar_extract_operation(arg) if {
 }
 
 _tar_extract_operation(arg) if {
+    startswith(lower(arg), "--extr")
+}
+
+_tar_extract_operation(arg) if {
+    startswith(lower(arg), "--ge")
+}
+
+_tar_extract_operation(arg) if {
+    startswith(lower(arg), "--ext")
+}
+
+_tar_extract_operation(arg) if {
     startswith(arg, "-")
     not startswith(arg, "--")
+    contains(lower(arg), "x")
+}
+
+_tar_old_style_extract_operation(arg) if {
+    not startswith(arg, "-")
+    substring(lower(arg), 0, 1) in {"a", "c", "d", "f", "r", "t", "u", "v", "x"}
     contains(lower(arg), "x")
 }
 
@@ -608,6 +1144,250 @@ _tar_short_dangerous_flag(arg) if {
     startswith(arg, "-")
     not startswith(arg, "--")
     contains(arg, "P")
+}
+
+_tar_old_style_short_dangerous_flag(arg) if {
+    not startswith(arg, "-")
+    substring(lower(arg), 0, 1) in {"a", "c", "d", "f", "r", "t", "u", "v", "x"}
+    some flag in {"F", "I", "P"}
+    contains(arg, flag)
+}
+
+_git_upload_pack_option(argv, arg) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "clone"
+    lower(arg) == "-u"
+}
+
+_git_upload_pack_option(argv, arg) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "clone"
+    startswith(lower(arg), "-u")
+    not lower(arg) == "-u"
+}
+
+_git_upload_pack_option(_, arg) if {
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--upload-pack")
+}
+
+_git_exec_path_option(arg) if {
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--exec-path")
+}
+
+_git_transport_helper_option(argv, arg) if {
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--receive-pack")
+}
+
+_git_transport_helper_option(argv, arg) if {
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--exec")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    option := split(lower(arg), "=")[0]
+    option in {"--force", "--force-with-lease", "-f"}
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--force")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--force-with-lease")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--mirror")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(lower(arg), "f")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    option := split(lower(arg), "=")[0]
+    _git_long_option_matches(option, "--delete")
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    startswith(arg, "+")
+    count(arg) > 1
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    startswith(arg, ":")
+    count(arg) > 1
+}
+
+_git_push_force_option(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "push"
+    some index, arg in argv
+    index > subcommand_index
+    startswith(arg, "-")
+    not startswith(arg, "--")
+    contains(lower(arg), "d")
+}
+
+_git_bisect_run(argv) if {
+    subcommand_index := _git_subcommand_index(argv)
+    lower(argv[subcommand_index]) == "bisect"
+    some index, arg in argv
+    index > subcommand_index
+    lower(arg) == "run"
+}
+
+_git_remote_command_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "remote.")
+    endswith(normalized, ".uploadpack")
+}
+
+_git_remote_command_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "remote.")
+    endswith(normalized, ".receivepack")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "filter.")
+    endswith(normalized, ".clean")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "filter.")
+    endswith(normalized, ".smudge")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "filter.")
+    endswith(normalized, ".process")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "diff.")
+    endswith(normalized, ".textconv")
+}
+
+_is_executable_git_config_key(key) if {
+    lower(key) == "diff.external"
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "merge.")
+    endswith(normalized, ".driver")
+}
+
+_is_executable_git_config_key(key) if {
+    lower(key) in {"core.askpass", "gpg.program", "sequence.editor"}
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "includeif.")
+    endswith(normalized, ".path")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "difftool.")
+    endswith(normalized, ".cmd")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "mergetool.")
+    endswith(normalized, ".cmd")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "submodule.")
+    endswith(normalized, ".update")
+}
+
+_is_executable_git_config_key(key) if {
+    lower(key) in {"gpg.ssh.defaultkeycommand", "gpg.ssh.program"}
+}
+
+_is_executable_git_config_key(key) if {
+    lower(key) == "core.alternaterefscommand"
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "credential.")
+    endswith(normalized, ".helper")
+}
+
+_is_executable_git_config_key(key) if {
+    normalized := lower(key)
+    startswith(normalized, "diff.")
+    endswith(normalized, ".command")
+}
+
+_zip_test_command_option(arg) if {
+    startswith(lower(arg), "-")
+    not startswith(lower(arg), "--")
+    contains(substring(lower(arg), 1, -1), "tt")
+}
+
+_zip_test_command_option(arg) if {
+    parts := split(lower(arg), "=")
+    option := parts[0]
+    option == "--test-command"
+}
+
+_zip_test_command_option(arg) if {
+    parts := split(lower(arg), "=")
+    option := parts[0]
+    startswith(option, "--test-c")
+    startswith("--test-command", option)
 }
 
 _git_clean_dangerous_flag(arg) if {
@@ -658,12 +1438,28 @@ _git_config_key(argv, index) := key if {
     key := parts[0]
 }
 
+_git_config_key(argv, index) := key if {
+    arg := argv[index]
+    startswith(lower(arg), "--config=")
+    assignment := substring(arg, 9, -1)
+    parts := split(assignment, "=")
+    key := parts[0]
+}
+
 _git_config_env_key(argv, index) := key if {
     arg := argv[index]
     startswith(lower(arg), "--config-env=")
     parts := split(arg, "=")
     count(parts) >= 3
     key := parts[1]
+}
+
+_git_config_env_key(argv, index) := key if {
+    argv[index] == "--config-env"
+    assignment := argv[index + 1]
+    parts := split(assignment, "=")
+    count(parts) >= 2
+    key := parts[0]
 }
 
 _git_config_key(argv, index) := key if {
@@ -675,18 +1471,90 @@ _git_config_key(argv, index) := key if {
     key := parts[0]
 }
 
+_git_config_value(argv, index) := value if {
+    arg := argv[index]
+    arg in {"-c", "--config"}
+    assignment := argv[index + 1]
+    equals_index := indexof(assignment, "=")
+    equals_index >= 0
+    value := substring(assignment, equals_index + 1, -1)
+}
+
+_git_config_value(argv, index) := value if {
+    arg := argv[index]
+    startswith(lower(arg), "--config=")
+    assignment := substring(arg, 9, -1)
+    equals_index := indexof(assignment, "=")
+    equals_index >= 0
+    value := substring(assignment, equals_index + 1, -1)
+}
+
+_git_config_value(argv, index) := value if {
+    arg := argv[index]
+    startswith(lower(arg), "-c")
+    not arg in {"-c", "--config"}
+    assignment := substring(arg, 2, -1)
+    equals_index := indexof(assignment, "=")
+    equals_index >= 0
+    value := substring(assignment, equals_index + 1, -1)
+}
+
 # #309: git config [<options>] <key> <value> persists a config key. Locate the
-# first non-option token after "config", treating --file/-f/--blob and their
-# arguments as option tokens.
+# first non-option token after "config", treating the "set" command and
+# --file/-f/--blob/--type options and their unambiguous abbreviations as
+# non-key tokens.
 _git_config_subcommand_key(argv, config_index) := key if {
     candidates := [i |
         some i, arg in argv
         i > config_index
         not startswith(arg, "-")
+        arg != "set"
         not _git_config_option_argument(argv, config_index, i)
     ]
     count(candidates) > 0
     key := _git_config_key_name(argv[candidates[0]])
+}
+
+_git_config_subcommand_value(argv, config_index) := value if {
+    candidates := [i |
+        some i, arg in argv
+        i > config_index
+        not startswith(arg, "-")
+        arg != "set"
+        not _git_config_option_argument(argv, config_index, i)
+    ]
+    count(candidates) > 0
+    key_index := candidates[0]
+    key_token := argv[key_index]
+    equals_index := indexof(key_token, "=")
+    equals_index < 0
+    value := argv[key_index + 1]
+}
+
+_git_config_subcommand_value(argv, config_index) := value if {
+    candidates := [i |
+        some i, arg in argv
+        i > config_index
+        not startswith(arg, "-")
+        arg != "set"
+        not _git_config_option_argument(argv, config_index, i)
+    ]
+    count(candidates) > 0
+    key_token := argv[candidates[0]]
+    equals_index := indexof(key_token, "=")
+    equals_index >= 0
+    value := substring(key_token, equals_index + 1, -1)
+}
+
+_git_config_edit_option(arg) if {
+    lower(arg) == "-e"
+}
+
+_git_config_edit_option(arg) if {
+    option := lower(arg)
+    count(option) >= 3
+    startswith(option, "--")
+    startswith("--edit", option)
 }
 
 _git_config_key_name(token) := key if {
@@ -698,7 +1566,8 @@ _git_config_option_argument(argv, config_index, i) if {
     some j
     j > config_index
     j < i
-    argv[j] in {"--file", "-f", "--blob"}
+    argv[j] in {"--file", "--fil", "-f", "--blob", "--blo", "--type", "--typ", "--t", "--ty", "-t", "--value", "--val", "--default", "--def", "--comment", "--com", "--co"}
+    i == j + 1
 }
 
 _git_global_options_with_values := {
@@ -737,12 +1606,174 @@ _git_subcommand_index(argv) := index if {
     not _git_prior_non_subcommand_argument(argv, index)
 }
 
+_git_long_option_matches(option, canonical) if {
+    startswith(option, "--")
+    count(option) >= 3
+    startswith(canonical, option)
+}
+
+_uv_run_child_index(argv) := index if {
+    _base_command(argv[0]) == "uv"
+    some run_index, arg in argv
+    run_index >= 1
+    arg == "run"
+    not _uv_prior_run(argv, run_index)
+    index := run_index + 1
+    not startswith(argv[index], "-")
+}
+
+_uv_run_child_index(argv) := index if {
+    _base_command(argv[0]) == "uv"
+    some run_index, arg in argv
+    run_index >= 1
+    arg == "run"
+    not _uv_prior_run(argv, run_index)
+    index := run_index + 2
+    argv[run_index + 1] == "--"
+    not startswith(argv[index], "-")
+}
+
+_uv_prior_run(argv, run_index) if {
+    some prior, arg in argv
+    prior >= 1
+    prior < run_index
+    arg == "run"
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some prefix in {
+        "--target-directory=",
+        "--directory=",
+        "--files-from=",
+        "--output=",
+        "--git-dir=",
+        "--work-tree=",
+        "--file=",
+        "-t",
+    }
+    startswith(lower(arg), lower(prefix))
+    path := trim(substring(arg, count(prefix), -1), "/=")
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    child_index := _uv_run_child_index(argv)
+    _base_command(argv[child_index]) == "pytest"
+    some index
+    index > child_index
+    argv[index] == arg
+    parts := split(lower(arg), "=")
+    option := parts[0]
+    some canonical in {"--basetemp", "--junitxml", "--junit-xml", "--log-file", "--debug"}
+    count(option) > 2
+    startswith(canonical, option)
+    count(parts) > 1
+    path := substring(arg, indexof(arg, "=") + 1, -1)
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    _base_command(argv[0]) == "npm"
+    parts := split(lower(arg), "=")
+    option := parts[0]
+    some canonical in {
+        "--prefix",
+        "--userconfig",
+        "--globalconfig",
+        "--cache",
+        "--logs-dir",
+    }
+    count(option) > 2
+    startswith(canonical, option)
+    count(parts) > 1
+    path := substring(arg, indexof(arg, "=") + 1, -1)
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    count(arg) > 2
+    startswith(arg, "-C")
+    path := trim(substring(arg, 2, -1), "/=")
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    _base_command(argv[0]) == "git"
+    count(arg) > 2
+    startswith(arg, "-f")
+    not startswith(arg, "--")
+    path := trim(substring(arg, 2, -1), "=/")
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    argv[index] == "-f"
+    _base_command(argv[0]) == "git"
+    index + 1 < count(argv)
+    path := trim(argv[index + 1], "/")
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    _base_command(argv[0]) in {"git", "go"}
+    count(arg) > 2
+    substring(lower(arg), 0, 2) == "-o"
+    path := trim(substring(arg, 2, -1), "=")
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    some index
+    index >= 1
+    argv[index] == arg
+    _base_command(argv[0]) == "pytest"
+    parts := split(lower(arg), "=")
+    option := parts[0]
+    some canonical in {
+        "--basetemp",
+        "--junitxml",
+        "--junit-xml",
+        "--result-log",
+        "--log-file",
+        "--debug",
+    }
+    count(option) > 2
+    startswith(canonical, option)
+    count(parts) > 1
+    path := substring(arg, indexof(arg, "=") + 1, -1)
+    path != ""
+}
+
+_git_control_file_option_path(argv, arg) := path if {
+    _base_command(argv[0]) == "tar"
+    not startswith(arg, "--")
+    option_chars := trim(arg, "-")
+    substring(lower(option_chars), 0, 1) in {"a", "c", "d", "f", "r", "t", "u", "x"}
+    file_index := indexof(lower(arg), "f")
+    file_index >= 0
+    path := trim(substring(arg, file_index + 1, -1), "=")
+    path != ""
+}
+
 _is_git_control_file_path(path) if {
     parts := split(trim(path, "/"), "/")
-    some index, part in parts
+    some part in parts
     part == ".git"
-    index + 1 < count(parts)
-    parts[index + 1] in {"config", "config.worktree", "hooks"}
 }
 
 _base_command(token) := base if {
@@ -896,11 +1927,32 @@ _sed_script_executes(script) if {
 }
 
 _sed_script_file_io(script) if {
-    regex.match(`(?i)(^|[;\n])[^;\n]*[rRwW][[:space:]]+[^;\n]+`, script)
+    substitution_index := indexof(lower(script), "s")
+    substitution_index >= 0
+    substitution := substring(script, substitution_index, -1)
+    count(substitution) > 2
+    delimiter := substring(substitution, 1, 1)
+    delimiter != ""
+    parts := split(substitution, delimiter)
+    count(parts) >= 4
+    flags := parts[count(parts) - 1]
+    contains(lower(flags), "w")
 }
 
 _sed_script_file_io(script) if {
-    regex.match(`(?i)/w[[:space:]]+`, script)
+    regex.match(`(?i)^[0-9$]+(?:,[0-9$]+)?[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
+}
+
+_sed_script_file_io(script) if {
+    regex.match(`(?i)^/[^/]*/[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
+}
+
+_sed_script_file_io(script) if {
+    regex.match(`(?i)^[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
+}
+
+_sed_script_file_io(script) if {
+    regex.match(`(?i)^\\.[^\n]*[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
 }
 
 _sed_script_executes(script) if {

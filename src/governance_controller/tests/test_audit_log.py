@@ -147,6 +147,48 @@ class TestAuditLogModel:
         ).scalar_one()
         assert reloaded.row_hash == reloaded.compute_hash()
 
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "plane_projection_completed",
+            "plane_projection_failed",
+            "plane_projection_skipped",
+        ],
+    )
+    async def test_plane_projection_terminal_log_is_idempotent(
+        self,
+        db_session: AsyncSession,
+        event_type: str,
+    ) -> None:
+        pending_event_id = f"pending-{event_type}"
+        first = await AuditService.log(
+            db=db_session,
+            event_type=event_type,
+            task_id="task-plane-terminal-idempotency",
+            actor="system",
+            source="test",
+            payload={"pending_event_id": pending_event_id},
+        )
+        second = await AuditService.log(
+            db=db_session,
+            event_type=event_type,
+            task_id="task-plane-terminal-idempotency",
+            actor="system",
+            source="test",
+            payload={"pending_event_id": pending_event_id},
+        )
+
+        assert second.id == first.id
+        rows = (
+            await db_session.execute(
+                select(AuditLog).where(
+                    AuditLog.task_id == "task-plane-terminal-idempotency",
+                    AuditLog.event_type == event_type,
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
     async def test_compute_hash_works_on_orm_loaded_row(
         self, db_session: AsyncSession
     ) -> None:
@@ -238,6 +280,57 @@ class TestAuditLogModel:
 def _is_postgres(url: str) -> bool:
     return url.startswith("postgresql")
 
+
+@pytest.mark.skipif(
+    _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+    reason="SQLite audit-chain concurrency test requires SQLite",
+)
+class TestAuditLogSQLiteConcurrency:
+    async def test_concurrent_ordinary_logs_form_one_hash_chain(
+        self,
+        isolated_db: tuple[AsyncEngine, sessionmaker],
+    ) -> None:
+        """Separate SQLite sessions must serialize ordinary audit writes."""
+        _engine, session_local = isolated_db
+
+        async with session_local() as seed:
+            await AuditService.log(
+                db=seed,
+                event_type="seed",
+                task_id="task-sqlite-concurrent-hash",
+                actor="system",
+                source="test",
+            )
+            await seed.commit()
+
+        writers = 8
+        barrier = asyncio.Barrier(writers)
+
+        async def write(index: int) -> None:
+            async with session_local() as session:
+                await barrier.wait()
+                await AuditService.log(
+                    db=session,
+                    event_type="concurrent",
+                    task_id=f"task-sqlite-concurrent-{index}",
+                    actor=f"writer-{index}",
+                    source="test",
+                    payload={"index": index},
+                )
+                await session.commit()
+
+        await asyncio.gather(*(write(index) for index in range(writers)))
+
+        async with session_local() as check:
+            rows = (
+                await check.execute(
+                    select(AuditLog).order_by(AuditLog.id)
+                )
+            ).scalars().all()
+
+        assert len(rows) == writers + 1
+        for previous, current in zip(rows, rows[1:], strict=False):
+            assert current.previous_hash == previous.row_hash
 
 def test_get_engine_returns_different_engine_per_loop() -> None:
     """#190: engine must not be reused across different event loops."""
@@ -1424,6 +1517,144 @@ class TestAuditLogPostgresDDL:
             if "projection_task" in locals():
                 await projection_task
             await slow_session.rollback()
+
+
+@pytest.mark.skipif(
+    not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+    reason="concurrent Plane terminal logs require PostgreSQL advisory locks",
+)
+class TestPlaneProjectionAuditPostgres:
+    async def test_concurrent_terminal_logs_share_one_row(
+        self,
+        isolated_db: tuple[AsyncEngine, sessionmaker],
+    ) -> None:
+        """Concurrent producers must return one committed terminal row."""
+        _engine, session_local = isolated_db
+        task_id = "task-plane-terminal-concurrent"
+        pending_event_id = "pending-plane-terminal-concurrent"
+
+        async with session_local() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            seed.add(
+                AuditLog(
+                    event_id=pending_event_id,
+                    event_type="plane_projection_pending",
+                    task_id=task_id,
+                    actor="system",
+                    source="test",
+                    payload={"operation": "update_state"},
+                )
+            )
+            await seed.commit()
+
+        barrier = asyncio.Barrier(2)
+
+        async def write_terminal(source: str) -> str:
+            async with session_local() as session:
+                await barrier.wait()
+                entry = await AuditService.log(
+                    db=session,
+                    event_type="plane_projection_completed",
+                    task_id=task_id,
+                    actor="system",
+                    source=source,
+                    payload={"pending_event_id": pending_event_id},
+                )
+                await session.commit()
+                return entry.event_id
+
+        event_ids = await asyncio.gather(
+            write_terminal("verification_service"),
+            write_terminal("stuck_execution_poller"),
+        )
+
+        assert event_ids[0] == event_ids[1]
+        async with session_local() as check:
+            rows = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task_id,
+                        AuditLog.event_type == "plane_projection_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(rows) == 1
+
+
+@pytest.mark.skipif(
+    _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+    reason="SQLite terminal-log concurrency test requires SQLite",
+)
+class TestPlaneProjectionAuditSQLite:
+    async def test_concurrent_terminal_logs_share_one_row(
+        self,
+        isolated_db: tuple[AsyncEngine, sessionmaker],
+    ) -> None:
+        """Concurrent SQLite sessions must not duplicate a terminal outcome."""
+        _engine, session_local = isolated_db
+
+        async with session_local() as seed:
+            seed.add(
+                Task(
+                    id="task-plane-terminal-sqlite",
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            seed.add(
+                AuditLog(
+                    event_id="pending-plane-terminal-sqlite",
+                    event_type="plane_projection_pending",
+                    task_id="task-plane-terminal-sqlite",
+                    actor="system",
+                    source="test",
+                    payload={"operation": "update_state"},
+                )
+            )
+            await seed.commit()
+
+        barrier = asyncio.Barrier(2)
+
+        async def write_terminal(source: str) -> str:
+            async with session_local() as session:
+                await barrier.wait()
+                entry = await AuditService.log(
+                    db=session,
+                    event_type="plane_projection_completed",
+                    task_id="task-plane-terminal-sqlite",
+                    actor="system",
+                    source=source,
+                    payload={
+                        "pending_event_id": "pending-plane-terminal-sqlite"
+                    },
+                )
+                await session.commit()
+                return entry.event_id
+
+        event_ids = await asyncio.gather(
+            write_terminal("verification_service"),
+            write_terminal("stuck_execution_poller"),
+        )
+
+        assert event_ids[0] == event_ids[1]
+        async with session_local() as check:
+            rows = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == "task-plane-terminal-sqlite",
+                        AuditLog.event_type == "plane_projection_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(rows) == 1
 
 
 class TestAuditServiceSideEffects:

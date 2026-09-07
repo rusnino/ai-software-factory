@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import insert, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -95,6 +96,20 @@ def _get_session_maker() -> async_sessionmaker[AsyncSession]:
         bind=get_engine(),
         expire_on_commit=False,
     )
+
+
+async def begin_sqlite_cancellation_claim(db: AsyncSession) -> None:
+    """Acquire SQLite's writer lock for the duration of cancellation cleanup."""
+    bind = db.bind
+    if bind is None or bind.dialect.name != "sqlite":
+        return
+    try:
+        await db.execute(text("BEGIN IMMEDIATE"))
+    except OperationalError as exc:
+        # A caller may already have flushed a write in this transaction; the
+        # existing SQLite writer lock is the claim in that case.
+        if "cannot start a transaction within a transaction" not in str(exc):
+            raise
 
 
 # Backwards-compatible module-level sessionmaker. Tests patch this directly.
@@ -477,6 +492,11 @@ async def run_migrations() -> None:
 
 async def init_db() -> None:
     async with get_engine().begin() as conn:
+        if conn.dialect.name == "postgresql":
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"),
+                {"key": _MIGRATION_LOCK_KEY},
+            )
         await conn.run_sync(SQLModel.metadata.create_all)
     await run_migrations()
 

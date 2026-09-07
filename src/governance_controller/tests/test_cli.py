@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from typer.testing import CliRunner
 
 from governance_controller.cli import app, reconcile
@@ -657,6 +658,7 @@ class TestCliVerifyAudit:
     ) -> None:
         """#326: verify-audit streams a real linked chain with bounded fetches."""
         _engine, local_session = patched_db
+        test_db_url = _engine.url.render_as_string(hide_password=False)
         entries: list[AuditLog] = []
 
         async with local_session() as seed:
@@ -701,8 +703,19 @@ class TestCliVerifyAudit:
 
         @asynccontextmanager
         async def streaming_db_session():
-            async with local_session() as session:
-                yield _StreamingOnlySession(session)
+            # CliRunner executes the synchronous CLI in a separate event loop.
+            # asyncpg sessions cannot be moved across loops, so create the test
+            # session in the loop that invokes the command.
+            loop_engine = create_async_engine(test_db_url, echo=False, future=True)
+            loop_session = async_sessionmaker(
+                loop_engine,
+                expire_on_commit=False,
+            )
+            try:
+                async with loop_session() as session:
+                    yield _StreamingOnlySession(session)
+            finally:
+                await loop_engine.dispose()
 
         with patch(
             "governance_controller.cli.get_db_session", streaming_db_session
