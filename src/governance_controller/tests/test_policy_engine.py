@@ -1,5 +1,7 @@
 """Tests for the embedded PolicyEngine."""
 
+import zipfile
+
 import pytest
 from pydantic import ValidationError
 
@@ -20,6 +22,7 @@ from governance_controller.services.policy_engine import (
     _extract_command_paths,
     _forbidden_path_conflicts,
 )
+from governance_controller.services.verification_service import VerificationService
 
 
 def _make_contract(
@@ -1762,6 +1765,42 @@ class TestPolicyEngineFinalReviewRegressions:
         )
 
         assert result.allowed is False
+
+    @pytest.mark.asyncio
+    async def test_zip_test_command_is_rejected_before_live_subprocess(
+        self, tmp_path
+    ) -> None:
+        """#333: an approved zip check must never execute its -TT shell text."""
+        marker = tmp_path / "zip-marker"
+        input_path = tmp_path / "input.txt"
+        archive_path = tmp_path / "archive.zip"
+        input_path.write_text("payload\n")
+        with zipfile.ZipFile(archive_path, "w") as archive:
+            archive.write(input_path, arcname=input_path.name)
+
+        command = (
+            "zip -q -T -TT "
+            f"'touch {marker}' {archive_path} {input_path}"
+        )
+        check = Check(type="zip", command=command)
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[check],
+                scope_check=ScopeCheck(description="zip live command execution"),
+            )
+        )
+
+        policy = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+        if policy.allowed:
+            await VerificationService._run_check(
+                check, timeout=5, cwd=str(tmp_path)
+            )
+
+        assert policy.allowed is False
+        assert not marker.exists()
 
     @pytest.mark.parametrize(
         "command",

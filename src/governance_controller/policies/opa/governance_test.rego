@@ -1500,6 +1500,49 @@ test_zip_test_command_override_is_denied if {
     }
 }
 
+test_zip_shell_valued_test_options_are_denied if {
+    every test_case in [
+        {
+            "command": "zip -q -T --test-command='touch /tmp/marker' archive.zip input.txt",
+            "argv": [
+                "zip",
+                "-q",
+                "-T",
+                "--test-command=touch /tmp/marker",
+                "archive.zip",
+                "input.txt",
+            ],
+        },
+        {
+            "command": "zip -q -T -TT'touch /tmp/marker' archive.zip input.txt",
+            "argv": [
+                "zip",
+                "-q",
+                "-T",
+                "-TTtouch /tmp/marker",
+                "archive.zip",
+                "input.txt",
+            ],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "command")
+    }
+}
+
 test_tool_output_paths_targeting_git_control_files_are_denied if {
     every test_case in [
         {
