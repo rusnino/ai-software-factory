@@ -1408,6 +1408,47 @@ test_git_push_transport_helper_overrides_are_denied if {
     }
 }
 
+test_git_send_pack_transport_helpers_are_denied if {
+    every test_case in [
+        {
+            "command": "git send-pack --receive-pack='touch /tmp/marker' origin HEAD:main",
+            "argv": [
+                "git",
+                "send-pack",
+                "--receive-pack=touch /tmp/marker",
+                "origin",
+                "HEAD:main",
+            ],
+        },
+        {
+            "command": "git send-pack --exec='touch /tmp/marker' origin HEAD:main",
+            "argv": [
+                "git",
+                "send-pack",
+                "--exec=touch /tmp/marker",
+                "origin",
+                "HEAD:main",
+            ],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "transport")
+    }
+}
+
 test_zip_test_command_override_is_denied if {
     every test_case in [
         {

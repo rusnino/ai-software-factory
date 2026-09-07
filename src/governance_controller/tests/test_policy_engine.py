@@ -1709,6 +1709,35 @@ class TestPolicyEngineFinalReviewRegressions:
     @pytest.mark.parametrize(
         "command",
         [
+            "git push --receive-pack='touch /tmp/marker' origin HEAD:main",
+            "git push --exec='touch /tmp/marker' origin HEAD:main",
+            "git send-pack --receive-pack='touch /tmp/marker' origin HEAD:main",
+            "git send-pack --exec='touch /tmp/marker' origin HEAD:main",
+        ],
+    )
+    def test_git_transport_helper_commands_are_rejected_before_execution(
+        self, command: str
+    ) -> None:
+        """#332: shell-valued push/send-pack helpers are never approved."""
+        contract = _make_contract(
+            verification={"commands": [command]},
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git transport helper execution"),
+            ),
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("command-execution primitive" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
             "zip -q -T -TT touch archive.zip input.txt",
             "zip -q -T -TT=touch archive.zip input.txt",
             "zip -q -T -TTtouch archive.zip input.txt",
