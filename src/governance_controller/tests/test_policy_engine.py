@@ -1023,6 +1023,38 @@ class TestPolicyEngineCommandExecutionPrimitives:
         assert any("command-execution primitive" in v for v in result.violations)
 
     @pytest.mark.parametrize(
+        "key",
+        [
+            "core.sshCommand",
+            "core.editor",
+            "core.pager",
+            "core.fsmonitor",
+            "credential.helper",
+            "include.path",
+        ],
+    )
+    @pytest.mark.parametrize("prefix", ["git", "git -C repository"])
+    def test_git_config_env_space_separated_forms_are_rejected(
+        self, key: str, prefix: str
+    ) -> None:
+        """#336: spaced --config-env must match the glued form for every key."""
+        command = f"{prefix} --config-env {key}=MALICIOUS_VALUE status"
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git spaced config-env bypass"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("command-execution primitive" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
         "command",
         [
             "cp source victim/.git/config",

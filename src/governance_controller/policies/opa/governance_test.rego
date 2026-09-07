@@ -581,6 +581,42 @@ test_git_config_env_forms_are_denied if {
     contains(lower(violation), "config")
 }
 
+test_git_config_env_space_separated_forms_are_denied if {
+    some key in [
+        "core.sshCommand",
+        "core.fsmonitor",
+        "core.editor",
+        "core.pager",
+        "credential.helper",
+        "include.path",
+    ]
+    some prefix in [
+        ["git"],
+        ["git", "-C", "repository"],
+    ]
+    argv := array.concat(prefix, [
+        "--config-env",
+        sprintf("%s=MALICIOUS_VALUE", [key]),
+        "status",
+    ])
+    command := sprintf("%s", [concat(" ", argv)])
+    decision := data.governance.approve with input as object.union(
+        _base_input,
+        {
+            "commands": [command],
+            "parsed_commands": [{
+                "raw": command,
+                "argv": argv,
+                "error": "",
+            }],
+        },
+    )
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "config")
+}
+
 test_git_control_file_targets_are_denied if {
     some test_case in [
         {
