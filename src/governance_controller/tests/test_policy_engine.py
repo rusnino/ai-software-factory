@@ -1864,6 +1864,48 @@ class TestPolicyEngineFinalReviewRegressions:
         assert result.allowed is False
 
     @pytest.mark.parametrize(
+        "command",
+        [
+            "git config set filter.pwn.clean touch",
+            "git config set filter.pwn.smudge touch",
+            "git config set filter.pwn.process touch",
+            "git config set diff.pwn.textconv touch",
+            "git config set diff.external touch",
+            "git config set merge.pwn.driver touch",
+            "git config set core.askPass touch",
+            "git config set gpg.program touch",
+            "git config set sequence.editor touch",
+            "git config set includeIf.pwn.path /tmp/include",
+            "git config set submodule.pwn.update !touch",
+            "git config set difftool.pwn.cmd touch",
+            "git config set mergetool.pwn.cmd touch",
+            "git config set credential.https://example.com.helper !touch",
+            "git config set diff.pwn.command touch",
+            "git config set core.alternateRefsCommand touch",
+            "git config --type string filter.pwn.clean touch",
+            "git config --value touch core.askPass touch",
+        ],
+    )
+    def test_git_config_set_and_option_forms_cannot_set_executable_keys(
+        self, command: str
+    ) -> None:
+        """#309: persistent config forms must share the dangerous-key denylist."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="git", command=command)],
+                scope_check=ScopeCheck(description="git config executable key forms"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+        assert any("command-execution primitive" in v for v in result.violations)
+
+    @pytest.mark.parametrize(
         ("command", "forbidden"),
         [
             ("cat secret.txt", "secret.txt"),

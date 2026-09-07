@@ -1630,6 +1630,79 @@ test_executable_git_config_key_families_are_denied if {
     }
 }
 
+test_git_config_set_and_option_forms_cannot_set_executable_keys if {
+    every test_case in [
+        {
+            "command": "git config set filter.pwn.clean touch",
+            "argv": ["git", "config", "set", "filter.pwn.clean", "touch"],
+        },
+        {
+            "command": "git config set diff.external touch",
+            "argv": ["git", "config", "set", "diff.external", "touch"],
+        },
+        {
+            "command": "git config set merge.pwn.driver touch",
+            "argv": ["git", "config", "set", "merge.pwn.driver", "touch"],
+        },
+        {
+            "command": "git config set core.askPass touch",
+            "argv": ["git", "config", "set", "core.askPass", "touch"],
+        },
+        {
+            "command": "git config set gpg.program touch",
+            "argv": ["git", "config", "set", "gpg.program", "touch"],
+        },
+        {
+            "command": "git config set includeIf.pwn.path /tmp/include",
+            "argv": [
+                "git",
+                "config",
+                "set",
+                "includeIf.pwn.path",
+                "/tmp/include",
+            ],
+        },
+        {
+            "command": "git config --type string filter.pwn.clean touch",
+            "argv": [
+                "git",
+                "config",
+                "--type",
+                "string",
+                "filter.pwn.clean",
+                "touch",
+            ],
+        },
+        {
+            "command": "git config --value touch core.askPass touch",
+            "argv": [
+                "git",
+                "config",
+                "--value",
+                "touch",
+                "core.askPass",
+                "touch",
+            ],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "config")
+    }
+}
+
 test_safe_zip_positional_archive_names_are_allowed if {
     every test_case in [
         {
