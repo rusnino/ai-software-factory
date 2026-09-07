@@ -2,7 +2,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 COMPOSE_FILE = Path(__file__).parents[1] / "docker-compose.yml"
 
 

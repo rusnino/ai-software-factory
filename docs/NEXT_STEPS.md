@@ -2,8 +2,36 @@
 
 ## Current State
 
-**Current status (2026-09-03): Round 18 — Phase 2 is not gate-clean, and worse than Round 17 left
-it.** opencode closed all 9 `phase-2` issues Round 17 left open (`#308`-`#316`) across 5 pushed
+**Current status (2026-09-07): Round 19 — methodology changed, coverage widened, still not
+gate-clean.** This round's kickoff prompt was redesigned specifically because the prior one relied
+on GitHub issue state (`--state open`) as the source of truth for "what needs verifying" — and the
+coding agent has repeatedly fixed bugs without transitioning the issue to `Closed` (commits used
+`Fixes #N` in parentheses rather than the exact keyword syntax GitHub auto-closes on). **The scope
+of this round was instead determined by `git log d561d70..origin/main` — 11 pushed commits — not by
+issue labels.** This immediately paid off: 9 of those 11 commits' target issues (`#134`, `#317`-
+`#323`, `#325`) were still showing `Open` on GitHub despite genuine, live-verified fixes.
+
+Result of live-reproducing all 11 commits: **10 issues closed by the reviewer** (`#134`, `#317`-
+`#325` except `#324` grouped separately, `#320`, `#324` — see the round table below for the exact
+mapping), **`#308` genuinely fixed on a 4th attempt** (a structurally different approach — an
+indexed boolean flag on `Execution` instead of another patch to the `AuditLog`-anti-join query that
+failed twice before — confirmed flat from 40k to 400k rows via live `EXPLAIN ANALYZE`, first round
+where the shipped test would have caught the two prior rounds' failure mode), and **two issues that
+were already `Closed` on GitHub turned out not to be real fixes** (`#326`, `#328` — both reopened
+this round with live evidence). The fresh-angle work found **4 new issues** (`#336`-`#339`,
+including a sixth instance of the "enumerate the safe command/flag forms, miss one" bypass class:
+`git --config-env <key>=<envvar>`, the space-separated form of the exact flag `#317` closed the
+glued form of). A live end-to-end pass also independently reproduced two CRITICALs opencode had
+already self-found and filed (`#332`/`#333`, git transport-helper and `zip -T`/`-TT`) — both still
+open, confirmed still live on `origin/main`, and part of a large **uncommitted** hardening batch
+found sitting in the working tree (preserved via `git stash`, not touched, not verified — see
+"Uncommitted work in flight" below).
+
+`phase-2`-labeled open count: **13**. `phase-1`-labeled open count: **11** (unrelated to this
+round's scope except where this round's own findings touched a phase-1 issue — `#328`).
+
+Round 18's own summary (superseded, kept for continuity): opencode closed all 9 `phase-2` issues
+Round 17 left open (`#308`-`#316`) across 5 pushed
 commits (`6ff4674`-`37482c7`). The reviewer ran 9 parallel live-verification agents — one per
 closed-issue cluster, plus 3 fresh angles (a `RISK-16`/`RISK-19` sweep of the batch, a round-2
 adversarial policy-fuzzing pass explicitly hunting for a fifth instance of the recurring
@@ -36,17 +64,40 @@ gh issue list --repo rusnino/ai-software-factory --state open --label severity:h
 gh issue list --repo rusnino/ai-software-factory --state open --label phase-2
 ```
 
-As of Round 18 (2026-09-03), the `phase-2`-labeled open set is **12 issues**: `#317`/`#318`/`#319`/`#320`
-(**CRITICAL** — three live-RCE policy-parser bypasses in the git-config/sed family, plus a
-completely non-functional OPA docker-compose deliverable), `#321`/`#322` (**HIGH** — two independent
-recovery-poller coordination/logic bugs, one of which silently drops the human-notification safety
-net for terminal task failures), `#323`/`#324` (**MEDIUM** — overlapping-poller-pass dedup still not
-fixed; a new TOCTOU race in the per-IP intake limiter), and `#308`/`#325`/`#326`/`#327` (**LOW** —
-cancellation-poll still not bounded at scale, reopened a second time; a missed sweeper operation
-type plus a commit-message accuracy gap; `gc verify-audit`'s unbounded memory use; two small
-usability nits). Additionally, `#305` (phase-1, HIGH) was worsened by this round's own `#313` fix —
-see its issue comment — and `#134`/`#301` (phase-1) remain open, unaffected by this round.
-**Phase 2 is further from gate-clean than at any point since Round 15.**
+As of Round 19 (2026-09-07), the `phase-2`-labeled open set is **13 issues**: `#309`/`#332`/`#333`/
+`#336` (**CRITICAL** — `#309` reopened by opencode's own self-review after finding the original
+fix only covered the plain-subcommand git-config form, missing a whole family of executable-config
+keys, `filter.*.clean`/`diff.*.textconv`/`merge.*.driver`/`core.askPass`/`gpg.program`/etc., live
+RCE-confirmed via a git filter; `#332`/`#333` are opencode's own self-found `git ... ext::`
+transport-helper and `zip -T`/`-TT` bypasses, independently re-confirmed live on `origin/main` this
+round; `#336` is this round's own find, a sixth instance of the "enumerate the safe forms, miss one"
+class — `git --config-env <key>=<envvar>`, the space-separated form of the exact flag `#317` closed
+the glued form of), `#328`/`#334` (**HIGH** — `#328` reopened this round: its own comment thread
+already flagged a second `init_db()`/`create_all()` startup race that was drafted, tested, and never
+committed before the issue got closed by an unrelated partial-fix commit, now live-reproduced with
+real multi-process concurrency, 21/24 failures; `#334`, opencode self-found, `git.force_push` deny
+doesn't constrain actual push flags), `#337`/`#338`/`#339` (**LOW/MEDIUM** — this round's own finds:
+a weak regression-test case and a bare-`.` false-positive; a `RISK-19` staleness gap in 4 poller
+queries newly consequential after `#321`'s fix; an event-loop-blocking inconsistency in the Telegram
+intake path), and `#326`/`#329`/`#330`/`#331`/`#335` (**LOW/MEDIUM**, mostly opencode self-found —
+`#326` reopened this round: its streaming fix is genuinely broken against PostgreSQL specifically,
+passing only against the SQLite dev backend). **`#308` is genuinely fixed this round on the 4th
+attempt** — the first two "fixes" were false positives (round 17: test-only, no code change; round
+18: a real index that still scaled linearly at 400k rows); round 19's fix takes a structurally
+different approach (an indexed boolean flag on `Execution`, bypassing the `AuditLog` anti-join
+entirely) and holds flat from 40k to 400k rows under live `EXPLAIN ANALYZE`.
+**Phase 2 remains not gate-clean**, though for the first time in several rounds the CRITICAL/HIGH
+count reflects genuinely fresh findings (opencode's own aggressive self-review plus this round's
+fresh angles) rather than the same recurring, previously-known gaps recurring again.
+
+Round 18's own summary (superseded, kept for continuity): opencode closed all 9 `phase-2` issues
+Round 17 left open (`#308`-`#316`) across 5 pushed commits (`6ff4674`-`37482c7`). The reviewer ran 9
+parallel live-verification agents — one per closed-issue cluster, plus 3 fresh angles (a
+`RISK-16`/`RISK-19` sweep of the batch, a round-2 adversarial policy-fuzzing pass explicitly hunting
+for a fifth instance of the recurring "enumerate-the-safe-forms, miss one" bypass class, and a full
+live e2e run plus unexplored corners). By the end of that round, the `phase-2`-labeled open set was
+12 issues (`#317`-`#320` CRITICAL, `#321`/`#322` HIGH, `#323`/`#324` MEDIUM, `#308`/`#325`-`#327`
+LOW), and `#305` (phase-1, HIGH) had been worsened by that round's own `#313` fix.
 
 Round 17's own summary (superseded, kept for continuity): opencode closed all 6 open
 `phase-2` issues (`#256`, `#297`, `#298`, `#299`, `#300`, `#308`) across 15 pushed commits
@@ -188,13 +239,25 @@ backend that runs only after the embedded PolicyEngine passes and receives a min
    same bypass class** found this round (`#317` `--config-env=`, `#318` direct `.git/config` writes
    via non-git commands, `#319` sed `w`/`W`), now five consecutive rounds finding a new instance.
 
-Test status (2026-09-03): **558 passed / 26 skipped** on SQLite, **582 passed / 2 skipped** on
-PostgreSQL, OPA **38/38**, `ruff` clean — all independently re-run by the reviewer this round, not
-taken from opencode's own claim. **`mypy governance_controller` is NOT clean**: `cli.py:151` has a
-genuine (if trivial) type error in the new `verify_audit` command's `order_by(AuditLog.id)` call —
-contradicts what would otherwise be claimed here; not filed as a separate issue given its triviality,
-but noted so this file doesn't repeat the same "trust the claim" mistake at a smaller scale.
-`macro_agent_service` has **10 passed**, `ruff`/`mypy` clean. The two live Plane contract tests are
+**Uncommitted work in flight (not part of this round's verification):** the working tree contains a
+large uncommitted batch (6,500+ inserted lines, 22 files) implementing a "superpowers"-managed plan
+(`docs/superpowers/plans/2026-09-03-phase2-open-issues-hardening.md`) targeting issues `#329`-`#335`
+plus a second round of policy-parser hardening for `#309`/`#140` and others — including opencode's
+own multi-round self-review (comments on `#309`/`#140` reference "Round-21"/"Round-22"
+re-verification against this exact uncommitted tree). It was preserved via `git stash` rather than
+committed, verified, or discarded — genuinely not this round's scope per the redesigned kickoff
+prompt (git-log-based scope, not issue-state-based), but flagged here because its own draft
+`NEXT_STEPS.md` edit claimed test counts (SQLite 790p/45s/2x, PostgreSQL 828p/7s/2x, OPA 68/68) that
+do **not** match the clean, actually-committed `origin/main` baseline below — the draft's numbers
+include this uncommitted work's own new tests. Do not trust those numbers as a description of what's
+shipped until this batch is committed, pushed, and independently re-verified.
+
+Test status (2026-09-07, against clean `origin/main`, `ed1122b`): **590 passed / 31 skipped** on
+SQLite, **618 passed / 2 skipped / 1 failed** on PostgreSQL, OPA **42/42**, `ruff` clean (one trivial
+import-order nit in `test_opa_compose.py` fixed directly this round, zero semantic risk), `mypy`
+clean. **The one Postgres failure is real, not flaky**: `test_verify_audit_streams_without_materializing_rows`
+fails deterministically under Postgres (100% of runs) and passes under SQLite (100% of runs) — `#326`
+reopened this round, see below. `macro_agent_service` has **10 passed**, `ruff`/`mypy` clean. The two live Plane contract tests are
 skipped because `GC_PLANE_API_TOKEN`, `GC_PLANE_WORKSPACE_SLUG`, and `GC_PLANE_PROJECT_ID` are not
 configured in this environment. **CI is green** (`.github/workflows/ci.yml`, added by `#223`, had
 failed on all 13 runs since 2026-08-26 until Round 11's CI-infra fix) — confirmed via `gh run list`,
@@ -216,7 +279,19 @@ index, real `SKIP LOCKED`) and its regression test genuinely differs from round 
 still doesn't reproduce the actual failure mode — it seeds rows that never enter the query's driving
 join at all, passing identically on pre-fix and post-fix code once again. Two rounds in a row, two
 different regression tests, the same defect class going uncaught both times: a test that runs and
-passes is not evidence it exercises the code path it claims to.
+passes is not evidence it exercises the code path it claims to. **Round 19 learned two more variants
+of this same family of lesson.** First: `#308` finally broke the streak — not by writing a better
+test for the *same* query shape, but by changing the query's *architecture* entirely (an indexed
+flag instead of an anti-join), which made the old failure mode structurally unreachable rather than
+merely untested-for; sometimes the fix for "the test keeps missing this" is a different data
+structure, not a better test. Second, and sharper: **a closed GitHub issue is not proof either, even
+independent of test quality** — `#326`/`#328` were both closed by commits that made a *real* fix for
+*part* of the problem, while the issue's own comment thread (written by the same coding agent, in
+earlier self-review rounds) already documented a second, distinct failure mode that was drafted,
+tested, and never committed. The issue got auto-closed by an unrelated commit's `Fixes #N` trailer
+before the second half landed. Determining "what's actually done" now requires reading `git log`
+against the issue's own comment thread, not just checking whether the GitHub state field says
+`Closed`.
 
 Implemented components:
 
@@ -385,36 +460,81 @@ Phase 2 is healthier than before the batch — only independent, adversarial, li
 the same code from a fresh angle each round has ever actually told this project whether it's
 converging or just moving.**
 
-## Immediate Next Step: Fix the Four New CRITICALs (`#317`-`#320`) First, Then the Two HIGHs, Then Reassess
+**Round 19 changed the methodology, not just the findings.** The kickoff prompt was rewritten to
+determine scope from `git log`, not `gh issue list --state open` — the prior prompt's implicit
+assumption (a fixed issue gets closed) had quietly broken down: opencode's commits increasingly used
+`Fixes #N` inside a parenthetical (`"fix: close command policy bypasses (#134 #317 #318 #319)"`)
+rather than the exact keyword syntax GitHub auto-closes on, so issue state had been silently drifting
+from reality for at least this round's entire batch. Comparing `git log d561d70..origin/main` (11
+commits) against `gh issue list --state open --label phase-2` found **9 of 11 commits' target issues
+still showing Open** despite genuine fixes. All 11 commits were live-verified with the same
+discipline as prior rounds (real Postgres, real HTTP, real concurrent sessions/processes, isolated
+worktrees for pre-fix/post-fix differentials): **10 issues closed by the reviewer this round**
+(`#134`, `#317`-`#319`, `#320`-`#325` except the two below), and **`#308` finally, genuinely fixed on
+its 4th attempt** — this time via an architectural change (an indexed `cancellation_pending` boolean
+on `Execution`, bypassing the `AuditLog` anti-join that failed twice before) rather than another
+patch to the same query shape, confirmed flat from 40k to 400k rows via live `EXPLAIN ANALYZE` and
+the first regression test that would have actually caught the prior two rounds' failure mode.
 
-`#317` (`--config-env=` bypass), `#318` (direct `.git/config` write via non-git commands), and `#319`
-(sed `w`/`W` unblocked write primitive) are three live-RCE-class findings — fix all three together as
-one pass over the policy-parser's whole approach, not as three independent patches, given this is now
-the fifth consecutive round finding a new instance of the same "enumerate and miss one" shape
-(`#134`→`#140`/`#141`→`#309`/`#310`→`#317`/`#318`/`#319`). Seriously consider whether continuing to
-patch individual flag/subcommand forms is the right strategy at this point, versus a structurally
-different approach (e.g. treating `.git/`, and any config file a later command reads, as always
-outside the writable scope of completion-contract checks, rather than enumerating which commands are
-allowed to touch it). `#320` (OPA docker-compose can't parse the real policy) has a verified one-line
-fix (`import future.keywords.contains`) plus two smaller sub-fixes (profiles gate, healthcheck) —
-should be quick. Then `#321`/`#322` (HIGH: recovery-poller coordination gap; inverted sweeper logic
-silently dropping human-notification alerts) — `#322` especially, since it defeats this project's
-core governance purpose for the specific case it's supposed to guarantee. `#308` needs an actual
-bounded-cost fix this time verified at realistic scale via `EXPLAIN ANALYZE` at 100k+ rows (not just
-a query that runs faster than before, and not just its own named regression test, which two rounds in
-a row has failed to exercise the real failure mode) — an index on `(event_type, id)` alone was not
-sufficient; the query itself likely needs restructuring so the planner can't fall back to a full
-disk-sort merge join. `#323` (overlapping-poller dedup) and `#324` (per-IP intake TOCTOU) are MEDIUM
-concurrency bugs needing a genuinely concurrent regression test each, matching the live reproduction
-techniques already documented in their issues. `#305` (phase-1, worsened this round) needs a third
-option beyond "write unconditionally" vs. "never write on CAS loss" for `_start_retry_execution`'s
-exception handler — finalize the orphaned execution to a distinct terminal state that's excluded from
-`active_execution_exists` without falsely claiming to have won the task transition. `#301` (phase-1)
-still requires a macro-agent API contract change, out of Phase 2's scope. Rerun the live critical/high
-issue queries before any Phase 3 work, and re-verify every fix in this batch the same way this round
-verified the round-17 batch — live reproduction, not diff-trust, and specifically re-run any "fixed"
-query's `EXPLAIN ANALYZE` at a scale meaningfully larger than its own regression test before trusting
-it — that specific gap has now let the same issue (`#308`) go uncaught twice in a row.
+The sharper lesson this round: **two issues already showing `Closed` on GitHub were not actually
+fully fixed**, and their own comment threads already said so. `#326` (`gc verify-audit` streaming)
+was closed by a commit whose fix is real for the memory-scaling problem but is broken by a
+second-event-loop bug that only manifests against PostgreSQL — confirmed deterministically failing
+100% of the time in the Postgres CI lane, passing 100% of the time under SQLite, meaning the feature
+is currently non-functional against the production database backend. `#328` (migration idempotency)
+was closed by a commit that only fixed half the problem — its own comment thread (written by the
+coding agent itself, in an earlier self-review pass) already documented a second startup race in
+`init_db()`'s unprotected `create_all()` call, with a fix drafted and locally tested but never
+committed, before an unrelated commit's `Fixes #328` trailer closed the issue anyway. Live-reproduced
+this round with 8 genuinely separate OS processes: 21 of 24 concurrent-startup attempts crashed.
+**A closed issue is not proof of anything, independent of test quality — the issue's own history has
+to be read, not just its current state field.**
+
+The fresh-angle work found 4 new issues (`#336`-`#339`), most notably a **sixth** instance of the
+"enumerate the safe command/flag forms, miss one" class: `git --config-env <key>=<envvar>` (the
+space-separated form of the exact flag `#317` closed the glued form of — real git treats them
+identically). A live end-to-end pass also independently re-confirmed, on currently-committed
+`origin/main`, two CRITICALs opencode had already self-found and filed during its own review passes
+(`#332` git transport-helper `ext::`, `#333` zip `-T`/`-TT`) — both still genuinely open, part of a
+large uncommitted hardening batch sitting in the working tree (preserved via `git stash`, explicitly
+out of this round's scope, not verified). **Phase 2's `phase-2`-labeled open count is 13** — similar
+order of magnitude to Round 18's 12, but this time made up mostly of issues opencode found and filed
+against itself through its own increasingly aggressive self-review passes (`#309` reopened, `#328`
+reopened, `#329`-`#335`), plus this round's own 4 new finds, rather than the same recurring class
+resurfacing untouched.
+
+## Immediate Next Step: Commit and Push the Stashed Batch, Then Re-Verify It — Do Not Trust Its Own Test-Count Claims
+
+The single largest lever right now is not a code fix — it's getting the **uncommitted working-tree
+batch** (preserved via `git stash`, 6,500+ lines across 22 files, targeting `#309` reopened,
+`#140` reopened, `#329`-`#335`) committed and pushed. Until that happens, none of its claimed fixes
+count for anything by this project's own established standard, and its own draft `NEXT_STEPS.md`
+edit already overclaims test counts relative to what's actually shipped (see "Test status" above) —
+the exact "trust the claim, not the query" mistake this file exists to keep correcting. When it
+lands: do **not** re-run this round's git-log-based methodology from the pre-stash HEAD — diff from
+the current `origin/main` (`ed1122b`) forward, and treat every one of that batch's own "Round-21"/
+"Round-22" self-review comments already sitting on `#309`/`#140` as claims to independently
+re-verify, not evidence.
+
+Four newly-filed CRITICALs need fixing next, three of them a continuation of the same policy-parser
+class: `#336` (`--config-env` two-token form — the sixth instance; strongly consider whether
+continuing to patch individual flag/subcommand forms is the right strategy at this point, versus
+canonicalizing all git flag forms — glued, spaced, abbreviated — to one representation before the
+dangerous-key check, rather than enumerating each syntax as it's discovered), and the two opencode
+already self-found and filed, `#332` (git `ext::`/`fd::` transport-helper RCE) and `#333` (zip
+`-T`/`-TT` self-test-command execution) — both independently re-confirmed live on `origin/main` this
+round via the real `/approvals` HTTP pipeline, not just a policy-engine unit call. `#328` (reopened,
+HIGH) needs the already-drafted `init_db()`/`create_all()` fix committed — per the issue's own
+comment thread, this exists and was locally tested, it just never got pushed. `#326` (reopened) needs
+`verify_audit()`'s CLI entrypoint fixed to not create a second event loop around the (otherwise
+correctly working) streaming call — the streaming/memory fix itself is genuinely good, only the
+event-loop bridging around it is broken, and only against Postgres. `#338` (RISK-19 gap in 4 poller
+queries) is a good candidate to fix alongside whatever touches `stuck_execution_poller.py` next,
+given the established pattern of "narrow but real staleness gap becomes load-bearing once a later fix
+depends on the field it's reading." Rerun the live critical/high issue queries before any Phase 3
+work — and per this round's own sharpest lesson, cross-check each "closed" issue's own comment
+thread, not just its state field, since a closed issue closed by a partial-fix commit is exactly the
+failure mode `#326`/`#328` just demonstrated.
 
 Once verified gate-clean, Phase 3 scope (from SPEC-10 §10.3) is:
 
@@ -441,27 +561,35 @@ Before starting Phase 3, confirm the live issue list has no open `severity:criti
 
 ## Blockers to Watch
 
+- **A large uncommitted hardening batch sits in the working tree** (preserved via `git stash`,
+  targeting `#309`/`#140` reopened plus `#329`-`#335`) — not this round's scope, but the single
+  biggest lever on Phase 2's status right now. Its own draft docs overclaim test counts relative to
+  what's actually shipped; do not cite its numbers until it's committed, pushed, and independently
+  re-verified.
 - macro-agent API stability and `/runs` contract.
-- GitHub issues `#317`/`#318`/`#319` (CRITICAL): three more live-RCE instances of the recurring
-  policy-parser bypass class (`--config-env=`; direct `.git/config` writes via non-git commands;
-  sed `w`/`W`) — block gate-clean, the fifth consecutive round finding a new instance of this shape.
-- GitHub issue `#320` (CRITICAL): OPA docker-compose service ships an OPA version that cannot parse
-  this project's own `governance.rego` at all — verified one-line fix exists, not yet applied.
-- GitHub issue `#321` (HIGH): two crash-recovery pollers don't share terminal-outcome state — a
-  crash correctly resolved by one gets silently reopened and re-attempted by the other.
-- GitHub issue `#322` (HIGH): the Plane-projection-marker sweeper silently marks undelivered
-  terminal-failure human-notification alerts as resolved — defeats this project's governance purpose
-  for the exact case it's meant to guarantee.
-- GitHub issue `#308` (reopened a second time): cancellation-recovery poll still scales ~linearly at
-  realistic history size despite a real index + `SKIP LOCKED` this round — two fixes in a row for
-  this issue have shipped with a regression test that doesn't exercise the actual failure mode.
-- GitHub issue `#305` (phase-1, worsened this round): CAS-loss in verification retry now leaves an
-  execution row permanently stranded in `RUNNING`, unreachable by any poller, and the task can never
-  successfully retry again through this path — a side effect of this round's own `#313` fix.
+- GitHub issue `#336` (CRITICAL, new this round): `git --config-env <key>=<envvar>` two-token form —
+  sixth instance of the recurring policy-parser bypass class.
+- GitHub issue `#332` (CRITICAL, opencode self-found, independently re-confirmed live this round):
+  git `ext::`/`fd::` transport-helper RCE via allowlisted `git push`/`git clone`.
+- GitHub issue `#333` (CRITICAL, opencode self-found, independently re-confirmed live this round):
+  allowlisted `zip -T`/`-TT` executes an arbitrary shell command.
+- GitHub issue `#309` (CRITICAL, reopened by opencode's own self-review): the original
+  git-config-key fix only covered the plain-subcommand form — a wider family of executable config
+  keys (`filter.*.clean`, `diff.*.textconv`, `merge.*.driver`, `core.askPass`, `gpg.program`, etc.)
+  remains open, live RCE-confirmed via a git filter, fix drafted in the uncommitted batch.
+- GitHub issue `#328` (HIGH, reopened this round): `init_db()`'s unprotected `create_all()` call
+  races under concurrent multi-process startup — 21/24 failures in a live 8-process reproduction. A
+  fix was drafted and locally tested per the issue's own comment thread but never committed.
+- GitHub issue `#326` (reopened this round): `gc verify-audit`'s streaming fix creates a second
+  event loop in its CLI entrypoint, breaking `asyncpg`'s loop-bound connections — deterministically
+  fails against PostgreSQL specifically, only passes against the SQLite dev backend.
+- GitHub issue `#305` (phase-1, worsened by round 18's own `#313` fix): CAS-loss in verification
+  retry leaves an execution row permanently stranded in `RUNNING`, unreachable by any poller — still
+  open, unaffected by this round.
 - GitHub issue `#301`: response-loss recovery can create duplicate/orphaned macro-agent runs.
-- GitHub issue `#134`: forbidden-path command scanning still misses `--directory=`/`-C`-style
-  option-glued path arguments — a live, full-stack-reproduced bypass, not yet fixed despite prior
-  docs claims, unaffected by this round.
+- GitHub issue `#140` (reopened by opencode's own self-review, phase-1): a residual old-style tar
+  cluster form (`tar vI 'cmd' -c -f archive.tar`) still bypasses the command-execution check — fix
+  drafted in the uncommitted batch, not yet committed.
 - OpenCode ACP compatibility with macro-agent MCP tools.
 - Plane CE self-hosted availability and API rate limits.
 

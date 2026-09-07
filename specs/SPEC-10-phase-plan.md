@@ -56,11 +56,16 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-03): Phase 2 is NOT gate-clean — further from it than at any point since Round
-15. Round 18 closed 5 of 9 `phase-2` issues for real, left 3 more partially fixed, reopened `#308`
-a second time, and the fresh-angle work found 4 new CRITICALs (three more live-RCE policy-parser
-bypasses plus a non-functional OPA docker-compose service) and 2 new HIGHs.** Eighteen review rounds
-have run. Rounds 1-4
+**Status (2026-09-07): Phase 2 is NOT gate-clean. Round 19 changed methodology — scope is now
+determined from `git log`, not GitHub issue state, after finding 9 of 11 pushed commits' target
+issues still showed `Open` despite genuine fixes (commits used `Fixes #N` inside parentheses, which
+GitHub doesn't auto-close on). Result: 10 issues closed, `#308` genuinely fixed on its 4th attempt
+(a structural query rewrite, not another patch), but 2 already-`Closed` issues (`#326`, `#328`) were
+found NOT actually fully fixed via their own prior comment threads and reopened, plus 4 new issues
+found including a sixth instance of the recurring policy-parser bypass class. A large uncommitted
+hardening batch (preserved via `git stash`) sits out of this round's scope, targeting several more
+open issues including two CRITICALs opencode self-found (`#332`/`#333`), both independently
+re-confirmed live on `origin/main` this round.** Nineteen review rounds have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —
