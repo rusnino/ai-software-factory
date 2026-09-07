@@ -59,6 +59,8 @@ async def test_concurrent_postgres_init_db_processes_create_schema_once(
     try:
         async with setup_engine.begin() as conn:
             await conn.run_sync(SQLModel.metadata.drop_all)
+            for enum_name in ("approvaltype", "taskstate"):
+                await conn.execute(text(f"DROP TYPE IF EXISTS {enum_name} CASCADE"))
     finally:
         await setup_engine.dispose()
 
@@ -79,6 +81,79 @@ async def test_concurrent_postgres_init_db_processes_create_schema_once(
             text=True,
         )
         for _ in range(4)
+    ]
+
+    try:
+        results = await asyncio.gather(
+            *(asyncio.to_thread(process.communicate) for process in processes)
+        )
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        await asyncio.gather(
+            *(
+                asyncio.to_thread(process.wait)
+                for process in processes
+                if process.poll() is None
+            )
+        )
+
+    failures = [
+        f"process {index} exited {process.returncode}:\n{stderr}"
+        for index, (process, (_stdout, stderr)) in enumerate(
+            zip(processes, results, strict=True), 1
+        )
+        if process.returncode != 0
+    ]
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+    reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+)
+@pytest.mark.asyncio
+async def test_eight_postgres_startups_share_init_db_migration_lock(
+    test_database_url: str,
+) -> None:
+    """#328: eight real startup processes must all complete on a fresh database."""
+    import asyncio
+    import subprocess
+    import sys
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+    from sqlmodel import SQLModel
+
+    setup_engine = create_async_engine(
+        test_database_url, echo=False, future=True, poolclass=NullPool
+    )
+    try:
+        async with setup_engine.begin() as conn:
+            await conn.run_sync(SQLModel.metadata.drop_all)
+            for enum_name in ("approvaltype", "taskstate"):
+                await conn.execute(text(f"DROP TYPE IF EXISTS {enum_name} CASCADE"))
+    finally:
+        await setup_engine.dispose()
+
+    child_code = (
+        "import asyncio; "
+        "import governance_controller.models; "
+        "from governance_controller.db import init_db; "
+        "asyncio.run(init_db())"
+    )
+    child_environment = os.environ.copy()
+    child_environment["GC_DATABASE_URL"] = test_database_url
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", child_code],
+            env=child_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(8)
     ]
 
     try:
