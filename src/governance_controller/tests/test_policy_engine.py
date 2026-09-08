@@ -1708,6 +1708,23 @@ class TestPolicyEngineResidualCommandPolicyHardening:
 
 
 class TestPolicyEngineFinalReviewRegressions:
+    def test_tar_v_old_style_command_hook_is_rejected(self) -> None:
+        """#140: tar's vI cluster still carries the -I command hook."""
+        command = "tar vI 'touch /tmp/marker' -c -f archive.tar input.txt"
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="tar", command=command)],
+                scope_check=ScopeCheck(description="tar vI command hook"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is False
+
     @pytest.mark.parametrize(
         "command",
         [
