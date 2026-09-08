@@ -2407,6 +2407,70 @@ class TestVerificationConcurrency:
 
     @pytest.mark.skipif(
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="retry-start CAS-loss regression requires PostgreSQL",
+    )
+    async def test_retry_start_failure_after_task_cas_loss_finalizes_execution(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#305: a failed start cannot leave a RUNNING orphan behind."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-start-failure-cas-305"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="race retry start failure",
+            acceptance=["the local execution is terminal"],
+        )
+
+        async def _race_then_fail(*_args: object, **_kwargs: object) -> dict[str, str]:
+            async with local_session() as racer:
+                racing_task = await racer.scalar(select(Task).where(Task.id == task_id))
+                assert racing_task is not None
+                assert await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.BLOCKED
+                )
+                await racer.commit()
+            raise RuntimeError("macro-agent unreachable")
+
+        executor = MacroAgentExecutor()
+        executor.start = AsyncMock(side_effect=_race_then_fail)  # type: ignore[method-assign]
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(ValueError, match="Concurrent modification detected"):
+                await VerificationService(executor=executor)._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        async with local_session() as check:
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            assert execution.ended_at is not None
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
     async def test_matched_run_id_branch_flush_does_not_revert_third_writer(
