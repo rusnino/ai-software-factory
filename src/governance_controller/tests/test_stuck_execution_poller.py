@@ -1256,10 +1256,30 @@ class TestPendingRecovery:
             and action["task_id"] == malformed_task_id
             for action in actions
         )
+        failure_audit = await db_session.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.task_id == malformed_task_id,
+                AuditLog.event_type == "verification_retry_recovery_failed",
+            )
+            .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
+        )
+        assert failure_audit is not None
+        assert failure_audit.payload["retryable"] is False
         assert any(
             action["action"] == "verification_retry_recovered"
             and action["task_id"] == valid_task.id
             for action in actions
+        )
+        executor.start.assert_awaited_once()
+
+        second_actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+        assert not any(
+            action["task_id"] == malformed_task_id
+            for action in second_actions
         )
         executor.start.assert_awaited_once()
 
