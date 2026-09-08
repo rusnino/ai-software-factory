@@ -1,8 +1,11 @@
 """Tests for the stuck-execution fallback poller (SPEC-05 §5.6)."""
 
 import asyncio
+import multiprocessing
 import os
+import threading
 from datetime import UTC, datetime, timedelta
+from queue import Empty
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -11,7 +14,11 @@ import httpx
 import pytest
 import pytest_httpx
 from sqlalchemy import event, insert, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -24,12 +31,53 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.cancellation_service import (
+    CANCELLATION_CLAIM_LEASE,
+)
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.stuck_execution_poller import StuckExecutionPoller
 
 
 def _is_postgres(url: str) -> bool:
     return url.startswith("postgresql")
+
+
+def _run_cancellation_poller_process(
+    database_url: str,
+    calls: Any,
+    cancel_started: Any,
+    release_cancel: Any,
+    errors: Any,
+) -> None:
+    """Run one cancellation poll in an independent process for #293."""
+
+    class _BlockingExecutor:
+        async def cancel(self, run_id: str) -> dict[str, Any]:
+            calls.put(run_id)
+            cancel_started.set()
+            if not release_cancel.wait(timeout=5):
+                raise RuntimeError("test cancellation release timed out")
+            return {}
+
+    async def _poll_once() -> None:
+        worker_engine = create_async_engine(database_url, echo=False, future=True)
+        worker_sessions = async_sessionmaker(
+            worker_engine,
+            expire_on_commit=False,
+        )
+        try:
+            async with worker_sessions() as db:
+                await StuckExecutionPoller(
+                    db,
+                    executor=_BlockingExecutor(),  # type: ignore[arg-type]
+                )._poll_pending_cancellations()
+        finally:
+            await worker_engine.dispose()
+
+    try:
+        asyncio.run(_poll_once())
+    except BaseException as exc:
+        errors.put(f"{type(exc).__name__}: {exc}")
 
 
 async def _running_task_with_execution(
@@ -1853,6 +1901,153 @@ class TestCancellationLargeHistory:
 
 class TestCancellationConcurrency:
     @pytest.mark.skipif(
+        _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="targets SQLite cross-event-loop cancellation claims",
+    )
+    async def test_sqlite_cancellation_claim_is_single_flight_across_event_loops(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """Two independent loops must not cancel one pending run twice."""
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+
+        database_url = engine.url.render_as_string(hide_password=False)
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+        cancel_started = threading.Event()
+        release_cancel = threading.Event()
+        errors: list[BaseException] = []
+        results: list[list[dict[str, Any]]] = []
+
+        class _BlockingExecutor:
+            async def cancel(self, current_run_id: str) -> dict[str, Any]:
+                with calls_lock:
+                    calls.append(current_run_id)
+                    is_first_call = len(calls) == 1
+                if is_first_call:
+                    cancel_started.set()
+                    if not release_cancel.wait(timeout=5):
+                        raise RuntimeError("test cancellation release timed out")
+                return {}
+
+        async def _poll_once() -> list[dict[str, Any]]:
+            worker_engine = create_async_engine(database_url, echo=False, future=True)
+            worker_sessions = async_sessionmaker(
+                worker_engine,
+                expire_on_commit=False,
+            )
+            try:
+                async with worker_sessions() as db:
+                    return await StuckExecutionPoller(
+                        db,
+                        executor=_BlockingExecutor(),
+                    )._poll_pending_cancellations()
+            finally:
+                await worker_engine.dispose()
+
+        def _run_in_thread() -> None:
+            try:
+                results.append(asyncio.run(_poll_once()))
+            except BaseException as exc:
+                errors.append(exc)
+
+        first = threading.Thread(target=_run_in_thread)
+        second = threading.Thread(target=_run_in_thread)
+        first.start()
+        assert await asyncio.to_thread(cancel_started.wait, 5)
+        second.start()
+        await asyncio.to_thread(second.join, 5)
+        assert not second.is_alive()
+        release_cancel.set()
+        await asyncio.to_thread(first.join, 5)
+        assert not first.is_alive()
+
+        assert errors == []
+        assert calls == [run_id]
+        assert len(results) == 2
+        async with local_session() as check:
+            completion_audits = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task.id,
+                        AuditLog.event_type == "execution_cancel_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(completion_audits) == 1
+
+    @pytest.mark.skipif(
+        _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="targets SQLite cross-process cancellation claims",
+    )
+    async def test_sqlite_cancellation_claim_is_single_flight_across_processes(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """Independent processes must not cancel one pending run twice."""
+        engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+
+        context = multiprocessing.get_context("spawn")
+        database_url = engine.url.render_as_string(hide_password=False)
+        calls = context.Queue()
+        errors = context.Queue()
+        cancel_started = context.Event()
+        release_cancel = context.Event()
+        first = context.Process(
+            target=_run_cancellation_poller_process,
+            args=(database_url, calls, cancel_started, release_cancel, errors),
+        )
+        second = context.Process(
+            target=_run_cancellation_poller_process,
+            args=(database_url, calls, cancel_started, release_cancel, errors),
+        )
+        first.start()
+        try:
+            assert await asyncio.to_thread(cancel_started.wait, 5)
+            second.start()
+            await asyncio.to_thread(second.join, 5)
+            assert not second.is_alive()
+            assert second.exitcode == 0
+            release_cancel.set()
+            await asyncio.to_thread(first.join, 5)
+            assert not first.is_alive()
+            assert first.exitcode == 0
+
+            with pytest.raises(Empty):
+                errors.get(timeout=0.2)
+            assert calls.get(timeout=5) == run_id
+            with pytest.raises(Empty):
+                calls.get(timeout=0.2)
+        finally:
+            release_cancel.set()
+            for process in (first, second):
+                if process.is_alive():
+                    process.join(timeout=5)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=5)
+            calls.close()
+            errors.close()
+
+        async with local_session() as check:
+            completion_audits = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task.id,
+                        AuditLog.event_type == "execution_cancel_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(completion_audits) == 1
+
+
+    @pytest.mark.skipif(
         not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
         reason="task-pointer revalidation requires PostgreSQL row locking",
     )
@@ -2113,6 +2308,139 @@ class TestCancellationConcurrency:
             action["action"]
             for action in first_actions + second_actions
         ] == ["execution_cancel_completed"]
+
+    async def test_stale_cancellation_claim_is_reclaimed(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A claim older than its lease is eligible for recovery."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+            execution = await seed.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            execution.cancellation_claim_token = "stale-claim"
+            execution.cancellation_claimed_at = (
+                datetime.now(UTC) - CANCELLATION_CLAIM_LEASE - timedelta(seconds=1)
+            )
+            await seed.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.return_value = {}
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(
+                db, executor=executor
+            )._poll_pending_cancellations()
+
+        executor.cancel.assert_awaited_once_with(run_id)
+        assert actions[0]["action"] == "execution_cancel_completed"
+        async with local_session() as check:
+            refreshed = await check.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert refreshed is not None
+            assert refreshed.cancellation_pending is False
+            assert refreshed.cancellation_claim_token is None
+            assert refreshed.cancellation_claimed_at is None
+
+    async def test_fresh_cancellation_claim_is_not_reclaimed(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A fresh claim stays owned by the worker doing external cleanup."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, _run_id = await _pending_cancel_task(seed)
+            execution = await seed.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            execution.cancellation_claim_token = "fresh-claim"
+            execution.cancellation_claimed_at = datetime.now(UTC)
+            await seed.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(
+                db, executor=executor
+            )._poll_pending_cancellations()
+
+        assert actions == []
+        executor.cancel.assert_not_awaited()
+        async with local_session() as check:
+            refreshed = await check.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert refreshed is not None
+            assert refreshed.cancellation_pending is True
+            assert refreshed.cancellation_claim_token == "fresh-claim"
+
+    async def test_cancelled_cancellation_claim_is_recoverable_after_lease(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """A cancelled worker leaves a claim that a later poll can reclaim."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+
+        cancelled_executor = AsyncMock(spec=MacroAgentExecutor)
+        cancelled_executor.cancel.side_effect = asyncio.CancelledError()
+        async with local_session() as db:
+            with pytest.raises(asyncio.CancelledError):
+                await StuckExecutionPoller(
+                    db, executor=cancelled_executor
+                )._poll_pending_cancellations()
+
+        async with local_session() as check:
+            claimed = await check.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert claimed is not None
+            assert claimed.cancellation_pending is True
+            assert claimed.cancellation_claim_token is not None
+            assert claimed.cancellation_claimed_at is not None
+
+        async with local_session() as advance:
+            expired = await advance.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert expired is not None
+            expired.cancellation_claimed_at = (
+                datetime.now(UTC) - CANCELLATION_CLAIM_LEASE - timedelta(seconds=1)
+            )
+            await advance.commit()
+
+        recovery_executor = AsyncMock(spec=MacroAgentExecutor)
+        recovery_executor.cancel.return_value = {}
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(
+                db, executor=recovery_executor
+            )._poll_pending_cancellations()
+
+        recovery_executor.cancel.assert_awaited_once_with(run_id)
+        assert actions[0]["action"] == "execution_cancel_completed"
+        async with local_session() as check:
+            recovered = await check.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert recovered is not None
+            assert recovered.cancellation_pending is False
+            assert recovered.cancellation_claim_token is None
+            completions = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task.id,
+                        AuditLog.event_type == "execution_cancel_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(completions) == 1
 
 
 class TestExecutionStartRecovery:

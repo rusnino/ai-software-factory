@@ -1,31 +1,28 @@
 # Next Steps
 
-## Current Worktree (2026-09-07)
+## Current Worktree (2026-09-08)
 
-**Phase 2 remains not gate-clean.** This worktree contains an uncommitted hardening batch for
-the policy-parser, OPA, approval/recovery CAS, Plane marker, audit-chain, SQLite, and migration
-paths. The latest verification evidence is:
+**Phase 2 remains not gate-clean.** Local HEAD `1d0deba` contains the selected hardening batch;
+the durable cancellation-claim fix for `#293` is currently uncommitted. The latest verification
+evidence for the changed Controller paths is:
 
-- SQLite controller suite: `790 passed, 45 skipped, 2 xfailed`.
-- PostgreSQL controller suite: `828 passed, 7 skipped, 2 xfailed`.
-- OPA: `check` passed and `test` reports `68/68`.
+- SQLite controller suite: `841 passed, 48 skipped, 2 xfailed`.
+- PostgreSQL controller suite: `880 passed, 9 skipped, 2 xfailed`.
 - Ruff and mypy: clean; `git diff --check` clean.
-- macro-agent service suite: `10 passed` when run from its own uv project.
+- Cross-loop/process single-flight, stale-lease recovery, crash persistence, and PostgreSQL
+  lock-order regressions pass.
 
-The latest policy work added: a restricted `uv run` child allowlist; recursive child-path
-extraction; Git long-option abbreviation matching; `git --config-env` separate-form handling;
-`git config --edit/-e` and `--co` blocking; `git apply --unsafe-paths` and `git clone --template`
-blocking; executable git-config key families (`diff.*.command`, `credential.*.helper`,
-`submodule.*.update`, `gpg.ssh.*`, `core.alternateRefsCommand`, `difftool/mergetool.*.cmd`);
-sed whitespace and `!`-negated address handling; npm tool-specific path extraction; and OPA
-parsed-argv validation.
+The `#293` change adds durable claim token/timestamp columns to `Execution`, a shared atomic
+claim/release protocol, and uses it in ApprovalService, VerificationService, and the stuck
+execution poller. Claims commit before external cancellation, failed calls remain pending, and
+stale claims are reclaimable without holding a SQLite writer lock across network I/O.
 
-The live issue gate is still open and is the source of truth. `#301` remains an architectural
+The live issue gate remains open and is the source of truth. `#301` remains an architectural
 blocker because exact-once recovery after macro-agent response loss requires a macro-agent
-idempotency contract or an outbox, and `#293` documents the SQLite `BEGIN IMMEDIATE` external-I/O
-availability risk; both are outside this batch's constraints.
-
-Do not mark Phase 2 complete until the critical/high queries are empty after independent review.
+idempotency contract or an outbox. Independent review also recorded lower-severity residual
+concerns in `#339`, direct OPA input handling, and `#326` checkpointing; those are outside this
+narrow `#293` change. Do not mark Phase 2 complete until the critical/high queries are empty
+after independent review.
 
 ## Historical Round 18 State
 

@@ -2530,10 +2530,11 @@ class TestVerificationConcurrency:
             await db.commit()
 
         fake_executor.cancel.assert_awaited_once_with(run_id)
-        assert call_count["n"] == 6, (
-            "setup error: expected exactly 6 db.execute calls "
+        assert call_count["n"] == 8, (
+            "setup error: expected exactly 8 db.execute calls "
             "(claim, run-ID CAS, initial fresh read, initial task lock, "
-            "cleanup execution lock, cleanup task lock)"
+            "cleanup execution lock, cleanup task lock, guarded claim, "
+            "claim release)"
         )
 
         async with local_session() as check:

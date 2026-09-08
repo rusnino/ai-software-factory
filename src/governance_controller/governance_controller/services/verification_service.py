@@ -22,7 +22,6 @@ from sqlalchemy.orm.attributes import set_committed_value
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
-from governance_controller.db import sqlite_cancellation_lock
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
@@ -32,6 +31,10 @@ from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.alert_service import AlertService
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.cancellation_service import (
+    claim_cancellation,
+    release_cancellation_claim,
+)
 from governance_controller.services.policy_engine import (
     _extract_command_paths,
     _forbidden_path_conflicts,
@@ -1054,64 +1057,41 @@ class VerificationService:
                 )
                 await db.commit()
 
-                # Reacquire the same execution -> task locks used by the
-                # poller. The SQLite process lock serializes cleanup without
-                # retaining a database writer lock over the external request.
-                async with sqlite_cancellation_lock(db):
-                    cleanup_execution_stmt = (
-                        select(Execution)
-                        .where(Execution.id == execution.id)  # type: ignore[arg-type]
-                        .execution_options(populate_existing=True)
-                    )
-                    if (
-                        db.bind is not None
-                        and db.bind.dialect.name == "postgresql"
-                    ):
-                        cleanup_execution_stmt = (
-                            cleanup_execution_stmt.with_for_update()
+                claim = await claim_cancellation(
+                    db,
+                    execution.id,
+                    macro_agent_run_id,
+                    task_id=task.id,
+                )
+                if claim is not None and claim.task_owns_run:
+                    if await release_cancellation_claim(db, claim, completed=True):
+                        await AuditService.log(
+                            db=db,
+                            event_type="execution_cancel_completed",
+                            task_id=task.id,
+                            actor="system",
+                            source="verification_service",
+                            execution_id=execution.id,
+                            payload={
+                                "macro_agent_run_id": macro_agent_run_id,
+                                "reason": "run_attached_to_current_task",
+                            },
                         )
-                    execution = (
-                        await db.execute(cleanup_execution_stmt)
-                    ).scalar_one()
-
-                    cleanup_task_stmt = (
-                        select(Task)
-                        .where(Task.id == task.id)  # type: ignore[arg-type]
-                        .execution_options(populate_existing=True)
-                    )
-                    if (
-                        db.bind is not None
-                        and db.bind.dialect.name == "postgresql"
-                    ):
-                        cleanup_task_stmt = cleanup_task_stmt.with_for_update()
-                    cleanup_task = (
-                        await db.execute(cleanup_task_stmt)
-                    ).scalar_one_or_none()
-                    task_owns_run = (
-                        cleanup_task is not None
-                        and cleanup_task.state is TaskState.RUNNING
-                        and cleanup_task.latest_macro_agent_run_id == macro_agent_run_id
-                    )
-
-                    if not execution.cancellation_pending:
-                        # The poller completed this intent while the retry loser
-                        # was reacquiring its rows. Do not repeat its cancel or
-                        # completion audit.
                         await db.commit()
-                        if not task_owns_run:
-                            raise ValueError(
-                                "Concurrent modification detected during retry "
-                                "execution start"
-                            )
-                    elif not task_owns_run:
-                        if (
-                            db.bind is not None
-                            and db.bind.dialect.name == "sqlite"
+                        set_committed_value(
+                            task,
+                            "latest_macro_agent_run_id",
+                            macro_agent_run_id,
+                        )
+                    else:
+                        await db.rollback()
+                elif claim is not None:
+                    try:
+                        await self.executor.cancel(macro_agent_run_id)
+                    except Exception as cleanup_exc:  # pragma: no cover
+                        if await release_cancellation_claim(
+                            db, claim, completed=False
                         ):
-                            await db.commit()
-                        try:
-                            await self.executor.cancel(macro_agent_run_id)
-                        except Exception as cleanup_exc:  # pragma: no cover
                             await AuditService.log(
                                 db=db,
                                 event_type="execution_cancel_failed",
@@ -1127,8 +1107,11 @@ class VerificationService:
                             )
                             await db.commit()
                         else:
-                            execution.cancellation_pending = False
-                            await db.flush()
+                            await db.rollback()
+                    else:
+                        if await release_cancellation_claim(
+                            db, claim, completed=True
+                        ):
                             await AuditService.log(
                                 db=db,
                                 event_type="execution_cancel_completed",
@@ -1139,37 +1122,12 @@ class VerificationService:
                                 payload={"macro_agent_run_id": macro_agent_run_id},
                             )
                             await db.commit()
-                        raise ValueError(
-                            "Concurrent modification detected during retry "
-                            "execution start"
-                        )
-                    else:
-                        execution.cancellation_pending = False
-                        await db.flush()
-                        await AuditService.log(
-                            db=db,
-                            event_type="execution_cancel_completed",
-                            task_id=task.id,
-                            actor="system",
-                            source="verification_service",
-                            execution_id=execution.id,
-                            payload={
-                                "macro_agent_run_id": macro_agent_run_id,
-                                "reason": "run_attached_to_current_task",
-                            },
-                        )
-                        await db.commit()
-
-                    # Another writer attached this exact run while the CAS was
-                    # being resolved. Keep the identity map current without
-                    # staging a blind ORM UPDATE.
-                    if cleanup_task is not None:
-                        set_committed_value(
-                            task,
-                            "latest_macro_agent_run_id",
-                            macro_agent_run_id,
-                        )
-                        set_committed_value(task, "version", cleanup_task.version)
+                        else:
+                            await db.rollback()
+                raise ValueError(
+                    "Concurrent modification detected during retry "
+                    "execution start"
+                )
 
         # Persist the new run ID on the task so feedback has a target even when
         # the relationship is not loaded.

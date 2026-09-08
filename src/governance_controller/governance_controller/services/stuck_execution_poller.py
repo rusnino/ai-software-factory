@@ -22,13 +22,16 @@ from sqlalchemy.orm import aliased
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
-from governance_controller.db import sqlite_cancellation_lock
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
 from governance_controller.models.task import Task
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
+from governance_controller.services.cancellation_service import (
+    claim_cancellation,
+    release_cancellation_claim,
+)
 from governance_controller.services.plane_projection import (
     acquire_plane_projection_event_lock,
 )
@@ -136,11 +139,6 @@ class StuckExecutionPoller:
 
     async def _poll_pending_cancellations(self) -> list[dict[str, Any]]:
         """Retry external cancellations that failed after a CAS loser."""
-        async with sqlite_cancellation_lock(self.db):
-            return await self._poll_pending_cancellations_unlocked()
-
-    async def _poll_pending_cancellations_unlocked(self) -> list[dict[str, Any]]:
-        """Perform cancellation recovery while the SQLite claim is held."""
         actions: list[dict[str, Any]] = []
         stmt = (
             select(Execution)
@@ -152,78 +150,99 @@ class StuckExecutionPoller:
             .execution_options(populate_existing=True)
         )
         if self._is_postgres() and not self._dry_run:
-            # Hold the bounded batch claim until all external calls finish.
+            # Keep the bounded batch selection locked until each row gets a
+            # durable claim. The claim commit then releases this lock before
+            # the external request.
             stmt = stmt.with_for_update(of=Execution, skip_locked=True)
         executions = (await self.db.execute(stmt)).scalars().all()
+        # A claim commit or losing-claim rollback can expire the ORM batch.
+        # Keep recovery decisions independent of those session state changes.
+        execution_rows = [
+            (execution.id, execution.task_id, execution.macro_agent_run_id)
+            for execution in executions
+        ]
 
-        # Keep external work outside the audit-tip critical section. The row
-        # claims remain held, while audit outcomes are written in one short DB
-        # phase after all cancellation requests return.
-        outcomes: list[tuple[Execution, bool, dict[str, Any], dict[str, Any]]] = []
-        for execution in executions:
-            run_id = execution.macro_agent_run_id
+        for execution_id, task_id, run_id in execution_rows:
             if not isinstance(run_id, str) or not run_id:
                 continue
 
-            task_stmt = (
-                select(Task)
-                .where(Task.id == execution.task_id)  # type: ignore[arg-type]
-                .execution_options(populate_existing=True)
-            )
-            if self._is_postgres() and not self._dry_run:
-                # Keep the authoritative pointer decision ordered with any
-                # concurrent attachment until the cleanup transaction commits.
-                task_stmt = task_stmt.with_for_update()
-            task = await self.db.scalar(task_stmt)
-            if (
-                task is not None
-                and task.state is TaskState.RUNNING
-                and task.latest_macro_agent_run_id == run_id
-            ):
-                action = {
-                    "task_id": execution.task_id,
-                    "execution_id": execution.id,
-                    "action": (
-                        "would_complete_execution_cancel"
-                        if self._dry_run
-                        else "execution_cancel_completed"
-                    ),
-                    "macro_agent_run_id": run_id,
-                    "reason": "run_attached_to_current_task",
-                }
-                if self._dry_run:
-                    actions.append(action)
+            if self._dry_run:
+                task = await self.db.scalar(
+                    select(Task)
+                    .where(Task.id == task_id)  # type: ignore[arg-type]
+                    .execution_options(populate_existing=True)
+                )
+                task_owns_run = (
+                    task is not None
+                    and task.state is TaskState.RUNNING
+                    and task.latest_macro_agent_run_id == run_id
+                )
+                if task_owns_run:
+                    actions.append(
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "action": "would_complete_execution_cancel",
+                            "macro_agent_run_id": run_id,
+                            "reason": "run_attached_to_current_task",
+                        }
+                    )
                 else:
-                    outcomes.append(
-                        (
-                            execution,
-                            True,
-                            {
-                                "macro_agent_run_id": run_id,
-                                "reason": "run_attached_to_current_task",
-                            },
-                            action,
-                        )
+                    actions.append(
+                        {
+                            "task_id": task_id,
+                            "execution_id": execution_id,
+                            "action": "would_cancel_pending_execution",
+                            "macro_agent_run_id": run_id,
+                        }
                     )
                 continue
 
+            claim = await claim_cancellation(
+                self.db,
+                execution_id,
+                run_id,
+                task_id=task_id,
+                execution_already_locked=self._is_postgres(),
+            )
+            if claim is None:
+                continue
+
+            if claim.task_owns_run:
+                action = {
+                    "task_id": task_id,
+                    "execution_id": execution_id,
+                    "action": "execution_cancel_completed",
+                    "macro_agent_run_id": run_id,
+                    "reason": "run_attached_to_current_task",
+                }
+                if await release_cancellation_claim(
+                    self.db, claim, completed=True
+                ):
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="execution_cancel_completed",
+                        task_id=task_id,
+                        actor="system",
+                        source="stuck_execution_poller",
+                        execution_id=execution_id,
+                        payload={
+                            "macro_agent_run_id": run_id,
+                            "reason": "run_attached_to_current_task",
+                        },
+                    )
+                    actions.append(action)
+                    await self.db.commit()
+                else:
+                    await self.db.rollback()
+                continue
+
             action = {
-                "task_id": execution.task_id,
-                "execution_id": execution.id,
+                "task_id": task_id,
+                "execution_id": execution_id,
                 "action": "would_cancel_pending_execution",
                 "macro_agent_run_id": run_id,
             }
-            if self._dry_run:
-                actions.append(action)
-                continue
-
-            # End the read transaction before awaiting the external request.
-            # SQLite has no row-level locks, so retaining it would block every
-            # unrelated writer for the duration of the macro-agent call. On
-            # PostgreSQL, retain FOR UPDATE SKIP LOCKED until the outcome is
-            # committed so another poller cannot claim this execution.
-            if self.db.bind is not None and self.db.bind.dialect.name == "sqlite":
-                await self.db.commit()
             try:
                 await self._executor_for_recovery().cancel(run_id)
             except Exception as exc:  # pragma: no cover - boundary shield
@@ -236,63 +255,67 @@ class StuckExecutionPoller:
                         "action": "execution_cancel_completed",
                         "reason": "run_not_found",
                     }
-                    outcomes.append(
-                        (
-                            execution,
-                            True,
-                            {
+                    if await release_cancellation_claim(
+                        self.db, claim, completed=True
+                    ):
+                        await AuditService.log(
+                            db=self.db,
+                            event_type="execution_cancel_completed",
+                            task_id=task_id,
+                            actor="system",
+                            source="stuck_execution_poller",
+                            execution_id=execution_id,
+                            payload={
                                 "macro_agent_run_id": run_id,
                                 "reason": "run_not_found",
                             },
-                            action,
                         )
-                    )
+                        actions.append(action)
+                        await self.db.commit()
+                    else:
+                        await self.db.rollback()
                     continue
-                outcomes.append(
-                    (
-                        execution,
-                        False,
-                        {
+                failed_action = {
+                    **action,
+                    "action": "execution_cancel_failed",
+                }
+                if await release_cancellation_claim(
+                    self.db, claim, completed=False
+                ):
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="execution_cancel_failed",
+                        task_id=task_id,
+                        actor="system",
+                        source="stuck_execution_poller",
+                        execution_id=execution_id,
+                        payload={
                             "macro_agent_run_id": run_id,
                             "error": str(exc),
                             "error_type": type(exc).__name__,
                         },
-                        {
-                            **action,
-                            "action": "execution_cancel_failed",
-                        },
                     )
-                )
+                    actions.append(failed_action)
+                    await self.db.commit()
+                else:
+                    await self.db.rollback()
                 continue
 
-            outcomes.append(
-                (
-                    execution,
-                    True,
-                    {"macro_agent_run_id": run_id},
-                    {**action, "action": "execution_cancel_completed"},
-                )
-            )
-
-        if not self._dry_run:
-            for execution, completed, payload, action in outcomes:
-                if completed:
-                    execution.cancellation_pending = False
+            completed_action = {**action, "action": "execution_cancel_completed"}
+            if await release_cancellation_claim(self.db, claim, completed=True):
                 await AuditService.log(
                     db=self.db,
-                    event_type=(
-                        "execution_cancel_completed"
-                        if completed
-                        else "execution_cancel_failed"
-                    ),
-                    task_id=execution.task_id,
+                    event_type="execution_cancel_completed",
+                    task_id=task_id,
                     actor="system",
                     source="stuck_execution_poller",
-                    execution_id=execution.id,
-                    payload=payload,
+                    execution_id=execution_id,
+                    payload={"macro_agent_run_id": run_id},
                 )
-                actions.append(action)
-            await self.db.commit()
+                actions.append(completed_action)
+                await self.db.commit()
+            else:
+                await self.db.rollback()
 
         return actions
 

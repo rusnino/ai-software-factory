@@ -1,6 +1,6 @@
 import asyncio
 import weakref
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -67,10 +67,6 @@ _engines_by_loop: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     AsyncEngine,
 ] = weakref.WeakKeyDictionary()
-_sqlite_cancellation_locks: weakref.WeakKeyDictionary[
-    asyncio.AbstractEventLoop,
-    asyncio.Lock,
-] = weakref.WeakKeyDictionary()
 
 
 def get_engine() -> AsyncEngine:
@@ -99,27 +95,6 @@ def _get_session_maker() -> async_sessionmaker[AsyncSession]:
         bind=get_engine(),
         expire_on_commit=False,
     )
-
-
-def _sqlite_cancellation_lock() -> asyncio.Lock:
-    """Return the cancellation lock for the current event loop."""
-    loop = asyncio.get_running_loop()
-    lock = _sqlite_cancellation_locks.get(loop)
-    if lock is None:
-        lock = asyncio.Lock()
-        _sqlite_cancellation_locks[loop] = lock
-    return lock
-
-
-@asynccontextmanager
-async def sqlite_cancellation_lock(db: AsyncSession) -> AsyncIterator[None]:
-    """Serialize SQLite cancellation cleanup without holding a DB lock."""
-    bind = db.bind
-    if bind is None or bind.dialect.name != "sqlite":
-        yield
-        return
-    async with _sqlite_cancellation_lock():
-        yield
 
 
 # Backwards-compatible module-level sessionmaker. Tests patch this directly.
@@ -251,6 +226,25 @@ async def run_migrations() -> None:
                 "ON execution (cancellation_pending, id)"
             )
         )
+        if "cancellation_claim_token" not in execution_column_names:
+            await conn.execute(
+                text(
+                    "ALTER TABLE execution ADD COLUMN "
+                    "cancellation_claim_token VARCHAR"
+                )
+            )
+        if "cancellation_claimed_at" not in execution_column_names:
+            claimed_at_type = (
+                "TIMESTAMP WITH TIME ZONE"
+                if dialect_name == "postgresql"
+                else "DATETIME"
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE execution ADD COLUMN cancellation_claimed_at "
+                    f"{claimed_at_type}"
+                )
+            )
 
         # Serialize the audit chain only after execution DDL has completed. A
         # poller may hold an execution row lock before writing its audit entry.

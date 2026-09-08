@@ -45,3 +45,11 @@ class Execution(SQLModel, table=True):
             server_default="false",
         ),
     )
+    cancellation_claim_token: str | None = Field(
+        default=None,
+        sa_column=Column(String, nullable=True),
+    )
+    cancellation_claimed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )

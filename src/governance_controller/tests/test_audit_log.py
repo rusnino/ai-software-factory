@@ -551,16 +551,17 @@ class TestAuditLogPostgresDDL:
     async def test_postgres_run_migrations_backfills_missing_execution_columns(
         self,
     ) -> None:
-        """#268/#308: run_migrations() restores missing execution columns.
+        """#268/#293/#308: run_migrations() restores missing execution columns.
 
         Simulates an already-deployed Postgres instance whose ``execution``
-        table predates the ``status_error`` and ``cancellation_pending``
-        columns: create the full schema via ``create_all()`` (which includes
-        both columns), then drop them to recreate the pre-existing-deployment
-        shape, seed an unresolved cancellation marker, run the real
-        ``run_migrations()``, and confirm both columns reappear, the marker is
-        backfilled into the queue, and a subsequent ``Execution`` INSERT (the
-        core execution-trigger path, not just status_error writes) succeeds.
+        table predates the ``status_error``, ``cancellation_pending``, and
+        cancellation-claim columns: create the full schema via ``create_all()``
+        (which includes all columns), then drop them to recreate the
+        pre-existing-deployment shape, seed an unresolved cancellation marker,
+        run the real ``run_migrations()``, and confirm the columns reappear, the
+        marker is backfilled into the queue, and a subsequent ``Execution``
+        INSERT (the core execution-trigger path, not just status_error writes)
+        succeeds.
         """
         import asyncio
 
@@ -584,6 +585,18 @@ class TestAuditLogPostgresDDL:
                 )
                 await conn.execute(
                     text("ALTER TABLE execution DROP COLUMN cancellation_pending")
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE execution DROP COLUMN "
+                        "cancellation_claim_token"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE execution DROP COLUMN "
+                        "cancellation_claimed_at"
+                    )
                 )
                 await conn.execute(
                     text(
@@ -697,6 +710,18 @@ class TestAuditLogPostgresDDL:
                     )
                 )
                 assert pending.scalar_one() is True
+
+                execution_columns = await session.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'execution'"
+                    )
+                )
+                execution_column_names = {
+                    column[0] for column in execution_columns.fetchall()
+                }
+                assert "cancellation_claim_token" in execution_column_names
+                assert "cancellation_claimed_at" in execution_column_names
         finally:
             await verify_engine.dispose()
 
