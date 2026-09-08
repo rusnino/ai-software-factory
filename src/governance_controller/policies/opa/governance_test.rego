@@ -819,6 +819,73 @@ test_find_fprintf_is_denied if {
     contains(lower(violation), "dangerous")
 }
 
+test_tar_find_flag_family_with_parsed_argv_is_denied if {
+    every test_case in [
+        {
+            "command": "tar -xPf a.tar",
+            "argv": ["tar", "-xPf", "a.tar"],
+            "needle": "tar",
+        },
+        {
+            "command": "tar -x --transform=s,x,y, -f a.tar",
+            "argv": ["tar", "-x", "--transform=s,x,y,", "-f", "a.tar"],
+            "needle": "tar",
+        },
+        {
+            "command": "tar xvPf archive.tar",
+            "argv": ["tar", "xvPf", "archive.tar"],
+            "needle": "tar",
+        },
+        {
+            "command": "tar --extr archive.tar",
+            "argv": ["tar", "--extr", "archive.tar"],
+            "needle": "tar",
+        },
+        {
+            "command": "tar vI touch -c -f archive.tar input.txt",
+            "argv": [
+                "tar",
+                "vI",
+                "touch",
+                "-c",
+                "-f",
+                "archive.tar",
+                "input.txt",
+            ],
+            "needle": "tar",
+        },
+        {
+            "command": "find / -maxdepth 1 -fprintf out.txt fmt",
+            "argv": [
+                "find",
+                "/",
+                "-maxdepth",
+                "1",
+                "-fprintf",
+                "out.txt",
+                "fmt",
+            ],
+            "needle": "find",
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), test_case.needle)
+    }
+}
+
 test_command_execution_bypasses_are_denied if {
     every test_case in [
         {
