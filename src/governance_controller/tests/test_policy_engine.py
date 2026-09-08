@@ -1687,6 +1687,7 @@ class TestPolicyEngineResidualCommandPolicyHardening:
             "tar --ge archive.tar",
             "tar --ext archive.tar",
             "sed --in-p input",
+            "git clone -u /tmp/git-upload-pack-helper https://example.invalid/repo",
         ],
     )
     def test_residual_command_execution_forms_are_rejected(
@@ -2106,7 +2107,15 @@ class TestPolicyEngineFinalReviewRegressions:
         assert result.allowed is False
         assert any("force push" in v.lower() for v in result.violations)
 
-    @pytest.mark.parametrize("command", ["git add -u", "git status -uall"])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "git add -u",
+            "git status -uall",
+            "git -C /tmp/repo add -u",
+            "git --work-tree=/tmp/repo status -uall",
+        ],
+    )
     def test_safe_git_short_u_controls_remain_allowed(self, command: str) -> None:
         contract = _make_contract(
             completion_contract=CompletionContract(

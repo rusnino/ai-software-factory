@@ -1322,6 +1322,10 @@ test_residual_command_execution_forms_are_denied if {
             "argv": ["git", "clone", "-u", "touch", "https://example.invalid/repo"],
         },
         {
+            "command": "git clone -u /tmp/git-upload-pack-helper https://example.invalid/repo",
+            "argv": ["git", "clone", "-u", "/tmp/git-upload-pack-helper", "https://example.invalid/repo"],
+        },
+        {
             "command": "git fetch --upload-pack=touch origin",
             "argv": ["git", "fetch", "--upload-pack=touch", "origin"],
         },
@@ -1395,6 +1399,14 @@ test_safe_git_short_u_controls_are_allowed if {
         {
             "command": "git status -uall",
             "argv": ["git", "status", "-uall"],
+        },
+        {
+            "command": "git -C /tmp/repo add -u",
+            "argv": ["git", "-C", "/tmp/repo", "add", "-u"],
+        },
+        {
+            "command": "git --work-tree=/tmp/repo status -uall",
+            "argv": ["git", "--work-tree=/tmp/repo", "status", "-uall"],
         },
     ] {
         decision := data.governance.approve with input as object.union(
