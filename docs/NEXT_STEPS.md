@@ -2,27 +2,25 @@
 
 ## Current Worktree (2026-09-08)
 
-**Phase 2 remains not gate-clean.** Local and remote `main` now include the selected hardening
-batch through `281c779`; the durable cancellation-claim fix for `#293` is committed and pushed.
-The latest verification evidence for the changed Controller paths is:
+**Phase 2 remains not gate-clean.** Local and remote `main` now include the focused hardening
+batch through `4b57e15`, covering the non-blocked worklist issues `#140`, `#302`-`#307`, and
+`#329`-`#331`. The latest verification evidence is:
 
-- SQLite controller suite: `843 passed, 48 skipped, 2 xfailed`.
-- PostgreSQL controller suite: `881 passed, 10 skipped, 2 xfailed`.
-- Ruff and mypy: clean; `git diff --check` clean.
-- Cross-loop/process single-flight, stale-lease recovery, crash persistence, and PostgreSQL
-  lock-order regressions pass.
+- SQLite controller suite: `853 passed, 49 skipped, 2 xfailed`.
+- PostgreSQL controller suite: `892 passed, 10 skipped, 2 xfailed`.
+- OPA policy suite: `77/77`.
+- Ruff, mypy, and `git diff --check`: clean.
+- Independent read-only review found no remaining issues in the pushed range.
 
-The `#293` change adds durable claim token/timestamp columns to `Execution`, a shared atomic
-claim/release protocol, and uses it in ApprovalService, VerificationService, and the stuck
-execution poller. Claims commit before external cancellation, failed calls remain pending, and
-stale claims are reclaimable without holding a SQLite writer lock across network I/O.
+The batch adds regression coverage for policy-parser parity, durable retry recovery, CAS-safe
+polling, duplicate Plane completion, and dry-run non-mutation. The malformed retry-profile path
+now records a durable non-retryable audit and the poller distinguishes profile validation errors
+from operational profile-store failures.
 
-The live issue gate remains open and is the source of truth. `#301` remains an architectural
-blocker because exact-once recovery after macro-agent response loss requires a macro-agent
-idempotency contract or an outbox. Independent review also recorded lower-severity residual
-concerns in `#339`, direct OPA input handling, and `#326` checkpointing; those are outside this
-narrow `#293` change. Do not mark Phase 2 complete until the critical/high queries are empty
-after independent review.
+The live issue gate remains open and is the source of truth. `#301` is the only remaining open
+critical/high issue in this worklist and remains an architectural blocker because exact-once
+recovery after macro-agent response loss requires a macro-agent idempotency contract or an outbox.
+Do not mark Phase 2 complete while the critical/high queries contain `#301`.
 
 ## Historical Round 18 State
 
