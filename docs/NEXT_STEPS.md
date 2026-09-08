@@ -2,12 +2,12 @@
 
 ## Current Worktree (2026-09-08)
 
-**Phase 2 remains not gate-clean.** Local HEAD `1d0deba` contains the selected hardening batch;
-the durable cancellation-claim fix for `#293` is currently uncommitted. The latest verification
-evidence for the changed Controller paths is:
+**Phase 2 remains not gate-clean.** Local and remote `main` now include the selected hardening
+batch through `281c779`; the durable cancellation-claim fix for `#293` is committed and pushed.
+The latest verification evidence for the changed Controller paths is:
 
-- SQLite controller suite: `841 passed, 48 skipped, 2 xfailed`.
-- PostgreSQL controller suite: `880 passed, 9 skipped, 2 xfailed`.
+- SQLite controller suite: `843 passed, 48 skipped, 2 xfailed`.
+- PostgreSQL controller suite: `881 passed, 10 skipped, 2 xfailed`.
 - Ruff and mypy: clean; `git diff --check` clean.
 - Cross-loop/process single-flight, stale-lease recovery, crash persistence, and PostgreSQL
   lock-order regressions pass.
