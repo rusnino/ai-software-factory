@@ -46,6 +46,33 @@ _base_input := {
     "harness_roles": {"opencode": ["worker"]},
 }
 
+test_empty_input_is_denied if {
+    decision := data.governance.approve with input as {}
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "input")
+}
+
+test_commands_only_input_is_denied if {
+    decision := data.governance.approve with input as {"commands": []}
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "input")
+}
+
+test_partial_boolean_input_is_denied if {
+    decision := data.governance.approve with input as {
+        "has_objective": true,
+        "has_acceptance": true,
+    }
+
+    decision.allow == false
+    some violation in decision.violations
+    contains(lower(violation), "input")
+}
+
 test_sudo_command_is_denied if {
     decision := data.governance.approve with input as object.union(
         _base_input,
