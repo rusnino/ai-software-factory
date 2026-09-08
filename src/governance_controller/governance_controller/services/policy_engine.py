@@ -672,6 +672,8 @@ def _git_subcommand_index(argv: list[str]) -> int | None:
 
 def _is_git_control_file_path(path: str) -> bool:
     """Return True for paths inside a repository's git control directory."""
+    if path in {".", "./"}:
+        return False
     try:
         normalized = _normalize_path(path)
     except ValueError:

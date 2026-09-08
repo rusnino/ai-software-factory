@@ -1064,7 +1064,7 @@ class TestPolicyEngineCommandExecutionPrimitives:
             "mv source victim/.git/hooks/pre-commit",
             "tar -xf malicious.tar",
             "sed -n '1w /tmp/blocked/marker.txt' input.txt",
-            "sed 's/foo/bar/W /tmp/blocked/marker.txt' input.txt",
+            "sed 's/foo/bar/W /var/lib/out.dat' input.txt",
             "git diff -o.git/config",
             "go build -o=.git/hooks/pre-commit ./cmd",
             "pytest --basetemp=.git/pytest-tmp",
@@ -1092,6 +1092,33 @@ class TestPolicyEngineCommandExecutionPrimitives:
             "command-execution primitive" in v or "control file" in v.lower()
             for v in result.violations
         )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "tar -cf out.tar .",
+            "cp -r . dest/",
+            "cp -r ./ dest/",
+        ],
+    )
+    def test_bare_current_directory_is_not_a_git_control_file_target(
+        self, command: str
+    ) -> None:
+        """#337: common current-directory operands must remain allowed."""
+        contract = _make_contract(
+            completion_contract=CompletionContract(
+                task_id="task-1",
+                required=[Check(type="command", command=command)],
+                scope_check=ScopeCheck(description="bare current directory"),
+            )
+        )
+
+        result = PolicyEngine.evaluate(
+            contract, _make_profile(), ApprovalType.EXECUTION
+        )
+
+        assert result.allowed is True
+        assert result.violations == []
 
     def test_git_add_literal_config_filenames_is_allowed(self) -> None:
         """#327: config is a filename unless it is git's actual subcommand."""
