@@ -633,9 +633,26 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            profile = await TaskService(self.db).get_profile_by_project_id(
-                task.project_id
-            )
+            try:
+                profile = await TaskService(self.db).get_profile_by_project_id(
+                    task.project_id
+                )
+            except Exception as exc:  # pragma: no cover - malformed persisted data
+                await self._record_retry_recovery_failure(
+                    task=task,
+                    marker=marker,
+                    attempt=attempt,
+                    error=exc,
+                    retryable=False,
+                )
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "action": "verification_retry_recovery_failed",
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
             if profile is None:
                 error = RuntimeError(
                     f"Project profile {task.project_id} not found"

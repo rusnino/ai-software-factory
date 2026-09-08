@@ -1074,6 +1074,69 @@ class TestPendingRecovery:
         assert malformed.state == TaskState.FAILED
         executor.start.assert_awaited_once()
 
+    async def test_malformed_retry_profile_does_not_abort_other_recovery(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#306: one invalid profile must not stop a later valid recovery."""
+        internal_id = str(uuid4())
+        malformed_task_id = f"task-malformed-profile-{internal_id[:8]}"
+        malformed_project_id = f"proj-malformed-profile-{internal_id[:8]}"
+        contract = TaskContract(
+            task_id=malformed_task_id,
+            project_id=malformed_project_id,
+            proposed_by="agent-1",
+            objective="Recover despite malformed profile",
+            acceptance=["the later retry still starts"],
+            execution={"timeout_minutes": 1, "max_retries": 2},
+        )
+        db_session.add(
+            Task(
+                id=malformed_task_id,
+                project_id=malformed_project_id,
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+                task_contract_json=contract.model_dump(mode="json"),
+            )
+        )
+        db_session.add(
+            ProjectProfileModel(
+                project_id=malformed_project_id,
+                profile_json={"not_a_profile": True},
+            )
+        )
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-malformed-profile-{internal_id[:8]}",
+                event_type="verification_retry_pending",
+                task_id=malformed_task_id,
+                actor="system",
+                source="verification_service",
+                timestamp=datetime.now(UTC) - timedelta(hours=3),
+                payload={"attempt": 1, "verification_report": {"passed": False}},
+            )
+        )
+        valid_task, _contract = await _failed_task_with_pending_retry(db_session)
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-valid-after-malformed-profile"}
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            and action["task_id"] == malformed_task_id
+            for action in actions
+        )
+        assert any(
+            action["action"] == "verification_retry_recovered"
+            and action["task_id"] == valid_task.id
+            for action in actions
+        )
+        executor.start.assert_awaited_once()
+
     async def test_stale_approved_start_marker_restarts_execution(
         self,
         db_session: AsyncSession,
