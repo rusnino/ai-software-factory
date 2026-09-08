@@ -1043,8 +1043,13 @@ class TestPendingRecovery:
                 select(AuditLog).where(AuditLog.task_id == task_id)
             )
         ).scalars().all()
+        executor = AsyncMock(spec=MacroAgentExecutor)
 
-        actions = await StuckExecutionPoller(db_session, dry_run=True).poll()
+        actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+            dry_run=True,
+        ).poll()
 
         assert [action["action"] for action in actions] == [
             "would_skip_malformed_retry_contract"
@@ -1055,6 +1060,7 @@ class TestPendingRecovery:
             )
         ).scalars().all()
         assert len(after) == len(before)
+        executor.start.assert_not_awaited()
 
     async def test_completed_retry_marker_does_not_starve_newer_recovery(
         self,
