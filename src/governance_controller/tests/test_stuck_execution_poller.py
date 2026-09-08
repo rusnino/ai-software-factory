@@ -3168,6 +3168,9 @@ class TestPlaneProjectionSweeper:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
 
         actions = first_actions + second_actions
+        assert [action["action"] for action in actions] == [
+            "plane_projection_resolved"
+        ]
         assert len(
             [
                 action
