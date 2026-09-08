@@ -11,7 +11,7 @@ import httpx
 import pytest
 import pytest_httpx
 from sqlalchemy import event, insert, select, text, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
@@ -390,6 +390,62 @@ class TestStuckExecutionPoller:
 
 
 class TestPendingRecovery:
+    @pytest.mark.skipif(
+        _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="targets SQLite writer-lock behavior",
+    )
+    async def test_pending_cancellation_releases_sqlite_writer_lock_before_cancel(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#293: an external cancel must not hold SQLite's writer lock."""
+        engine, local_session = isolated_db
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+
+        cancel_started = asyncio.Event()
+        release_cancel = asyncio.Event()
+
+        async def _cancel(_run_id: str) -> dict[str, object]:
+            cancel_started.set()
+            await release_cancel.wait()
+            return {}
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.cancel.side_effect = _cancel
+        writer_engine = create_async_engine(
+            engine.url,
+            connect_args={"timeout": 0.2},
+        )
+        poller_operation: asyncio.Task[list[dict[str, Any]]] | None = None
+        try:
+            async with local_session() as poller_db:
+                poller_operation = asyncio.create_task(
+                    StuckExecutionPoller(
+                        poller_db,
+                        executor=executor,
+                    )._poll_pending_cancellations()
+                )
+                await asyncio.wait_for(cancel_started.wait(), timeout=5)
+
+                async with AsyncSession(writer_engine) as writer:
+                    await writer.execute(
+                        update(Task)
+                        .where(Task.id == task.id)  # type: ignore[arg-type]
+                        .values(version=Task.version + 1)
+                    )
+                    await asyncio.wait_for(writer.commit(), timeout=1)
+
+                release_cancel.set()
+                await asyncio.wait_for(poller_operation, timeout=5)
+        finally:
+            release_cancel.set()
+            if poller_operation is not None and not poller_operation.done():
+                await asyncio.gather(poller_operation, return_exceptions=True)
+            await writer_engine.dispose()
+
+        executor.cancel.assert_awaited_once_with(run_id)
+
     async def test_terminal_task_with_matching_pointer_still_cancels_run(
         self,
         db_session: AsyncSession,

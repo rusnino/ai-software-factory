@@ -1,12 +1,11 @@
 import asyncio
 import weakref
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import insert, inspect, text
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -68,6 +67,10 @@ _engines_by_loop: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop,
     AsyncEngine,
 ] = weakref.WeakKeyDictionary()
+_sqlite_cancellation_locks: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    asyncio.Lock,
+] = weakref.WeakKeyDictionary()
 
 
 def get_engine() -> AsyncEngine:
@@ -98,18 +101,25 @@ def _get_session_maker() -> async_sessionmaker[AsyncSession]:
     )
 
 
-async def begin_sqlite_cancellation_claim(db: AsyncSession) -> None:
-    """Acquire SQLite's writer lock for the duration of cancellation cleanup."""
+def _sqlite_cancellation_lock() -> asyncio.Lock:
+    """Return the cancellation lock for the current event loop."""
+    loop = asyncio.get_running_loop()
+    lock = _sqlite_cancellation_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _sqlite_cancellation_locks[loop] = lock
+    return lock
+
+
+@asynccontextmanager
+async def sqlite_cancellation_lock(db: AsyncSession) -> AsyncIterator[None]:
+    """Serialize SQLite cancellation cleanup without holding a DB lock."""
     bind = db.bind
     if bind is None or bind.dialect.name != "sqlite":
+        yield
         return
-    try:
-        await db.execute(text("BEGIN IMMEDIATE"))
-    except OperationalError as exc:
-        # A caller may already have flushed a write in this transaction; the
-        # existing SQLite writer lock is the claim in that case.
-        if "cannot start a transaction within a transaction" not in str(exc):
-            raise
+    async with _sqlite_cancellation_lock():
+        yield
 
 
 # Backwards-compatible module-level sessionmaker. Tests patch this directly.

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
-from governance_controller.db import begin_sqlite_cancellation_claim
+from governance_controller.db import sqlite_cancellation_lock
 from governance_controller.models.approval import Approval
 from governance_controller.models.task import Task
 from governance_controller.schemas.macro_agent import MacroAgentStartResponse
@@ -655,58 +655,80 @@ class ApprovalService:
             # Do not cancel a run if a concurrent winner legitimately attached
             # this exact ID while the CAS result was being handled. Match the
             # poller's lock order before holding both rows through cleanup.
-            await begin_sqlite_cancellation_claim(self.db)
-            execution_stmt = (
-                select(Execution)
-                .where(Execution.id == execution.id)  # type: ignore[arg-type]
-                .execution_options(populate_existing=True)
-            )
-            if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
-                execution_stmt = execution_stmt.with_for_update()
-            execution = (await self.db.execute(execution_stmt)).scalar_one()
+            async with sqlite_cancellation_lock(self.db):
+                execution_stmt = (
+                    select(Execution)
+                    .where(Execution.id == execution.id)  # type: ignore[arg-type]
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    self.db.bind is not None
+                    and self.db.bind.dialect.name == "postgresql"
+                ):
+                    execution_stmt = execution_stmt.with_for_update()
+                execution = (await self.db.execute(execution_stmt)).scalar_one()
 
-            # Lock the authoritative task row through the cleanup decision so a
-            # pointer update cannot race between this check and cancellation.
-            fresh_stmt = (
-                select(Task)
-                .where(Task.id == task.id)  # type: ignore[arg-type]
-                .execution_options(populate_existing=True)
-            )
-            if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
-                fresh_stmt = fresh_stmt.with_for_update()
-            fresh_result = await self.db.execute(fresh_stmt)
-            fresh_task = fresh_result.scalar_one_or_none()
-            if not execution.cancellation_pending:
-                # The poller completed this durable cleanup intent while the
-                # loser was reacquiring its rows. Do not repeat its cancel or
-                # completion audit.
-                await self.db.commit()
-            elif fresh_task is None or (
-                fresh_task.state is not TaskState.RUNNING
-                or fresh_task.latest_macro_agent_run_id != macro_agent_run_id
-            ):
-                # The execution row is the durable single-flight claim. Keep
-                # the existing execution -> task lock order and retain those
-                # locks through cancellation; without an outbox or a separate
-                # claim state, releasing them would let the poller duplicate
-                # the external request.
-                try:
-                    await self.executor.cancel(macro_agent_run_id)
-                except Exception as cleanup_exc:  # pragma: no cover - boundary shield
-                    await AuditService.log(
-                        db=self.db,
-                        event_type="execution_cancel_failed",
-                        task_id=task.id,
-                        actor=actor,
-                        source=source,
-                        execution_id=execution.id,
-                        payload={
-                            "macro_agent_run_id": macro_agent_run_id,
-                            "error": str(cleanup_exc),
-                            "error_type": type(cleanup_exc).__name__,
-                        },
-                    )
+                # Lock the authoritative task row through the cleanup decision so a
+                # pointer update cannot race between this check and cancellation.
+                fresh_stmt = (
+                    select(Task)
+                    .where(Task.id == task.id)  # type: ignore[arg-type]
+                    .execution_options(populate_existing=True)
+                )
+                if (
+                    self.db.bind is not None
+                    and self.db.bind.dialect.name == "postgresql"
+                ):
+                    fresh_stmt = fresh_stmt.with_for_update()
+                fresh_result = await self.db.execute(fresh_stmt)
+                fresh_task = fresh_result.scalar_one_or_none()
+                if not execution.cancellation_pending:
+                    # The poller completed this durable cleanup intent while the
+                    # loser was reacquiring its rows. Do not repeat its cancel or
+                    # completion audit.
                     await self.db.commit()
+                elif fresh_task is None or (
+                    fresh_task.state is not TaskState.RUNNING
+                    or fresh_task.latest_macro_agent_run_id != macro_agent_run_id
+                ):
+                    # The execution row is the durable single-flight claim. The
+                    # SQLite process lock serializes cleanup without retaining a
+                    # database writer lock over the external request.
+                    if (
+                        self.db.bind is not None
+                        and self.db.bind.dialect.name == "sqlite"
+                    ):
+                        await self.db.commit()
+                    try:
+                        await self.executor.cancel(macro_agent_run_id)
+                    except Exception as cleanup_exc:  # pragma: no cover
+                        await AuditService.log(
+                            db=self.db,
+                            event_type="execution_cancel_failed",
+                            task_id=task.id,
+                            actor=actor,
+                            source=source,
+                            execution_id=execution.id,
+                            payload={
+                                "macro_agent_run_id": macro_agent_run_id,
+                                "error": str(cleanup_exc),
+                                "error_type": type(cleanup_exc).__name__,
+                            },
+                        )
+                        await self.db.commit()
+                    else:
+                        execution.cancellation_pending = False
+                        await self.db.flush()
+                        await AuditService.log(
+                            db=self.db,
+                            event_type="execution_cancel_completed",
+                            task_id=task.id,
+                            actor=actor,
+                            source=source,
+                            execution_id=execution.id,
+                            payload={"macro_agent_run_id": macro_agent_run_id},
+                        )
+                        await self.db.commit()
                 else:
                     execution.cancellation_pending = False
                     await self.db.flush()
@@ -717,28 +739,16 @@ class ApprovalService:
                         actor=actor,
                         source=source,
                         execution_id=execution.id,
-                        payload={"macro_agent_run_id": macro_agent_run_id},
+                        payload={
+                            "macro_agent_run_id": macro_agent_run_id,
+                            "reason": "run_attached_to_current_task",
+                        },
                     )
                     await self.db.commit()
-            else:
-                execution.cancellation_pending = False
-                await self.db.flush()
-                await AuditService.log(
-                    db=self.db,
-                    event_type="execution_cancel_completed",
-                    task_id=task.id,
-                    actor=actor,
-                    source=source,
-                    execution_id=execution.id,
-                    payload={
-                        "macro_agent_run_id": macro_agent_run_id,
-                        "reason": "run_attached_to_current_task",
-                    },
+                raise ValueError(
+                    "Concurrent modification detected: task state changed "
+                    "before RUNNING"
                 )
-                await self.db.commit()
-            raise ValueError(
-                "Concurrent modification detected: task state changed before RUNNING"
-            )
 
         execution.macro_agent_run_id = macro_agent_run_id
         execution.state = TaskState.RUNNING

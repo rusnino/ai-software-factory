@@ -22,7 +22,7 @@ from sqlalchemy.orm import aliased
 from governance_controller.adapters.macro_agent.client import MacroAgentClient
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import TaskState
-from governance_controller.db import begin_sqlite_cancellation_claim
+from governance_controller.db import sqlite_cancellation_lock
 from governance_controller.models.audit_log import AuditLog
 from governance_controller.models.execution import Execution
 from governance_controller.models.processed_event import ProcessedEvent
@@ -136,9 +136,12 @@ class StuckExecutionPoller:
 
     async def _poll_pending_cancellations(self) -> list[dict[str, Any]]:
         """Retry external cancellations that failed after a CAS loser."""
+        async with sqlite_cancellation_lock(self.db):
+            return await self._poll_pending_cancellations_unlocked()
+
+    async def _poll_pending_cancellations_unlocked(self) -> list[dict[str, Any]]:
+        """Perform cancellation recovery while the SQLite claim is held."""
         actions: list[dict[str, Any]] = []
-        if not self._dry_run:
-            await begin_sqlite_cancellation_claim(self.db)
         stmt = (
             select(Execution)
             .where(
@@ -214,6 +217,13 @@ class StuckExecutionPoller:
                 actions.append(action)
                 continue
 
+            # End the read transaction before awaiting the external request.
+            # SQLite has no row-level locks, so retaining it would block every
+            # unrelated writer for the duration of the macro-agent call. On
+            # PostgreSQL, retain FOR UPDATE SKIP LOCKED until the outcome is
+            # committed so another poller cannot claim this execution.
+            if self.db.bind is not None and self.db.bind.dialect.name == "sqlite":
+                await self.db.commit()
             try:
                 await self._executor_for_recovery().cancel(run_id)
             except Exception as exc:  # pragma: no cover - boundary shield
