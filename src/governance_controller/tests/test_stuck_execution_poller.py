@@ -1256,22 +1256,28 @@ class TestPendingRecovery:
             and action["task_id"] == malformed_task_id
             for action in actions
         )
-        failure_audit = await db_session.scalar(
-            select(AuditLog)
-            .where(
-                AuditLog.task_id == malformed_task_id,
-                AuditLog.event_type == "verification_retry_recovery_failed",
-            )
-            .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
-        )
-        assert failure_audit is not None
-        assert failure_audit.payload["retryable"] is False
         assert any(
             action["action"] == "verification_retry_recovered"
             and action["task_id"] == valid_task.id
             for action in actions
         )
-        executor.start.assert_awaited_once()
+
+        bind = db_session.bind
+        assert bind is not None
+        observer_factory = async_sessionmaker(bind, expire_on_commit=False)
+        async with observer_factory() as observer:
+            failure_audits = (
+                await observer.execute(
+                    select(AuditLog)
+                    .where(
+                        AuditLog.task_id == malformed_task_id,
+                        AuditLog.event_type == "verification_retry_recovery_failed",
+                    )
+                    .order_by(AuditLog.__table__.c.id)  # type: ignore[attr-defined]
+                )
+            ).scalars().all()
+            assert len(failure_audits) == 1
+            assert failure_audits[0].payload["retryable"] is False
 
         second_actions = await StuckExecutionPoller(
             db_session,
@@ -1282,6 +1288,17 @@ class TestPendingRecovery:
             for action in second_actions
         )
         executor.start.assert_awaited_once()
+
+        async with observer_factory() as observer:
+            failure_audits = (
+                await observer.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == malformed_task_id,
+                        AuditLog.event_type == "verification_retry_recovery_failed",
+                    )
+                )
+            ).scalars().all()
+            assert len(failure_audits) == 1
 
     async def test_stale_approved_start_marker_restarts_execution(
         self,
