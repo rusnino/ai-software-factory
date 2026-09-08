@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import httpx
+from pydantic import ValidationError
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -637,7 +638,7 @@ class StuckExecutionPoller:
                 profile = await TaskService(self.db).get_profile_by_project_id(
                     task.project_id
                 )
-            except Exception as exc:  # pragma: no cover - malformed persisted data
+            except (TypeError, ValidationError) as exc:  # malformed persisted data
                 await self._record_retry_recovery_failure(
                     task=task,
                     marker=marker,

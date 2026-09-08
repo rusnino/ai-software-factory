@@ -36,6 +36,7 @@ from governance_controller.services.cancellation_service import (
 )
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.stuck_execution_poller import StuckExecutionPoller
+from governance_controller.services.task_service import TaskService
 
 
 def _is_postgres(url: str) -> bool:
@@ -1149,6 +1150,16 @@ class TestPendingRecovery:
             and action["task_id"] == malformed_task_id
             for action in actions
         )
+        failure_audit = await db_session.scalar(
+            select(AuditLog)
+            .where(
+                AuditLog.task_id == malformed_task_id,
+                AuditLog.event_type == "verification_retry_recovery_failed",
+            )
+            .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
+        )
+        assert failure_audit is not None
+        assert failure_audit.payload["retryable"] is False
         assert any(
             action["action"] == "verification_retry_recovered"
             and action["task_id"] == valid_task.id
@@ -1157,6 +1168,37 @@ class TestPendingRecovery:
         malformed = await _fetch_task(db_session, malformed_task_id)
         assert malformed.state == TaskState.FAILED
         executor.start.assert_awaited_once()
+
+    async def test_profile_lookup_failure_is_not_recorded_as_recovery_failure(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Operational profile-store failures must remain visible to the caller."""
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+
+        async def fail_profile_lookup(
+            _service: TaskService,
+            _project_id: str,
+        ) -> None:
+            raise RuntimeError("profile store unavailable")
+
+        monkeypatch.setattr(
+            TaskService,
+            "get_profile_by_project_id",
+            fail_profile_lookup,
+        )
+
+        with pytest.raises(RuntimeError, match="profile store unavailable"):
+            await StuckExecutionPoller(db_session).poll()
+
+        failure_audit = await db_session.scalar(
+            select(AuditLog).where(
+                AuditLog.task_id == task.id,
+                AuditLog.event_type == "verification_retry_recovery_failed",
+            )
+        )
+        assert failure_audit is None
 
     async def test_malformed_retry_profile_does_not_abort_other_recovery(
         self,
