@@ -228,6 +228,26 @@ class TestStuckExecutionPoller:
         assert refreshed is not None
         assert refreshed.status_error == "RuntimeError"
 
+    async def test_status_probe_returns_diagnostic_without_mutating_execution(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#329: status diagnostics wait for the winning task transition."""
+        _task, execution = await _running_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=300),
+            macro_agent_run_id="run-diagnostic-329",
+        )
+
+        alive, status_error = await StuckExecutionPoller(
+            db_session,
+            client=_FailingMacroAgentClient(),
+        )._execution_is_still_alive(execution)
+
+        assert alive is False
+        assert status_error == "RuntimeError"
+        assert execution.status_error is None
+
     @pytest.mark.skipif(
         not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
