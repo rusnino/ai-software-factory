@@ -890,6 +890,56 @@ class TestPendingRecovery:
         )
         executor.start.assert_awaited_once()
 
+    async def test_retryable_profile_failure_keeps_marker_recoverable(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#302: a temporary profile failure must not consume the marker."""
+        monkeypatch.setattr(
+            StuckExecutionPoller,
+            "_retry_recovery_backoff",
+            timedelta(0),
+            raising=False,
+        )
+        task, _contract = await _failed_task_with_pending_retry(db_session)
+        profile = await db_session.scalar(
+            select(ProjectProfileModel).where(
+                ProjectProfileModel.project_id == task.project_id
+            )
+        )
+        assert profile is not None
+        profile_json = profile.profile_json
+        await db_session.delete(profile)
+        await db_session.commit()
+
+        first_actions = await StuckExecutionPoller(db_session).poll()
+        assert any(
+            action["action"] == "verification_retry_recovery_failed"
+            for action in first_actions
+        )
+
+        db_session.add(
+            ProjectProfileModel(
+                project_id=task.project_id,
+                profile_json=profile_json,
+            )
+        )
+        await db_session.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.start.return_value = {"run_id": "run-retry-after-profile-failure"}
+        second_actions = await StuckExecutionPoller(
+            db_session,
+            executor=executor,
+        ).poll()
+
+        assert any(
+            action["action"] == "verification_retry_recovered"
+            for action in second_actions
+        )
+        executor.start.assert_awaited_once()
+
     async def test_retry_start_failure_does_not_reopen_same_attempt(
         self,
         db_session: AsyncSession,
