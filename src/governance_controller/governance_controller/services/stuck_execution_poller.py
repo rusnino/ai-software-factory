@@ -836,6 +836,7 @@ class StuckExecutionPoller:
                 Task.latest_macro_agent_run_id == Execution.id  # type: ignore[arg-type]
             )
             .limit(self._batch_size)
+            .execution_options(populate_existing=True)
         )
 
         now = datetime.now(UTC)
@@ -988,6 +989,7 @@ class StuckExecutionPoller:
             .where(Execution.state == TaskState.READY.value)  # type: ignore[arg-type]
             .where(Execution.macro_agent_run_id.is_(None))  # type: ignore[union-attr]
             .limit(self._batch_size)
+            .execution_options(populate_existing=True)
         )
 
         now = datetime.now(UTC)
@@ -1054,6 +1056,7 @@ class StuckExecutionPoller:
             .where(ProcessedEvent.event_type == "landing:completed")  # type: ignore[arg-type]
             .where(~newer_marker_exists)
             .limit(self._batch_size)
+            .execution_options(populate_existing=True)
         )
 
         now = datetime.now(UTC)
@@ -1275,6 +1278,7 @@ class StuckExecutionPoller:
             .where(Task.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
             .where(Execution.state == TaskState.RUNNING.value)  # type: ignore[arg-type]
             .limit(self._batch_size)
+            .execution_options(populate_existing=True)
         )
         pairs: list[tuple[Task, Execution]] = []
         for task, execution in result.tuples().all():

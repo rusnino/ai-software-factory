@@ -391,6 +391,85 @@ class TestStuckExecutionPoller:
 
 class TestPendingRecovery:
     @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="requires a real PostgreSQL database for identity-map staleness",
+    )
+    async def test_retry_start_poll_refreshes_execution_attempts_before_marker_lookup(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#338: retry recovery must use the current attempt number."""
+        _engine, local_session = isolated_db
+        task_id = "task-retry-start-fresh-attempt-338"
+        execution_id = "execution-retry-start-fresh-attempt-338"
+        marker_id = "event-retry-start-fresh-attempt-338"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    execution_attempts=1,
+                    latest_macro_agent_run_id=execution_id,
+                    task_contract_json={"execution": {"timeout_minutes": 1}},
+                )
+            )
+            seed.add(
+                Execution(
+                    id=execution_id,
+                    task_id=task_id,
+                    state=TaskState.RUNNING,
+                    started_at=datetime.now(UTC) - timedelta(minutes=10),
+                )
+            )
+            seed.add(
+                AuditLog(
+                    event_id=marker_id,
+                    event_type="verification_retry_pending",
+                    task_id=task_id,
+                    actor="system",
+                    source="verification_service",
+                    payload={"attempt": 2},
+                )
+            )
+            await seed.commit()
+
+        async with local_session() as db:
+            stale_task = await db.scalar(
+                select(Task)
+                .where(Task.id == task_id)
+                .execution_options(populate_existing=True)
+            )
+            assert stale_task is not None
+            assert stale_task.execution_attempts == 1
+            await db.commit()
+
+            async with local_session() as writer:
+                await writer.execute(
+                    update(Task)
+                    .where(Task.id == task_id)  # type: ignore[arg-type]
+                    .values(execution_attempts=2)
+                )
+                await writer.commit()
+
+            actions = await StuckExecutionPoller(db)._poll_retry_start()
+
+            assert actions[0]["action"] == "failed_retry_start"
+            failure = await db.scalar(
+                select(AuditLog)
+                .where(
+                    AuditLog.task_id == task_id,
+                    AuditLog.event_type == "execution_start_failed",
+                )
+                .order_by(AuditLog.__table__.c.id.desc())  # type: ignore[attr-defined]
+            )
+            assert failure is not None
+            assert failure.payload["pending_event_id"] == marker_id
+            assert failure.payload["attempt"] == 2
+
+    @pytest.mark.skipif(
         _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
         reason="targets SQLite writer-lock behavior",
     )
