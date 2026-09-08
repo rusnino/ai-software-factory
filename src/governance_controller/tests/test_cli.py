@@ -726,6 +726,35 @@ class TestCliVerifyAudit:
         assert result.output.strip() == "Audit hash chain verified."
         assert yield_per_values == [1000]
 
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
+    async def test_verify_audit_uses_a_loop_local_postgres_session(
+        self,
+        patched_db,
+        runner: CliRunner,
+    ) -> None:
+        """#326: the synchronous CLI must not reuse an asyncpg session loop."""
+        _engine, local_session = patched_db
+
+        async with local_session() as seed:
+            for index in range(3):
+                await AuditService.log(
+                    db=seed,
+                    event_type="loop_local_event",
+                    task_id="verify-chain-loop-local",
+                    actor="tester",
+                    source="test",
+                    payload={"index": index},
+                )
+            await seed.commit()
+
+        result = await asyncio.to_thread(runner.invoke, app, ["verify-audit"])
+
+        assert result.exit_code == 0, repr(result.exception)
+        assert result.output.strip() == "Audit hash chain verified."
+
     async def test_verify_audit_detects_tampered_row(
         self,
         patched_db,
