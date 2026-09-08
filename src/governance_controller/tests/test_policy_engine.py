@@ -1598,6 +1598,7 @@ class TestPolicyEngineCommandPolicyHardening:
         [
             "git -c advice.detachedHead=false status",
             "sed -n '1,10p' source",
+            "sed -n '1,10p' README",
             "sed -n '1,10p' w /tmp/other-input",
         ],
     )

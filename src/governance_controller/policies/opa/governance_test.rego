@@ -1135,6 +1135,10 @@ test_safe_git_config_and_read_only_sed_are_allowed if {
             "command": "sed -n '1,10p' source",
             "argv": ["sed", "-n", "1,10p", "source"],
         },
+        {
+            "command": "sed -n '1,10p' README",
+            "argv": ["sed", "-n", "1,10p", "README"],
+        },
     ] {
         decision := data.governance.approve with input as object.union(
             _base_input,
