@@ -161,6 +161,34 @@ class TestStuckExecutionPoller:
         assert refreshed.status_error is None
         assert task.state == TaskState.RUNNING
 
+    async def test_dry_run_preserves_existing_status_error(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#307: inspection must not overwrite an existing status diagnostic."""
+        task, execution = await _running_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=300),
+            macro_agent_run_id="run-dry-existing-status-error",
+        )
+        execution.status_error = "previous-diagnostic"
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(
+            db_session,
+            client=_FailingMacroAgentClient(),
+            dry_run=True,
+        ).poll()
+
+        assert actions[0]["action"] == "would_block"
+        assert execution.status_error == "previous-diagnostic"
+        refreshed = await db_session.scalar(
+            select(Execution).where(Execution.id == execution.id)
+        )
+        assert refreshed is not None
+        assert refreshed.status_error == "previous-diagnostic"
+        assert task.state == TaskState.RUNNING
+
     async def test_stuck_execution_transitions_to_blocked(
         self,
         db_session: Any,
