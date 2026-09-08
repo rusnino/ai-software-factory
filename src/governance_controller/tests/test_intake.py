@@ -1,7 +1,9 @@
 """Tests for the intake adapter endpoints."""
 
+import asyncio
 import hashlib
 import hmac
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock
@@ -9,7 +11,9 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
+from governance_controller.api.intake import telegram_intake
 from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.schemas.intake import RawIdea
@@ -100,6 +104,58 @@ async def test_telegram_text_creates_draft(
     assert body["status"] == "draft_created"
     assert body["category"] == "new_project"
     assert fake_ingestion.calls[0][1].source == "telegram"
+
+
+async def test_telegram_rate_release_does_not_block_event_loop(
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#339: Telegram's synchronous rate callback runs off the event loop."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "telegram-secret",
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/intake/telegram",
+            "headers": [],
+            "query_string": b"",
+            "server": ("test", 80),
+            "client": ("test", 1),
+            "scheme": "http",
+        }
+    )
+
+    def _blocking_charge() -> None:
+        time.sleep(0.2)
+
+    request.state.charge_intake_ip_rate_limit = _blocking_charge
+    request.state.release_intake_rate_limit = lambda: None
+
+    operation = asyncio.create_task(
+        telegram_intake(
+            {
+                "message": {
+                    "message_id": 3,
+                    "from": {"username": "alice", "id": 42},
+                    "text": "A non-spam idea",
+                }
+            },
+            request,
+            x_telegram_bot_api_secret_token="telegram-secret",
+            ingestion=fake_ingestion,  # type: ignore[arg-type]
+            db=None,  # type: ignore[arg-type]
+            _authenticated=None,
+        )
+    )
+    started = time.monotonic()
+    await asyncio.sleep(0.05)
+    elapsed = time.monotonic() - started
+    await operation
+
+    assert elapsed < 0.15
 
 
 async def test_telegram_spam_is_ignored(

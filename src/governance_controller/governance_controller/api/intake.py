@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from governance_controller.adapters.email import EmailAdapter
 from governance_controller.adapters.telegram import (
@@ -172,7 +173,7 @@ async def telegram_intake(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
-    _release_intake_admission(request)
+    await run_in_threadpool(_release_intake_admission, request)
 
     message = TelegramAdapter._extract_message(update)
     text = TelegramAdapter._extract_text(message)
