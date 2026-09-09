@@ -2119,6 +2119,51 @@ test_sed_address_prefixed_substitution_flags_are_denied if {
     }
 }
 
+test_sed_direct_two_address_range_file_io_is_denied if {
+    every test_case in [
+        {
+            "command": "sed '/start/,/end/w /tmp/a/b/out.bin' file.txt",
+            "argv": ["sed", "/start/,/end/w /tmp/a/b/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '10,/end/w /tmp/out.bin' file.txt",
+            "argv": ["sed", "10,/end/w /tmp/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '0,/end/w /tmp/out.bin' file.txt",
+            "argv": ["sed", "0,/end/w /tmp/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/start/,/end/r /etc/passwd' file.txt",
+            "argv": ["sed", "/start/,/end/r /etc/passwd", "file.txt"],
+        },
+        {
+            "command": "sed '/start/,/end/W /tmp/out.bin' file.txt",
+            "argv": ["sed", "/start/,/end/W /tmp/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/start/,/end/!w /tmp/out.bin' file.txt",
+            "argv": ["sed", "/start/,/end/!w /tmp/out.bin", "file.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "sed file")
+    }
+}
+
 test_incomplete_input_documents_are_denied if {
     every document in [
         {},

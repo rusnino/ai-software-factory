@@ -2183,26 +2183,28 @@ _sed_script_executes(script) if {
     regex.match(`(?i)(^|[;\n])[[:space:]]*[^;\n]*e([[:space:]]|$|;)`, script)
 }
 
+_sed_after_range_prefix(script) := after if {
+    stripped := _sed_strip_quotes(script)
+    after_ws := _sed_skip_whitespace(stripped, 0)
+    after_addr := _sed_skip_addresses(stripped, after_ws)
+    after := _sed_skip_ws_negation(stripped, after_addr)
+}
+
 _sed_script_file_io(script) if {
     flags := _sed_substitution_flags(script)
     contains(lower(flags), "w")
 }
 
 _sed_script_file_io(script) if {
-    regex.match(`(?i)^[0-9$]+(?:,[0-9$]+)?[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
+    stripped := _sed_strip_quotes(script)
+    after := _sed_after_range_prefix(script)
+    after < count(stripped)
+    cmd := substring(stripped, after, 1)
+    cmd in {"r", "R", "w", "W"}
 }
 
-_sed_script_file_io(script) if {
-    regex.match(`(?i)^/[^/]*/[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
-}
 
-_sed_script_file_io(script) if {
-    regex.match(`(?i)^[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
-}
 
-_sed_script_file_io(script) if {
-    regex.match(`(?i)^\\.[^\n]*[[:space:]]*!?[[:space:]]*[rRwW](?:[[:space:]]|/|$)`, script)
-}
 
 _sed_script_executes(script) if {
     flags := _sed_substitution_flags(script)

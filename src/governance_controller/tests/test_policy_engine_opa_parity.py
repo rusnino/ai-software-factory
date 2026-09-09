@@ -192,3 +192,33 @@ def test_opa_denies_uv_run_flag_prefixed_unlisted_child(
     embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
     assert embedded_allowed is False
     assert opa_allowed is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed '/start/,/end/w /tmp/a/b/out.bin' file.txt",
+        "sed '10,/end/w /tmp/out.bin' file.txt",
+        "sed '0,/end/w /tmp/out.bin' file.txt",
+        "sed '/start/,/end/r /etc/passwd' file.txt",
+        "sed '/start/,/end/W /tmp/out.bin' file.txt",
+        "sed '/start/,/end/!w /tmp/out.bin' file.txt",
+    ],
+)
+def test_opa_matches_embedded_on_sed_direct_two_address_range(
+    opa_path: str, command: str
+) -> None:
+    """#347: OPA must not allow two-address-range sed r/w/R/W direct commands."""
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert opa_allowed == embedded_allowed, (
+        f"OPA/embedded divergence for {command!r}: "
+        f"embedded={embedded_allowed}, opa={opa_allowed}"
+    )
+
+
+def test_opa_denies_sed_direct_two_address_range_write(opa_path: str) -> None:
+    """Regression: OPA previously allowed sed '/start/,/end/w /a/b/c'."""
+    command = "sed '/start/,/end/w /tmp/a/b/out.bin' file.txt"
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert embedded_allowed is False
+    assert opa_allowed is False
