@@ -64,9 +64,36 @@ class RunStore:
         if run is not None:
             run["collected"] = True
 
+    def _run_by_controller_execution_id(
+        self, controller_execution_id: str
+    ) -> dict[str, Any] | None:
+        """Return an existing run that was started for the given execution id."""
+        for run in self._runs.values():
+            meta = run.get("request", {}).get("metadata", {})
+            if meta.get("controller_execution_id") == controller_execution_id:
+                return run
+        return None
+
     async def create(self, request: RunRequest) -> RunResponse:
-        """Create a new run and return its handle."""
+        """Create a new run and return its handle.
+
+        Idempotent by controller_execution_id: a request whose metadata
+        carries the same execution id as an existing run returns the existing
+        run id. This lets the Governance Controller recover the external run
+        after a response loss without creating a duplicate.
+        """
         import time
+
+        metadata = getattr(request, "metadata", None) or {}
+        controller_execution_id = metadata.get("controller_execution_id")
+        if controller_execution_id:
+            existing = self._run_by_controller_execution_id(
+                controller_execution_id
+            )
+            if existing is not None:
+                return RunResponse(
+                    run_id=existing["run_id"], status=existing["status"]
+                )
 
         self._evict_if_needed()
         run_id = str(uuid.uuid4())

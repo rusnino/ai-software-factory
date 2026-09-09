@@ -46,6 +46,37 @@ async def test_start_run_returns_queued(fresh_store: RunStore) -> None:
     assert "run_id" in body
 
 
+async def test_start_run_is_idempotent_by_controller_execution_id(
+    fresh_store: RunStore,
+) -> None:
+    """#301: POST /runs is idempotent by controller_execution_id metadata."""
+    async with _client() as client:
+        first = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-1",
+                "objective": "Implement a feature",
+                "acceptance": ["Tests pass"],
+                "metadata": {"controller_execution_id": "exec-orphan-301"},
+            },
+        )
+        assert first.status_code == 201
+        first_id = first.json()["run_id"]
+
+        second = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-1",
+                "objective": "Different objective after response loss",
+                "acceptance": ["Tests pass"],
+                "metadata": {"controller_execution_id": "exec-orphan-301"},
+            },
+        )
+        assert second.status_code == 201
+        assert second.json()["run_id"] == first_id
+        assert len(fresh_store._runs) == 1
+
+
 async def test_get_run_returns_status(fresh_store: RunStore) -> None:
     async with _client() as client:
         created = await client.post(
