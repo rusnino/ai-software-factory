@@ -1,6 +1,61 @@
 # Next Steps
 
-## Current State (2026-09-09) — Round 20
+## Current State (2026-09-09) — Round 21
+
+**NOT gate-clean, despite opencode closing all 5 of Round 20's remaining issues same-day.** Scope
+was `git log 07edca1..origin/main` (5 commits: `1d4e1dc`, `c04c659`, `ce8b48d`, `96f83e8`, `afd5e15`).
+Of the 5 closed issues:
+
+- **`#301` (HIGH) — REOPENED, false close.** The closing commit (`1d4e1dc`) only adds a
+  classification label (`failure_class: orphan_suspected` etc.) to the existing failure-audit
+  payload. It changes zero control flow: no idempotency key is sent to macro-agent, no lookup/dedup
+  mechanism exists, retries still mint a fresh `Execution` UUID and issue a brand-new `POST /runs`,
+  and `src/macro_agent_service/` still has no `controller_execution_id`/idempotency support. The
+  commit's own message admits this: "Full run-id idempotency still requires a macro-agent API that
+  accepts `controller_execution_id` as an idempotency key." A well-classified but still-unrecoverable
+  orphan is not a fix — this is exactly the "test passes, architecture unchanged" pattern this
+  project has hit before. Reopened with full evidence in the issue's comment thread.
+- **`#340` (HIGH, OPA sed multi-segment-path parity) — CONFIRMED FIXED** for its original
+  reproduction: real `opa` binary confirms all 3 originally-broken cases now denied, 78/78 OPA
+  suite, 7/7 differential parity tests, fails-pre/passes-post confirmed by running the new test
+  against the pre-fix policy file. **But the fix swept only this one helper function**, and the
+  fresh-angle pass this round found the exact same "OPA fail-open on an undefined helper" defect
+  shape twice more the same day (see `#344`, `#345` below) — this is now looking like a systemic
+  property of `governance.rego`'s helper functions, not three unrelated bugs.
+- **`#341` (MEDIUM, RISK-19 stale-read in `_finalize_current_execution`) — code fix CONFIRMED real**,
+  but its regression test does not exercise the staleness scenario: reverting just the
+  `populate_existing=True` line left the committed test passing unchanged. Filed as `#346`.
+- **`#342` (LOW) and `#343` (LOW) — CONFIRMED FIXED**, both with genuine evidence (`#343`'s new test
+  was fault-injection-verified: temporarily breaking the CAS guard it protects made the test fail as
+  expected).
+
+**3 new issues filed this round**, two of them HIGH and directly continuing `#340`'s defect class:
+- `#344` (HIGH): `governance.rego`'s `uv run` child-command allowlist is **fully bypassed** whenever
+  any flag precedes the child command (`uv run --quiet rm -rf /`, `uv run --python ... pytest`, ...)
+  — the enforcing rule references an undefined helper and Rego's undefined-means-doesn't-fire
+  semantics silently let everything through. Same root-cause shape as `#340`, much larger blast
+  radius (total allowlist bypass, not a narrow flag miss).
+- `#345` (HIGH): `#340`'s own fix is itself bypassable — sed scripts with a leading address
+  containing the letter `s` (`/skip/s/foo/bar/w /tmp/a/b/out.bin`) make the new flags-extraction
+  helper lock onto the wrong `s` and silently not fire. Ordinary sed usage, not a contrived edge
+  case.
+- `#346` (LOW): `#341`'s regression test doesn't exercise the bug it claims to guard (see above).
+
+Neither `#344` nor `#345` is live-exploitable via the Controller's default path today (the embedded
+`PolicyEngine` always runs first and short-circuits on deny before OPA is consulted) — but this is
+the same mitigating factor `#340` had, and it is not a substitute for the OPA backend actually
+matching the module's own stated "parity, not downgrade" invariant. **Recommend a dedicated audit of
+every partial/undefined-prone helper function in `governance.rego`** rather than continuing to fix
+these one at a time as they're independently rediscovered — three instances of the identical root
+cause surfaced in a single day.
+
+Total open issues: **4** (`#301`, `#344`, `#345`, `#346`), 3 HIGH, 1 LOW, 0 CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 20 State
 
 **Nearly gate-clean: 5 open issues total, none of them a re-broken prior fix.** This round's scope
 was `git log be95854..origin/main` (33 commits) — the full range since the last independently-run

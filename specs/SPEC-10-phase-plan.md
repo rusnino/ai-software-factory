@@ -56,19 +56,26 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-09): Phase 2 is effectively gate-clean — 0 open `phase-2` CRITICAL/HIGH, only 4
-new LOW/MEDIUM/HIGH findings from this round remain (`#340`-`#343`), none re-breaking a prior fix.
-Round 20 scoped itself via `git log be95854..origin/main` (33 commits, the range since the last
-independently-run review round) and live-reproduced all 23 issues opencode closed in it: 5 CRITICAL
-(the policy-parser bypass family — `#140`/`#309`/`#332`/`#333`/`#336` — confirmed on both the
-embedded engine and the OPA backend, ~20 sibling variants swept, no new gaps), 5 HIGH (including
-`#293`'s durable cancellation-claim design, which this session reviewed and approved before
-implementation, confirmed correct under the exact poller-vs-cleanup overlap round-21 had found
-broken), 5 MEDIUM, 8 LOW — all genuinely fixed. Only `#301` (macro-agent-start-not-idempotent,
-architectural, unchanged) remains open from before this round. This round also surfaced a process
-gap worth naming: 13 of the 23 closing commits were test-only, with the real fix bundled into an
-earlier, broader commit — substance confirmed real in every case, but a literal violation of
-CLAUDE.md's same-commit regression-test requirement.** Nineteen prior review rounds have run. Rounds 1-4
+**Status (2026-09-09): Phase 2 is NOT gate-clean — opencode closed all 5 of Round 20's remaining
+issues same-day, but Round 21 found `#301` was a false close (only adds a failure-classification
+label; zero idempotency/dedup mechanism exists, retries still mint a fresh `Execution` and issue a
+second `POST /runs` — reopened with full evidence) and found the exact same "OPA fail-open on an
+undefined Rego helper" defect shape TWICE more on the same day `#340` fixed one instance of it:
+`#344` (HIGH, `uv run` allowlist fully bypassed by any leading flag — total command-allowlist
+defeat, not a narrow miss) and `#345` (HIGH, `#340`'s own fix is itself bypassed by an
+address-prefixed sed script). A third finding, `#346` (LOW), is a regression test for `#341` that
+was proven not to exercise the bug it claims to cover (reverting the fix left it passing). Total
+open: 4 (`#301`, `#344`, `#345`, `#346`), 3 HIGH, 1 LOW, 0 CRITICAL. Recommend a dedicated sweep of
+every partial/undefined-prone helper in `governance.rego` rather than continuing to fix these one at
+a time as they're independently rediscovered.
+
+Round 20 (superseded by the above): scoped via `git log be95854..origin/main` (33 commits) and
+live-reproduced all 23 issues opencode closed in it — 5 CRITICAL policy-parser bypasses
+(`#140`/`#309`/`#332`/`#333`/`#336`), 5 HIGH (including `#293`'s durable cancellation-claim design,
+reviewed and approved this session before implementation), 5 MEDIUM, 8 LOW — all genuinely fixed at
+the time, plus the process note that 13 of 23 closing commits were test-only with the real fix
+bundled into an earlier commit (substance confirmed real, but a literal Regression Coverage Policy
+violation).** Twenty prior review rounds have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —
