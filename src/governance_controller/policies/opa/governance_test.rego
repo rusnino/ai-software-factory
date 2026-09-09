@@ -2078,6 +2078,47 @@ test_sed_multi_segment_write_path_is_denied if {
     }
 }
 
+test_sed_address_prefixed_substitution_flags_are_denied if {
+    every test_case in [
+        {
+            "command": "sed '/skip/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+            "argv": ["sed", "/skip/s/foo/bar/w /tmp/a/b/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/season/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+            "argv": ["sed", "/season/s/foo/bar/w /tmp/a/b/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/skip/s/foo/bar/W /tmp/a/b/out.bin' file.txt",
+            "argv": ["sed", "/skip/s/foo/bar/W /tmp/a/b/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/skip/s/foo/bar/ep' file.txt",
+            "argv": ["sed", "/skip/s/foo/bar/ep", "file.txt"],
+        },
+        {
+            "command": "sed '/skip/,/end/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+            "argv": ["sed", "/skip/,/end/s/foo/bar/w /tmp/a/b/out.bin", "file.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "sed")
+    }
+}
+
 test_incomplete_input_documents_are_denied if {
     every document in [
         {},

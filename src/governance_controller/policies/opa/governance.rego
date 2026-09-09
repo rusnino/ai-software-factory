@@ -1981,15 +1981,202 @@ _sed_unescaped_delimiters(script, delimiter, after) := sorted if {
     sorted := sort(positions)
 }
 
+_sed_is_digit(char) if { char >= "0"; char <= "9" }
+
+_sed_skip_digits(script, start) := end if {
+    digits := [p |
+        some p in numbers.range(start, count(script) - 1)
+        _sed_is_digit(substring(script, p, 1))
+    ]
+    count(digits) > 0
+    end := digits[count(digits) - 1] + 1
+}
+
+_sed_skip_digits(script, start) := start if {
+    digits := [p |
+        some p in numbers.range(start, count(script) - 1)
+        _sed_is_digit(substring(script, p, 1))
+    ]
+    count(digits) == 0
+}
+
+_sed_skip_step_suffix(script, start) := end if {
+    start < count(script)
+    substring(script, start, 1) == "~"
+    end := _sed_skip_digits(script, start + 1)
+}
+
+_sed_skip_step_suffix(script, start) := start if {
+    not start < count(script)
+}
+
+_sed_skip_step_suffix(script, start) := start if {
+    start < count(script)
+    not substring(script, start, 1) == "~"
+}
+
+_sed_skip_address(script, start) := end if {
+    start < count(script)
+    char := substring(script, start, 1)
+    _sed_is_digit(char)
+    digits_end := _sed_skip_digits(script, start)
+    end := _sed_skip_step_suffix(script, digits_end)
+}
+
+_sed_skip_address(script, start) := end if {
+    start < count(script)
+    substring(script, start, 1) == "$"
+    end := start + 1
+}
+
+_sed_skip_address(script, start) := end if {
+    start < count(script)
+    substring(script, start, 1) == "/"
+    positions := _sed_unescaped_delimiters(script, "/", start)
+    count(positions) >= 1
+    end := positions[0] + 1
+}
+
+_sed_skip_address(script, start) := end if {
+    start < count(script)
+    substring(script, start, 1) == "\\"
+    delimiter := substring(script, start + 1, 1)
+    positions := _sed_unescaped_delimiters(script, delimiter, start + 1)
+    count(positions) >= 1
+    end := positions[0] + 1
+}
+
+_sed_skip_address(script, start) := start if {
+    start >= count(script)
+}
+
+_sed_skip_address(script, start) := start if {
+    start < count(script)
+    char := substring(script, start, 1)
+    not _sed_is_digit(char)
+    not char == "$"
+    not char == "/"
+    not char == "\\"
+}
+
+_sed_skip_addresses(script, start) := end if {
+    first := _sed_skip_address(script, start)
+    first >= count(script)
+    end := first
+}
+
+_sed_skip_addresses(script, start) := end if {
+    first := _sed_skip_address(script, start)
+    first < count(script)
+    not substring(script, first, 1) == ","
+    end := first
+}
+
+_sed_skip_addresses(script, start) := end if {
+    first := _sed_skip_address(script, start)
+    first < count(script)
+    substring(script, first, 1) == ","
+    end := _sed_skip_address(script, first + 1)
+}
+
+_sed_is_whitespace(char) if { char == " " }
+_sed_is_whitespace(char) if { char == "\t" }
+
+_sed_skip_whitespace(script, start) := end if {
+    non_ws := [p |
+        some p in numbers.range(start, count(script) - 1)
+        not _sed_is_whitespace(substring(script, p, 1))
+    ]
+    count(non_ws) > 0
+    end := non_ws[0]
+}
+
+_sed_skip_whitespace(script, start) := end if {
+    non_ws := [p |
+        some p in numbers.range(start, count(script) - 1)
+        not _sed_is_whitespace(substring(script, p, 1))
+    ]
+    count(non_ws) == 0
+    end := count(script)
+}
+
+_sed_skip_ws_negation(script, start) := end if {
+    after_ws := _sed_skip_whitespace(script, start)
+    after_ws < count(script)
+    substring(script, after_ws, 1) == "!"
+    end := _sed_skip_whitespace(script, after_ws + 1)
+}
+
+_sed_skip_ws_negation(script, start) := end if {
+    after_ws := _sed_skip_whitespace(script, start)
+    not after_ws < count(script)
+    end := after_ws
+}
+
+_sed_skip_ws_negation(script, start) := end if {
+    after_ws := _sed_skip_whitespace(script, start)
+    after_ws < count(script)
+    not substring(script, after_ws, 1) == "!"
+    end := after_ws
+}
+
+_sed_strip_quotes(script) := stripped if {
+    count(script) >= 2
+    first := substring(script, 0, 1)
+    last := substring(script, count(script) - 1, 1)
+    first == last
+    first == "\""
+    stripped := substring(script, 1, count(script) - 2)
+}
+
+_sed_strip_quotes(script) := stripped if {
+    count(script) >= 2
+    first := substring(script, 0, 1)
+    last := substring(script, count(script) - 1, 1)
+    first == last
+    first == "'"
+    stripped := substring(script, 1, count(script) - 2)
+}
+
+_sed_strip_quotes(script) := script if {
+    count(script) < 2
+}
+
+_sed_strip_quotes(script) := script if {
+    count(script) >= 2
+    first := substring(script, 0, 1)
+    last := substring(script, count(script) - 1, 1)
+    not first == last
+}
+
+_sed_strip_quotes(script) := script if {
+    count(script) >= 2
+    first := substring(script, 0, 1)
+    last := substring(script, count(script) - 1, 1)
+    first == last
+    not first == "\""
+    not first == "'"
+}
+
+_sed_command_index(script, cmd) := index if {
+    stripped := _sed_strip_quotes(script)
+    after_addr := _sed_skip_addresses(stripped, 0)
+    after_prefix := _sed_skip_ws_negation(stripped, after_addr)
+    index := after_prefix
+    index < count(stripped)
+    substring(stripped, index, 1) == cmd
+}
+
 _sed_substitution_flags(script) := flags if {
-    substitution_index := indexof(lower(script), "s")
-    substitution_index >= 0
-    count(script) > substitution_index + 2
-    delimiter := substring(script, substitution_index + 1, 1)
+    stripped := _sed_strip_quotes(script)
+    cmd_index := _sed_command_index(stripped, "s")
+    cmd_index >= 0
+    count(stripped) > cmd_index + 2
+    delimiter := substring(stripped, cmd_index + 1, 1)
     delimiter != ""
-    positions := _sed_unescaped_delimiters(script, delimiter, substitution_index + 1)
+    positions := _sed_unescaped_delimiters(stripped, delimiter, cmd_index + 1)
     count(positions) >= 2
-    flags := substring(script, positions[1] + 1, -1)
+    flags := substring(stripped, positions[1] + 1, -1)
 }
 
 _sed_script_executes(script) if {

@@ -131,12 +131,19 @@ def _evaluate_both(opa_path: str, command: str) -> tuple[bool, bool]:
         "sed 's/foo/bar/e' input.txt",
         "sed -n 's/foo/w bar/g' input.txt",
         "sed -e 's/foo/bar/g' file.txt",
+        "sed '/skip/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+        "sed '/season/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+        "sed '/skip/s/foo/bar/W /tmp/a/b/out.bin' file.txt",
+        "sed '/skip/s/foo/bar/ep' file.txt",
+        "sed '/miss/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+        "sed -n '/skip/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
+        "sed '/skip/,/end/s/foo/bar/w /tmp/a/b/out.bin' file.txt",
     ],
 )
 def test_opa_matches_embedded_on_sed_substitution_flags(
     opa_path: str, command: str
 ) -> None:
-    """#340: OPA must not silently allow multi-segment sed write/RCE paths."""
+    """#340/#345: OPA must not silently allow sed write/RCE paths."""
     embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
     assert opa_allowed == embedded_allowed, (
         f"OPA/embedded divergence for {command!r}: "
