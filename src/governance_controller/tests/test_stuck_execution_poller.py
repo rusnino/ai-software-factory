@@ -33,6 +33,7 @@ from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.cancellation_service import (
     CANCELLATION_CLAIM_LEASE,
+    claim_cancellation,
 )
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.services.stuck_execution_poller import StuckExecutionPoller
@@ -2500,6 +2501,83 @@ class TestCancellationConcurrency:
         task_ids = [action["task_id"] for action in completed]
         assert len(completed) == 5
         assert len(task_ids) == len(set(task_ids))
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason=(
+            "poller-first-vs-cleanup overlap requires PostgreSQL row locking"
+        ),
+    )
+    async def test_poller_claim_blocks_cleanup_during_cancel(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#343: poller starts cancel() before cleanup path can claim the run."""
+        _engine, local_session = isolated_db
+
+        async with local_session() as seed:
+            task, run_id = await _pending_cancel_task(seed)
+            execution = await seed.scalar(
+                select(Execution).where(Execution.task_id == task.id)
+            )
+            assert execution is not None
+            execution_id = execution.id
+
+        calls = 0
+        poller_started_cancel = asyncio.Event()
+        release_poller_cancel = asyncio.Event()
+
+        class _BlockingExecutor:
+            async def cancel(self, _run_id: str) -> dict[str, Any]:
+                nonlocal calls
+                calls += 1
+                poller_started_cancel.set()
+                await release_poller_cancel.wait()
+                return {}
+
+        async def _poller() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                return await StuckExecutionPoller(
+                    db,
+                    executor=_BlockingExecutor(),  # type: ignore[arg-type]
+                )._poll_pending_cancellations()
+
+        poller_task = asyncio.create_task(_poller())
+        await asyncio.wait_for(poller_started_cancel.wait(), timeout=5)
+
+        async def _cleanup_claim() -> object:
+            async with local_session() as db:
+                return await claim_cancellation(
+                    db,
+                    execution_id,
+                    run_id,
+                    task_id=task.id,
+                )
+
+        cleanup_task = asyncio.create_task(_cleanup_claim())
+        await asyncio.sleep(0.1)
+
+        release_poller_cancel.set()
+        poller_actions = await asyncio.wait_for(poller_task, timeout=5)
+        cleanup_claim = await asyncio.wait_for(cleanup_task, timeout=5)
+
+        assert calls == 1
+        assert cleanup_claim is None
+        assert any(
+            action["action"] == "execution_cancel_completed"
+            for action in poller_actions
+        )
+
+        async with local_session() as check:
+            completion_audits = (
+                await check.execute(
+                    select(AuditLog).where(
+                        AuditLog.task_id == task.id,
+                        AuditLog.event_type == "execution_cancel_completed",
+                    )
+                )
+            ).scalars().all()
+            assert len(completion_audits) == 1
 
     @pytest.mark.skipif(
         _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
