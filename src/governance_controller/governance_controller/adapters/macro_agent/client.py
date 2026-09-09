@@ -12,6 +12,29 @@ class MacroAgentResponseError(ValueError):
     """Raised when a macro-agent response violates the wire contract."""
 
 
+def classify_macro_agent_start_exception(exc: Exception) -> str:
+    """Classify a macro-agent start failure by orphan risk.
+
+    Returns one of:
+    - ``never_sent``: the request never left the Controller (connect failure).
+    - ``orphan_suspected``: the request was sent but the response was lost
+      before the run ID could be recorded (timeout/pool exhaustion).
+    - ``accepted_response_invalid``: a 2xx response was received but could not
+      be parsed, so a run was likely accepted without a usable run ID.
+    - ``rejected``: the macro-agent returned an HTTP error status.
+    - ``unknown``: any other failure.
+    """
+    if isinstance(exc, MacroAgentResponseError):
+        return "accepted_response_invalid"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "rejected"
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "never_sent"
+    if isinstance(exc, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout)):
+        return "orphan_suspected"
+    return "unknown"
+
+
 class MacroAgentClient:
     """Async HTTP client for the macro-agent runs API."""
 

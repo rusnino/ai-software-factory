@@ -4,10 +4,14 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.client import (
+    MacroAgentResponseError,
+)
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import Settings
 from governance_controller.constants import TaskState
@@ -939,6 +943,81 @@ async def test_external_retry_start_failure_is_terminal_for_pending_attempt(
         and row.payload.get("pending_event_id") == marker_id
     ]
     assert len(terminal) == 1
+
+
+async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
+    """#301: retry start failure audit distinguishes never-sent, lost-response, etc."""
+    _engine, session_local = isolated_db
+    request = httpx.Request("POST", "http://macro.example/runs")
+    response = httpx.Response(500, request=request)
+    cases = [
+        (httpx.ConnectError("no route", request=request), "never_sent"),
+        (httpx.ConnectTimeout("timed out", request=request), "never_sent"),
+        (httpx.ReadTimeout("timed out", request=request), "orphan_suspected"),
+        (httpx.WriteTimeout("timed out", request=request), "orphan_suspected"),
+        (httpx.PoolTimeout("no pool", request=request), "orphan_suspected"),
+        (
+            httpx.HTTPStatusError("bad", request=request, response=response),
+            "rejected",
+        ),
+        (MacroAgentResponseError("invalid json"), "accepted_response_invalid"),
+    ]
+
+    for index, (exc, expected_class) in enumerate(cases):
+        task_id = f"task-retry-fail-{expected_class}-{index}"
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Classify retry start failure",
+            acceptance=["failure_class is recorded"],
+        )
+        async with session_local() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    state=TaskState.RUNNING,
+                    proposed_by="agent-1",
+                    task_contract_json=contract.model_dump(mode="json"),
+                )
+            )
+            await seed.commit()
+
+        fake_executor = MacroAgentExecutor()
+        fake_executor.start = AsyncMock(side_effect=exc)
+
+        async with session_local() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(
+                RuntimeError, match="retry macro-agent start failed"
+            ):
+                await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        async with session_local() as check:
+            audits = (
+                await check.execute(
+                    select(AuditLog).where(AuditLog.task_id == task_id)
+                )
+            ).scalars().all()
+            failure_rows = [
+                r
+                for r in audits
+                if r.event_type == "retry_execution_start_failed"
+                and r.payload.get("failure_class") == expected_class
+            ]
+            assert len(failure_rows) == 1, (
+                f"missing failure_class={expected_class} for {exc}"
+            )
 
 
 @pytest.mark.xfail(

@@ -19,6 +19,9 @@ from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
+from governance_controller.adapters.macro_agent.client import (
+    classify_macro_agent_start_exception,
+)
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import TaskState
@@ -902,6 +905,7 @@ class VerificationService:
             transitioned = await StateMachine.atomic_transition(
                 db, task, TaskState.FAILED
             )
+            failure_class = classify_macro_agent_start_exception(exc)
             if transitioned:
                 execution.state = TaskState.FAILED
                 execution.ended_at = datetime.now(UTC)
@@ -916,6 +920,7 @@ class VerificationService:
                     "execution_id": execution.id,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
+                    "failure_class": failure_class,
                     "verification_report": report,
                     "attempt": retry_attempt,
                 }
@@ -943,10 +948,13 @@ class VerificationService:
                             "reason": "retry_execution_start_failed",
                             "error": str(exc),
                             "error_type": type(exc).__name__,
+                            "failure_class": failure_class,
                         },
                     )
                 await db.commit()
-                raise RuntimeError(f"retry macro-agent start failed: {exc}") from exc
+                raise RuntimeError(
+                    f"retry macro-agent start failed: {exc}"
+                ) from exc
 
             # The local start failed even though another writer owns the task.
             # Finalize only this execution; do not copy the competing task state.

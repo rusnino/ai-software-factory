@@ -4,10 +4,12 @@ import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.client import MacroAgentResponseError
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
@@ -196,6 +198,60 @@ class TestApprovalServiceStateTransitions:
         assert len(ready_changes) == 1
         previous = ready_changes[0].payload.get("previous_state")
         assert previous == TaskState.EXEC_APPROVED.value
+
+    async def test_execution_start_failure_classifies_orphan_risk(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#301: audit payload classifies macro-agent start failures by orphan risk."""
+        contract = _make_contract()
+        profile = _make_profile()
+        request = httpx.Request("POST", "http://macro.example/runs")
+        response = httpx.Response(500, request=request)
+
+        cases = [
+            (httpx.ConnectError("no route", request=request), "never_sent"),
+            (httpx.ConnectTimeout("timed out", request=request), "never_sent"),
+            (httpx.ReadTimeout("timed out", request=request), "orphan_suspected"),
+            (httpx.WriteTimeout("timed out", request=request), "orphan_suspected"),
+            (httpx.PoolTimeout("no pool", request=request), "orphan_suspected"),
+            (
+                httpx.HTTPStatusError("bad", request=request, response=response),
+                "rejected",
+            ),
+            (MacroAgentResponseError("invalid json"), "accepted_response_invalid"),
+        ]
+
+        for index, (exc, expected_class) in enumerate(cases):
+            task = await _make_task(
+                db_session,
+                TaskState.PLAN_APPROVED,
+                task_id=f"task-fail-{expected_class}-{index}",
+            )
+            fake_executor.start.side_effect = exc
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await service.approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="telegram",
+                    actor="admin",
+                    idempotency_key=f"key-exec-fail-{expected_class}",
+                )
+
+            rows = await _audit_rows_for_task(db_session, task.id)
+            failure_rows = [
+                r
+                for r in rows
+                if r.event_type == "execution_start_failed"
+                and r.payload.get("failure_class") == expected_class
+            ]
+            assert len(failure_rows) == 1, (
+                f"missing failure_class={expected_class} for {exc}"
+            )
 
     async def test_merge_approval_advances_state_to_done(
         self,

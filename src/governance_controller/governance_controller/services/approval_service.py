@@ -7,6 +7,9 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.adapters.macro_agent.client import (
+    classify_macro_agent_start_exception,
+)
 from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType, TaskState
@@ -583,6 +586,7 @@ class ApprovalService:
             execution.ended_at = datetime.now(UTC)
             await self.db.flush()
 
+            failure_class = classify_macro_agent_start_exception(exc)
             await AuditService.log(
                 db=self.db,
                 event_type="execution_start_failed",
@@ -595,6 +599,7 @@ class ApprovalService:
                     "execution_id": execution.id,
                     "error": str(exc),
                     "error_type": type(exc).__name__,
+                    "failure_class": failure_class,
                 },
             )
             if not transitioned:
