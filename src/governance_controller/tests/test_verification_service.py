@@ -1021,7 +1021,7 @@ async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
 
 
 async def test_finalize_current_execution_uses_populate_existing(isolated_db) -> None:
-    """#341: _finalize_current_execution refreshes the identity map before acting."""
+    """#341/#346: _finalize_current_execution reads fresh DB state, not cache."""
     _engine, session_local = isolated_db
     task_id = "task-finalize-existing"
     execution_id = "exec-finalize-existing"
@@ -1045,19 +1045,46 @@ async def test_finalize_current_execution_uses_populate_existing(isolated_db) ->
         )
         await seed.commit()
 
-    async with session_local() as db:
-        await VerificationService._finalize_current_execution(
-            db, task_id, TaskState.FAILED
-        )
-        await db.commit()
+    # Session A loads the execution into its identity map.
+    session_a = session_local()
+    stale_execution = await session_a.scalar(
+        select(Execution).where(Execution.id == execution_id)
+    )
+    assert stale_execution is not None
+    assert stale_execution.state == TaskState.RUNNING.value
 
-    async with session_local() as check:
-        execution = await check.scalar(
+    # Session B flips the row to READY and commits. READY is still inside the
+    # active-state filter, so _finalize_current_execution will proceed; the
+    # regression-coverage question is whether it reports the TRUE previous
+    # state (READY) or session A's stale cached copy (RUNNING).
+    async with session_local() as session_b:
+        fresh_execution = await session_b.scalar(
             select(Execution).where(Execution.id == execution_id)
         )
-        assert execution is not None
-        assert execution.state == TaskState.FAILED.value
-        assert execution.ended_at is not None
+        assert fresh_execution is not None
+        fresh_execution.state = TaskState.READY.value
+        await session_b.commit()
+
+    await VerificationService._finalize_current_execution(
+        session_a, task_id, TaskState.FAILED
+    )
+    await session_a.commit()
+    await session_a.close()
+
+    async with session_local() as check:
+        audits = await check.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,
+                AuditLog.event_type == "execution_finalized",
+            )
+        )
+        entries = audits.scalars().all()
+        assert len(entries) == 1
+        payload = entries[0].payload
+        assert payload.get("previous_state") == TaskState.READY.value, (
+            "populate_existing must refresh the identity-map object to the "
+            "concurrent writer's READY state, not the cached RUNNING state"
+        )
 
 
 @pytest.mark.xfail(
