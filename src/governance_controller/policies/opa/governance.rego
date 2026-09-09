@@ -269,6 +269,17 @@ _uv_run_violation contains msg if {
     count(argv) > 0
     _base_command(argv[0]) == "uv"
     child_index := _uv_run_child_index(argv)
+    child_index == -1
+    msg := sprintf("uv run child is not in the verification allowlist: %s", [cmd])
+}
+
+_uv_run_violation contains msg if {
+    some cmd in _commands
+    argv := _command_argv(cmd)
+    count(argv) > 0
+    _base_command(argv[0]) == "uv"
+    child_index := _uv_run_child_index(argv)
+    child_index != -1
     not _base_command(argv[child_index]) in _uv_run_child_commands
     msg := sprintf("uv run child is not in the verification allowlist: %s", [cmd])
 }
@@ -1628,6 +1639,26 @@ _uv_run_child_index(argv) := index if {
     run_index >= 1
     arg == "run"
     not _uv_prior_run(argv, run_index)
+    index := run_index + 2
+    argv[run_index + 1] == "--"
+    not startswith(argv[index], "-")
+}
+
+_uv_run_child_index(argv) := -1 if {
+    _base_command(argv[0]) == "uv"
+    some run_index, arg in argv
+    run_index >= 1
+    arg == "run"
+    not _uv_prior_run(argv, run_index)
+    not _uv_run_child_index_explicit(argv, run_index)
+}
+
+_uv_run_child_index_explicit(argv, run_index) if {
+    index := run_index + 1
+    not startswith(argv[index], "-")
+}
+
+_uv_run_child_index_explicit(argv, run_index) if {
     index := run_index + 2
     argv[run_index + 1] == "--"
     not startswith(argv[index], "-")

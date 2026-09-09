@@ -150,3 +150,38 @@ def test_opa_denies_multi_segment_sed_write_path(opa_path: str) -> None:
     embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
     assert embedded_allowed is False
     assert opa_allowed is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "uv run --quiet rm -rf /",
+        "uv run --python /tmp/evil pytest",
+        "uv run --quiet totally-arbitrary-binary",
+        "uv run --no-project pytest",
+        "uv run --with requests arbitrary-binary",
+        "uv run --directory /tmp arbitrary-binary",
+        "uv run --active arbitrary-binary",
+        "uv run --frozen arbitrary-binary",
+        "uv run -q -- pytest",
+    ],
+)
+def test_opa_matches_embedded_on_uv_run_flag_prefixed_child(
+    opa_path: str, command: str
+) -> None:
+    """#344: OPA must not allow uv run <flag> <unlisted child> bypass."""
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert opa_allowed == embedded_allowed, (
+        f"OPA/embedded divergence for {command!r}: "
+        f"embedded={embedded_allowed}, opa={opa_allowed}"
+    )
+
+
+def test_opa_denies_uv_run_flag_prefixed_unlisted_child(
+    opa_path: str,
+) -> None:
+    """Regression: OPA previously allowed uv run --quiet rm -rf /."""
+    command = "uv run --quiet rm -rf /"
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert embedded_allowed is False
+    assert opa_allowed is False

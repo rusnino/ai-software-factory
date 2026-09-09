@@ -1125,6 +1125,43 @@ test_command_execution_bypasses_are_denied if {
 
 }
 
+test_uv_run_flag_prefixed_child_is_denied if {
+    every test_case in [
+        {
+            "command": "uv run --quiet rm -rf /",
+            "argv": ["uv", "run", "--quiet", "rm", "-rf", "/"],
+        },
+        {
+            "command": "uv run --python /tmp/evil pytest",
+            "argv": ["uv", "run", "--python", "/tmp/evil", "pytest"],
+        },
+        {
+            "command": "uv run --no-project arbitrary-binary",
+            "argv": ["uv", "run", "--no-project", "arbitrary-binary"],
+        },
+        {
+            "command": "uv run -q -- pytest",
+            "argv": ["uv", "run", "-q", "--", "pytest"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "uv run child")
+    }
+}
+
 test_safe_git_config_and_read_only_sed_are_allowed if {
     every test_case in [
         {
