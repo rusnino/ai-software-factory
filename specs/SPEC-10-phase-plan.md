@@ -56,16 +56,19 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-07): Phase 2 is NOT gate-clean. Round 19 changed methodology — scope is now
-determined from `git log`, not GitHub issue state, after finding 9 of 11 pushed commits' target
-issues still showed `Open` despite genuine fixes (commits used `Fixes #N` inside parentheses, which
-GitHub doesn't auto-close on). Result: 10 issues closed, `#308` genuinely fixed on its 4th attempt
-(a structural query rewrite, not another patch), but 2 already-`Closed` issues (`#326`, `#328`) were
-found NOT actually fully fixed via their own prior comment threads and reopened, plus 4 new issues
-found including a sixth instance of the recurring policy-parser bypass class. A large uncommitted
-hardening batch (preserved via `git stash`) sits out of this round's scope, targeting several more
-open issues including two CRITICALs opencode self-found (`#332`/`#333`), both independently
-re-confirmed live on `origin/main` this round.** Nineteen review rounds have run. Rounds 1-4
+**Status (2026-09-09): Phase 2 is effectively gate-clean — 0 open `phase-2` CRITICAL/HIGH, only 4
+new LOW/MEDIUM/HIGH findings from this round remain (`#340`-`#343`), none re-breaking a prior fix.
+Round 20 scoped itself via `git log be95854..origin/main` (33 commits, the range since the last
+independently-run review round) and live-reproduced all 23 issues opencode closed in it: 5 CRITICAL
+(the policy-parser bypass family — `#140`/`#309`/`#332`/`#333`/`#336` — confirmed on both the
+embedded engine and the OPA backend, ~20 sibling variants swept, no new gaps), 5 HIGH (including
+`#293`'s durable cancellation-claim design, which this session reviewed and approved before
+implementation, confirmed correct under the exact poller-vs-cleanup overlap round-21 had found
+broken), 5 MEDIUM, 8 LOW — all genuinely fixed. Only `#301` (macro-agent-start-not-idempotent,
+architectural, unchanged) remains open from before this round. This round also surfaced a process
+gap worth naming: 13 of the 23 closing commits were test-only, with the real fix bundled into an
+earlier, broader commit — substance confirmed real in every case, but a literal violation of
+CLAUDE.md's same-commit regression-test requirement.** Nineteen prior review rounds have run. Rounds 1-4
 (`#154`-`#221`) fixed 62+ live-reproduced gaps. Round 5 found 13 more, including two in Phase 1 core
 code that five rounds of `policy_engine.py`-focused hardening never surfaced. Round 6 fixed both and
 found the write-side auth fix had a same-shaped read-side gap, plus a stuck-execution-poller race —

@@ -1,6 +1,65 @@
 # Next Steps
 
-## Current Worktree (2026-09-08)
+## Current State (2026-09-09) — Round 20
+
+**Nearly gate-clean: 5 open issues total, none of them a re-broken prior fix.** This round's scope
+was `git log be95854..origin/main` (33 commits) — the full range since the last independently-run
+review round, not just the single `a42953f "docs: record hardening batch verification"` commit
+sitting on top of it, which is opencode's own self-declared verification note, not an
+independently-confirmed review-round marker. Per this round's git-log-based methodology, only a
+`docs(phase-2): record round N verification` commit from the reviewer counts as a review-round HEAD.
+
+**All 23 issues opencode closed in that range are confirmed genuinely fixed by live reproduction**,
+not diff-reading: 5 CRITICAL (`#140`, `#309`, `#332`, `#333`, `#336` — the policy-parser bypass
+family, confirmed on both the embedded `PolicyEngine` and the `governance.rego` OPA backend, ~20
+sibling syntactic variants swept with no new gaps found), 5 HIGH (`#293` — the durable
+cancellation-claim design this session reviewed and approved before opencode implemented it,
+confirmed live under the exact poller-first-vs-approval-cleanup overlap direction round-21 had
+previously found broken, on both SQLite and real Postgres, with exactly one `cancel()` call and one
+completion audit row; `#305`, `#329`, `#328`, `#334`), 5 MEDIUM (`#302`, `#306`, `#310`, `#335`,
+`#338`), 8 LOW (`#303`, `#304`, `#307`, `#326`, `#330`, `#331`, `#337`, `#339`). `#328` was
+re-verified against the exact gap that got it reopened last round (`init_db()`'s unprotected
+`create_all()` running before the advisory lock) via a live 8-process startup race against a
+freshly-dropped schema: 0/8 failures post-fix, 4/5 failures when the fix was temporarily reverted to
+confirm the test is real, not a false green.
+
+**Process note, not a defect**: 13 of the 23 closing commits (all 5 CRITICAL fixes plus 8 of the
+lower-severity ones) are test-only — the actual production-code fix had already landed earlier in a
+separate, broader commit (mostly `62f918a "fix(phase-2): policy-parser hardening and OPA parity
+round"`, plus `0b4d5b4`/`6ff4674`/`4b941d3a`), with the closing commit added later purely to give
+each issue an auto-closing `Fixes #N` commit. Every case was traced back and the underlying fix
+substance confirmed real — this is not a "green test for the wrong reason" problem — but it's a
+literal violation of CLAUDE.md's "every fix must land a regression test in the *same* commit"
+clause. Batch-shipped code changes should carry their own regression tests as they land, not be
+back-filled by a wave of issue-closing test commits days later.
+
+**4 new issues found this round** (none blocking, none re-breaking a prior fix):
+- `#340` (HIGH): the OPA `governance.rego` backend's sed `w`/`W`/`e` flag detection silently fails
+  whenever the target file path has more than one `/` segment — a naive whole-script `split()`
+  instead of position-based delimiter tracking, unlike the embedded engine's correct implementation.
+  Not live-exploitable today (the embedded engine always evaluates first and short-circuits on
+  deny), but breaks the file's own stated OPA-parity guarantee for most realistic paths. Found via a
+  374-input differential fuzz of every `PolicyEngine.evaluate()` call in the test suite replayed
+  through the real `opa` binary — 373/374 matched, this one didn't.
+- `#341` (MEDIUM): `VerificationService._finalize_current_execution` reads `Execution` without
+  `populate_existing=True`, right after a Task CAS in the same session — the `RISK-19` shape, found
+  via the sweep required by `#338`'s fix; not yet independently live-raced.
+- `#342` (LOW): `TaskService.get_by_id`/`get_by_plane_issue_id` lack the same guard — currently
+  unreachable (fresh per-request sessions only today), pure hardening.
+- `#343` (LOW): `#293`'s durable-claim fix is confirmed correct under the poller-first-vs-cleanup
+  overlap direction, but that direction has no *committed* regression test — the ad-hoc test that
+  proved it correct this round was not added to the suite.
+
+**Only `#301` remains as a pre-existing open issue** — the `[HIGH]` macro-agent-start-not-idempotent
+architectural blocker, unchanged this round, requiring a macro-agent idempotency contract or an
+outbox before it can close. Total open issue count after this round: **5** (`#301`, `#340`-`#343`),
+**zero CRITICAL, zero re-broken fixes**.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical: hardening-batch note (2026-09-08, superseded by Round 20 above)
 
 **Phase 2 remains not gate-clean.** Local and remote `main` now include the focused hardening
 batch through `4b57e15`, covering the non-blocked worklist issues `#140`, `#302`-`#307`, and
