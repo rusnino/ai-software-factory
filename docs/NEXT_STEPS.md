@@ -1,6 +1,49 @@
 # Next Steps
 
-## Current State (2026-09-09) — Round 21
+## Current State (2026-09-09) — Round 22
+
+**`#301` false-closed a SECOND time; the OPA fail-open defect class found a FOURTH sibling.** Scope was
+`git log bfb9ca3..origin/main` (4 commits: `a75c64e`, `56b98db`, `d9578ea`, `6c39087`). opencode reported
+all 4 issues fixed and `gh issue list --state open` empty.
+
+- **`#301` (HIGH) — REOPENED AGAIN.** `d9578ea` made `macro_agent_service`'s `RunStore.create()`
+  genuinely and correctly dedupe `POST /runs` by `controller_execution_id` — confirmed live, including
+  under real concurrency (20 concurrent same-key requests → 1 `run_id`, no TOCTOU). But zero lines
+  changed in `src/governance_controller/`: `approval_service.py:527` and `verification_service.py:824`
+  both still mint a fresh `Execution(id=str(uuid4()))` on every retry, so the "same key" the new dedup
+  logic depends on never actually repeats. Live-reproduced end to end: real Controller retry pattern
+  (fresh uuid4 per attempt) → two different `run_id`s, duplicate external run still created. This is
+  exactly the "half the picture" pattern the round-21 reopen predicted even before this fix landed.
+- **`#340`'s defect class found a FOURTH time.** `#344` (`uv run` flag-prefixed bypass) and `#345` (sed
+  substitution address-prefix bypass) both CONFIRMED genuinely fixed — real pre-fix/post-fix
+  differentiation proven via ephemeral worktrees, not just a green suite. But the fresh-angle sweep this
+  round found the same "Rego helper undefined → rule silently doesn't fire" shape a fourth time:
+  `#347` (HIGH) — `_sed_script_file_io`'s direct `r`/`w`/`R`/`W` command path (as opposed to the `s///`
+  substitution path `#345` just fixed) still can't parse ordinary two-address range forms
+  (`/start/,/end/w file`), so it's undefined and the deny rule doesn't fire. Four instances of the
+  identical root cause in one week, each fixed the same day it's found, each immediately followed by a
+  sibling — a dedicated audit of every remaining partial Rego helper is now overdue rather than optional.
+- **`#346` (LOW) — CONFIRMED FIXED**, with fault-injection proof: the rewritten two-session test fails
+  when `populate_existing=True` is temporarily removed, passes when restored.
+- **New findings directly downstream of `#301`**: `#348` (MEDIUM) — `RunStore`'s capacity eviction
+  silently defeats the just-shipped dedup contract once the store fills up (deterministic, not a race;
+  not reachable via the Controller today since it doesn't reuse ids at all yet, but reachable directly
+  against macro-agent's own tested public contract). `#349` (LOW) — the Controller never reads
+  `MacroAgentStartResponse.status` on a dedup hit, so a stale/terminal run returned by a future
+  retry-reuse path would be silently mistaken for a fresh one. Both should land in the same change that
+  finally fixes `#301`'s Controller-side retry-id-reuse gap, not be fixed independently later.
+- A suspicious SQLAlchemy warning opencode flagged but deliberately left unfixed (`SAWarning: New
+  instance <Task ...> conflicts with persistent instance` in `test_create_task_duplicate_returns_409`)
+  was investigated and confirmed a harmless test-fixture artifact — the shared-session test fixture
+  doesn't mirror production's per-request session isolation. No issue filed.
+
+**Total open: 4** — `#301` (HIGH, reopened), `#347` (HIGH), `#348` (MEDIUM), `#349` (LOW). Zero CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 21 State
 
 **NOT gate-clean, despite opencode closing all 5 of Round 20's remaining issues same-day.** Scope
 was `git log 07edca1..origin/main` (5 commits: `1d4e1dc`, `c04c659`, `ce8b48d`, `96f83e8`, `afd5e15`).

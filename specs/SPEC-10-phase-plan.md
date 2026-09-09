@@ -56,18 +56,26 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-09): Phase 2 is NOT gate-clean — opencode closed all 5 of Round 20's remaining
-issues same-day, but Round 21 found `#301` was a false close (only adds a failure-classification
-label; zero idempotency/dedup mechanism exists, retries still mint a fresh `Execution` and issue a
-second `POST /runs` — reopened with full evidence) and found the exact same "OPA fail-open on an
-undefined Rego helper" defect shape TWICE more on the same day `#340` fixed one instance of it:
-`#344` (HIGH, `uv run` allowlist fully bypassed by any leading flag — total command-allowlist
-defeat, not a narrow miss) and `#345` (HIGH, `#340`'s own fix is itself bypassed by an
-address-prefixed sed script). A third finding, `#346` (LOW), is a regression test for `#341` that
-was proven not to exercise the bug it claims to cover (reverting the fix left it passing). Total
-open: 4 (`#301`, `#344`, `#345`, `#346`), 3 HIGH, 1 LOW, 0 CRITICAL. Recommend a dedicated sweep of
-every partial/undefined-prone helper in `governance.rego` rather than continuing to fix these one at
-a time as they're independently rediscovered.
+**Status (2026-09-09): Phase 2 is NOT gate-clean — `#301` has now been falsely closed TWICE.** Round
+22 found the macro-agent-side idempotency fix (`d9578ea`) is real and correct in isolation (genuine
+`controller_execution_id` dedup, live-verified under concurrency), but the Controller never sends the
+same id twice — `approval_service.py`/`verification_service.py` both mint a fresh `Execution` UUID on
+every retry, so the new dedup logic never actually triggers end-to-end. Reopened again with a live
+repro proving two different `run_id`s from the same simulated retry. Separately, `#344`/`#345`
+(round 21's two OPA fail-open findings) are CONFIRMED genuinely fixed with proven pre/post
+differentiation — but the fresh-angle sweep found the identical "Rego helper undefined on certain
+inputs → deny rule silently doesn't fire" shape a FOURTH time: `#347` (HIGH), the sibling direct-sed
+`r`/`w` command path that `#345`'s fix didn't also cover. Four instances of one root cause in a week,
+each fixed the same day it's found, each immediately followed by a sibling — the previously-suggested
+dedicated Rego-helper audit is now overdue. `#346` confirmed fixed with fault-injection proof. Two new
+findings sit directly downstream of `#301`'s remaining work: `#348` (MEDIUM, macro-agent's own run
+eviction silently defeats the just-shipped dedup contract once the store fills up) and `#349` (LOW,
+the Controller never reads a dedup hit's `status`, so a stale terminal run could be mistaken for
+fresh). Total open: 4 (`#301`, `#347` HIGH, `#348` MEDIUM, `#349` LOW), 0 CRITICAL.
+
+Round 21 (superseded by the above): opencode closed all 5 of round 20's remaining issues same-day;
+found `#301` was a false close the first time (classification-only, no dedup mechanism at all) and
+found the OPA fail-open shape twice (`#344`, `#345`) the same day `#340` fixed one instance of it.
 
 Round 20 (superseded by the above): scoped via `git log be95854..origin/main` (33 commits) and
 live-reproduced all 23 issues opencode closed in it — 5 CRITICAL policy-parser bypasses
