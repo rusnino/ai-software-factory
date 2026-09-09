@@ -143,13 +143,17 @@ class TaskService:
     async def get_by_id(self, task_id: str) -> Task | None:
         """Return the Task with the given primary key, or None."""
         return await self.db.scalar(
-            select(Task).where(Task.id == task_id)  # type: ignore[arg-type]
+            select(Task)
+            .execution_options(populate_existing=True)
+            .where(Task.id == task_id)  # type: ignore[arg-type]
         )
 
     async def get_by_plane_issue_id(self, plane_issue_id: str) -> Task | None:
         """Return the Task linked to the given Plane issue UUID, or None."""
         return await self.db.scalar(
-            select(Task).where(
+            select(Task)
+            .execution_options(populate_existing=True)
+            .where(
                 Task.plane_issue_id == plane_issue_id  # type: ignore[arg-type]
             )
         )

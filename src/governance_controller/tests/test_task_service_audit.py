@@ -14,6 +14,56 @@ from governance_controller.schemas import ProjectProfile, RepositoryConfig, Task
 from governance_controller.services.task_service import TaskService
 
 
+async def test_get_by_id_returns_task(db_session: AsyncSession) -> None:
+    """#342: TaskService.get_by_id remains correct with populate_existing."""
+    contract = TaskContract(
+        task_id="get-task-1",
+        project_id="get-proj-1",
+        proposed_by="agent-1",
+        objective="Get me",
+        acceptance=["found"],
+    )
+    profile = ProjectProfile(
+        project_id="get-proj-1",
+        project_name="Get Project",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+    service = TaskService(db_session)
+    created = await service.create(contract, profile)
+
+    fetched = await service.get_by_id(created.id)
+
+    assert fetched is not None
+    assert fetched.id == created.id
+
+
+async def test_get_by_plane_issue_id_returns_task(
+    db_session: AsyncSession,
+) -> None:
+    """#342: get_by_plane_issue_id remains correct with populate_existing."""
+    contract = TaskContract(
+        task_id="get-task-2",
+        project_id="get-proj-2",
+        proposed_by="agent-1",
+        objective="Get me by plane id",
+        acceptance=["found"],
+    )
+    profile = ProjectProfile(
+        project_id="get-proj-2",
+        project_name="Get Project",
+        repository=RepositoryConfig(path="/tmp/repo"),
+    )
+    service = TaskService(db_session)
+    created = await service.create(contract, profile)
+    created.plane_issue_id = "plane-42"
+    await db_session.commit()
+
+    fetched = await service.get_by_plane_issue_id("plane-42")
+
+    assert fetched is not None
+    assert fetched.id == created.id
+
+
 async def test_task_creation_logs_task_created_event(
     db_session: AsyncSession,
 ) -> None:
