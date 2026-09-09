@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from fastapi import HTTPException, status
 
@@ -31,24 +31,56 @@ class RunStore:
     def __init__(self, max_runs: int = _MAX_RUNS) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         self._max_runs = max_runs
+        # Maps controller_execution_id -> run_id for idempotency protection.
+        self._idempotency_keys: dict[str, str] = {}
+
+    @staticmethod
+    def _idempotency_key(run: dict[str, Any]) -> str | None:
+        return cast(
+            str | None,
+            run.get("request", {}).get("metadata", {}).get(
+                "controller_execution_id"
+            ),
+        )
+
+    def _is_idempotency_protected(self, run_id: str) -> bool:
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        key = self._idempotency_key(run)
+        return key is not None and self._idempotency_keys.get(key) == run_id
+
+    def _release_idempotency_key(self, run_id: str) -> None:
+        run = self._runs.get(run_id)
+        if run is None:
+            return
+        key = self._idempotency_key(run)
+        if key and self._idempotency_keys.get(key) == run_id:
+            del self._idempotency_keys[key]
 
     def _evict_if_needed(self) -> None:
-        """Drop oldest collected terminal runs when the store reaches its cap.
+        """Drop oldest terminal runs when the store reaches its cap.
 
-        Prefer runs whose terminal result has already been observed via
-        ``.collect()`` or ``.status()``. Raises HTTPException when no terminal
-        runs can be evicted and the cap is still exceeded.
+        Runs that are still valid idempotency targets (have a live
+        controller_execution_id mapping) are never evicted. This preserves the
+        idempotency contract from #301 under capacity pressure.
+
+        Prefer collected terminal runs, then any terminal runs. Raises
+        HTTPException when no evictable terminal runs remain.
         """
         while len(self._runs) >= self._max_runs:
             collected_terminal_keys = [
                 run_id
                 for run_id, run in self._runs.items()
-                if run["status"] in _TERMINAL_STATUSES and run.get("collected", False)
+                if run["status"] in _TERMINAL_STATUSES
+                and run.get("collected", False)
+                and not self._is_idempotency_protected(run_id)
             ]
             terminal_keys = collected_terminal_keys or [
                 run_id
                 for run_id, run in self._runs.items()
                 if run["status"] in _TERMINAL_STATUSES
+                and not self._is_idempotency_protected(run_id)
             ]
             if not terminal_keys:
                 raise HTTPException(
@@ -56,6 +88,7 @@ class RunStore:
                     detail="Run store capacity exhausted; no terminal runs to evict",
                 )
             oldest = min(terminal_keys, key=lambda k: self._runs[k]["created_at"])
+            self._release_idempotency_key(oldest)
             del self._runs[oldest]
 
     def _mark_collected(self, run_id: str) -> None:
@@ -87,13 +120,17 @@ class RunStore:
         metadata = getattr(request, "metadata", None) or {}
         controller_execution_id = metadata.get("controller_execution_id")
         if controller_execution_id:
-            existing = self._run_by_controller_execution_id(
+            existing_run_id = self._idempotency_keys.get(
                 controller_execution_id
             )
-            if existing is not None:
-                return RunResponse(
-                    run_id=existing["run_id"], status=existing["status"]
-                )
+            if existing_run_id is not None:
+                existing = self._runs.get(existing_run_id)
+                if existing is not None:
+                    return RunResponse(
+                        run_id=existing["run_id"], status=existing["status"]
+                    )
+                # Stale mapping; the run was evicted by an explicit release.
+                del self._idempotency_keys[controller_execution_id]
 
         self._evict_if_needed()
         run_id = str(uuid.uuid4())
@@ -104,6 +141,8 @@ class RunStore:
             "result": None,
             "created_at": time.monotonic(),
         }
+        if controller_execution_id:
+            self._idempotency_keys[controller_execution_id] = run_id
         return RunResponse(run_id=run_id, status="queued")
 
     async def get(self, run_id: str) -> RunStatus | None:
@@ -138,6 +177,9 @@ class RunStore:
         if run is None:
             return None
         self._mark_collected(run_id)
+        # Once the Controller has collected a result it will not retry the same
+        # execution id, so the idempotency key can be released.
+        self._release_idempotency_key(run_id)
         return RunResult(
             run_id=run_id,
             status=run["status"],

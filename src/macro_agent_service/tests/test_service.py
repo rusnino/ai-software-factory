@@ -77,6 +77,57 @@ async def test_start_run_is_idempotent_by_controller_execution_id(
         assert len(fresh_store._runs) == 1
 
 
+async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> None:
+    """#348: a run kept for idempotency must not be evicted by capacity pressure."""
+    capped = RunStore(max_runs=3)
+    from macro_agent_service import main as main_module
+    from macro_agent_service import store as store_module
+
+    store_module.store = capped
+    main_module.store = capped
+
+    async with _client() as client:
+        first = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-evict",
+                "objective": "First run for execution A",
+                "metadata": {"controller_execution_id": "exec-evict-A"},
+            },
+        )
+        assert first.status_code == 201
+        first_id = first.json()["run_id"]
+
+        # Make the protected run terminal *without* collecting it, so it would
+        # be a normal eviction candidate in the pre-fix store.
+        cancel_resp = await client.post(f"/runs/{first_id}/cancel")
+        assert cancel_resp.status_code == 200
+
+        # Push the store past its cap with unrelated terminal runs.
+        for idx in range(3):
+            created = await client.post(
+                "/runs",
+                json={
+                    "task_id": f"task-filler-{idx}",
+                    "objective": "Filler run",
+                },
+            )
+            await client.post(f"/runs/{created.json()['run_id']}/cancel")
+
+        # Retry the original execution id; the protected run must still exist.
+        retry = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-evict",
+                "objective": "Retry after churn",
+                "metadata": {"controller_execution_id": "exec-evict-A"},
+            },
+        )
+        assert retry.status_code == 201
+        assert retry.json()["run_id"] == first_id
+        assert first_id in capped._runs
+
+
 async def test_get_run_returns_status(fresh_store: RunStore) -> None:
     async with _client() as client:
         created = await client.post(
