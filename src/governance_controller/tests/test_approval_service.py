@@ -14,6 +14,7 @@ from governance_controller.adapters.macro_agent.executor import MacroAgentExecut
 from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.models.approval import Approval
 from governance_controller.models.audit_log import AuditLog
+from governance_controller.models.execution import Execution
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
@@ -166,6 +167,50 @@ class TestApprovalServiceStateTransitions:
 
         assert result.state == TaskState.RUNNING
         fake_executor.start.assert_awaited_once()
+
+    async def test_execution_approval_rejects_terminal_macro_agent_status(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#349: a dedup hit returning a terminal run must not advance to RUNNING."""
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+        contract = _make_contract()
+        profile = _make_profile()
+        fake_executor.start.return_value = {
+            "run_id": "run-terminal-349",
+            "status": "done",
+        }
+
+        with pytest.raises(RuntimeError, match="terminal status"):
+            await service.approve(
+                task=task,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="telegram",
+                actor="admin",
+                idempotency_key="key-terminal-349",
+            )
+
+        await db_session.refresh(task)
+        assert task.state == TaskState.FAILED
+
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.state == TaskState.FAILED.value
+        assert execution.macro_agent_run_id == "run-terminal-349"
+
+        audit = await db_session.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task.id,
+                AuditLog.event_type == "execution_start_failed",
+            )
+        )
+        assert len(audit.scalars().all()) == 1
 
     async def test_execution_approval_ready_audit_previous_state_is_exec_approved(
         self,

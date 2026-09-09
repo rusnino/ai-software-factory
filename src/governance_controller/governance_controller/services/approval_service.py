@@ -42,6 +42,8 @@ from governance_controller.services.policy_engine_backend import (
 )
 from governance_controller.services.state_machine import StateMachine
 
+_MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
 _APPROVAL_TARGET_STATES: dict[ApprovalType, TaskState] = {
     ApprovalType.PLAN: TaskState.PLAN_APPROVED,
     ApprovalType.EXECUTION: TaskState.EXEC_APPROVED,
@@ -566,6 +568,8 @@ class ApprovalService:
         if opentasks_dag is not None:
             contract.opentasks_dag = opentasks_dag
 
+        terminal_run_id: str | None = None
+        terminal_status: str | None = None
         try:
             result = await self.executor.start(
                 contract,
@@ -573,9 +577,19 @@ class ApprovalService:
                 sandbox=profile.execution.sandbox,
                 max_parallel_agents=profile.execution.max_parallel_agents,
             )
-            macro_agent_run_id = MacroAgentStartResponse.model_validate(
-                result
-            ).run_id
+            start_response = MacroAgentStartResponse.model_validate(result)
+            if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
+                # A dedup hit returned an already-terminal run. Record the
+                # terminal status and fall through to the shared failure path
+                # so the Controller does not wait for a run that has already
+                # finished (#349).
+                terminal_run_id = start_response.run_id
+                terminal_status = start_response.status
+                raise RuntimeError(
+                    f"macro-agent start returned terminal status: "
+                    f"{start_response.status}"
+                )
+            macro_agent_run_id = start_response.run_id
         except Exception as exc:  # pragma: no cover - broad error shield
             transitioned = await StateMachine.atomic_transition(
                 self.db, task, TaskState.FAILED
@@ -584,9 +598,31 @@ class ApprovalService:
             # regardless of whether another writer won the task CAS.
             execution.state = TaskState.FAILED
             execution.ended_at = datetime.now(UTC)
+            if terminal_run_id is not None:
+                execution.macro_agent_run_id = terminal_run_id
             await self.db.flush()
 
-            failure_class = classify_macro_agent_start_exception(exc)
+            if terminal_status is not None:
+                failure_class = "accepted_response_invalid"
+                error_message = (
+                    f"macro-agent returned terminal status "
+                    f"'{terminal_status}' on start"
+                )
+                error_type = "MacroAgentTerminalStatus"
+            else:
+                failure_class = classify_macro_agent_start_exception(exc)
+                error_message = str(exc)
+                error_type = type(exc).__name__
+
+            payload: dict[str, object] = {
+                "approval_type": ApprovalType.EXECUTION.value,
+                "execution_id": execution.id,
+                "error": error_message,
+                "error_type": error_type,
+                "failure_class": failure_class,
+            }
+            if terminal_run_id is not None:
+                payload["macro_agent_run_id"] = terminal_run_id
             await AuditService.log(
                 db=self.db,
                 event_type="execution_start_failed",
@@ -594,13 +630,7 @@ class ApprovalService:
                 actor=actor,
                 source=source,
                 execution_id=execution.id,
-                payload={
-                    "approval_type": ApprovalType.EXECUTION.value,
-                    "execution_id": execution.id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                    "failure_class": failure_class,
-                },
+                payload=payload,
             )
             if not transitioned:
                 await AuditService.log(
