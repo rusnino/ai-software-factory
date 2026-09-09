@@ -1922,20 +1922,51 @@ _sed_script(argv, index) := script if {
     script := argv[index]
 }
 
+_sed_backslash_run_length(script, p) := n if {
+    p > 0
+    n := count([q |
+        some q in numbers.range(0, p - 1)
+        every r in numbers.range(q, p - 1) {
+            substring(script, r, 1) == "\\"
+        }
+    ])
+}
+
+_sed_backslash_run_length(script, p) := 0 if {
+    p <= 0
+}
+
+_sed_is_escaped(script, p) if {
+    n := _sed_backslash_run_length(script, p)
+    n % 2 == 1
+}
+
+_sed_unescaped_delimiters(script, delimiter, after) := sorted if {
+    positions := [p |
+        some p in numbers.range(after + 1, count(script) - 1)
+        substring(script, p, 1) == delimiter
+        not _sed_is_escaped(script, p)
+    ]
+    sorted := sort(positions)
+}
+
+_sed_substitution_flags(script) := flags if {
+    substitution_index := indexof(lower(script), "s")
+    substitution_index >= 0
+    count(script) > substitution_index + 2
+    delimiter := substring(script, substitution_index + 1, 1)
+    delimiter != ""
+    positions := _sed_unescaped_delimiters(script, delimiter, substitution_index + 1)
+    count(positions) >= 2
+    flags := substring(script, positions[1] + 1, -1)
+}
+
 _sed_script_executes(script) if {
     regex.match(`(?i)(^|[;\n])[[:space:]]*[^;\n]*e([[:space:]]|$|;)`, script)
 }
 
 _sed_script_file_io(script) if {
-    substitution_index := indexof(lower(script), "s")
-    substitution_index >= 0
-    substitution := substring(script, substitution_index, -1)
-    count(substitution) > 2
-    delimiter := substring(substitution, 1, 1)
-    delimiter != ""
-    parts := split(substitution, delimiter)
-    count(parts) >= 4
-    flags := parts[count(parts) - 1]
+    flags := _sed_substitution_flags(script)
     contains(lower(flags), "w")
 }
 
@@ -1956,15 +1987,7 @@ _sed_script_file_io(script) if {
 }
 
 _sed_script_executes(script) if {
-    substitution_index := indexof(lower(script), "s")
-    substitution_index >= 0
-    substitution := substring(script, substitution_index, -1)
-    count(substitution) > 2
-    delimiter := substring(substitution, 1, 1)
-    delimiter != ""
-    parts := split(substitution, delimiter)
-    count(parts) >= 3
-    flags := parts[count(parts) - 1]
+    flags := _sed_substitution_flags(script)
     contains(lower(flags), "e")
 }
 

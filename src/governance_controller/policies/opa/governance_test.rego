@@ -2008,6 +2008,39 @@ test_sed_safe_text_containing_w_remains_allowed if {
     }
 }
 
+test_sed_multi_segment_write_path_is_denied if {
+    every test_case in [
+        {
+            "command": "sed 's/foo/bar/w /tmp/data/dump.bin' input.txt",
+            "argv": ["sed", "s/foo/bar/w /tmp/data/dump.bin", "input.txt"],
+        },
+        {
+            "command": "sed 's/foo/bar/W /var/lib/out.dat' input.txt",
+            "argv": ["sed", "s/foo/bar/W /var/lib/out.dat", "input.txt"],
+        },
+        {
+            "command": "sed -n 's@foo@bar@w/tmp/x' input.txt",
+            "argv": ["sed", "-n", "s@foo@bar@w/tmp/x", "input.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "sed file")
+    }
+}
+
 test_incomplete_input_documents_are_denied if {
     every document in [
         {},
