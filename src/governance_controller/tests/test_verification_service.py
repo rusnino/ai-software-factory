@@ -1020,6 +1020,46 @@ async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
             )
 
 
+async def test_finalize_current_execution_uses_populate_existing(isolated_db) -> None:
+    """#341: _finalize_current_execution refreshes the identity map before acting."""
+    _engine, session_local = isolated_db
+    task_id = "task-finalize-existing"
+    execution_id = "exec-finalize-existing"
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+            )
+        )
+        seed.add(
+            Execution(
+                id=execution_id,
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    async with session_local() as db:
+        await VerificationService._finalize_current_execution(
+            db, task_id, TaskState.FAILED
+        )
+        await db.commit()
+
+    async with session_local() as check:
+        execution = await check.scalar(
+            select(Execution).where(Execution.id == execution_id)
+        )
+        assert execution is not None
+        assert execution.state == TaskState.FAILED.value
+        assert execution.ended_at is not None
+
+
 @pytest.mark.xfail(
     strict=True,
     reason=(

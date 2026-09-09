@@ -721,6 +721,7 @@ class VerificationService:
         now = datetime.now(UTC)
         result = await db.execute(
             select(Execution)
+            .execution_options(populate_existing=True)
             .where(
                 Execution.task_id == task_id,  # type: ignore[arg-type]
                 Execution.__table__.c.state.in_(  # type: ignore[attr-defined]
