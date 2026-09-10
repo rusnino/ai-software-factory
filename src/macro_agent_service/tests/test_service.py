@@ -77,6 +77,40 @@ async def test_start_run_is_idempotent_by_controller_execution_id(
         assert len(fresh_store._runs) == 1
 
 
+async def test_collect_on_non_terminal_run_preserves_idempotency(
+    fresh_store: RunStore,
+) -> None:
+    """#353: collecting an active run must not release its idempotency key."""
+    async with _client() as client:
+        first = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-collect",
+                "objective": "Active run for idempotency",
+                "metadata": {"controller_execution_id": "exec-collect-353"},
+            },
+        )
+        first_id = first.json()["run_id"]
+
+        # Collect while still queued/non-terminal.
+        collect_resp = await client.get(f"/runs/{first_id}/collect")
+        assert collect_resp.status_code == 200
+
+        # Retry with the same controller_execution_id must return the original
+        # run, not mint a duplicate.
+        retry = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-collect",
+                "objective": "Retry after premature collect",
+                "metadata": {"controller_execution_id": "exec-collect-353"},
+            },
+        )
+        assert retry.status_code == 201
+        assert retry.json()["run_id"] == first_id
+        assert len(fresh_store._runs) == 1
+
+
 async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> None:
     """#348: a run kept for idempotency must not be evicted by capacity pressure."""
     capped = RunStore(max_runs=3)

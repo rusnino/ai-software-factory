@@ -177,9 +177,11 @@ class RunStore:
         if run is None:
             return None
         self._mark_collected(run_id)
-        # Once the Controller has collected a result it will not retry the same
-        # execution id, so the idempotency key can be released.
-        self._release_idempotency_key(run_id)
+        # Only release the idempotency key once the run has reached a terminal
+        # state. Collecting an active run (e.g., an early/speculative poll)
+        # must not break dedup for an in-flight execution (#353).
+        if run["status"] in _TERMINAL_STATUSES:
+            self._release_idempotency_key(run_id)
         return RunResult(
             run_id=run_id,
             status=run["status"],
