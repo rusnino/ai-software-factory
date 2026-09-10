@@ -152,6 +152,10 @@ class RunStore:
             return None
         if run["status"] in _TERMINAL_STATUSES:
             self._mark_collected(run_id)
+            # The Controller observes terminal status through status polling
+            # rather than collect(), so this is the real steady-state release
+            # path for idempotency protection (#350).
+            self._release_idempotency_key(run_id)
         return RunStatus(
             run_id=run_id,
             status=run["status"],

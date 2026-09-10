@@ -111,6 +111,52 @@ async def test_collect_on_non_terminal_run_preserves_idempotency(
         assert len(fresh_store._runs) == 1
 
 
+async def test_idempotency_releases_on_terminal_status_observation(
+    fresh_store: RunStore,
+) -> None:
+    """#350: terminal-status observation (not collect) must release protection."""
+    capped = RunStore(max_runs=5)
+    from macro_agent_service import main as main_module
+    from macro_agent_service import store as store_module
+
+    store_module.store = capped
+    main_module.store = capped
+
+    async with _client() as client:
+        run_ids: list[str] = []
+        for idx in range(5):
+            created = await client.post(
+                "/runs",
+                json={
+                    "task_id": f"task-cap-{idx}",
+                    "objective": "Fill capacity",
+                    "metadata": {
+                        "controller_execution_id": f"exec-cap-{idx}",
+                    },
+                },
+            )
+            run_id = created.json()["run_id"]
+            run_ids.append(run_id)
+            await client.post(f"/runs/{run_id}/cancel")
+            # Controller observes terminal status through GET, not collect().
+            await client.get(f"/runs/{run_id}")
+
+        # All 5 idempotency keys should now be released, leaving room for a new
+        # run despite the cap.
+        extra = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-extra",
+                "objective": "New run after steady-state churn",
+                "metadata": {"controller_execution_id": "exec-extra-350"},
+            },
+        )
+        assert extra.status_code == 201
+        assert len(capped._runs) == 5
+        # Oldest run was evicted; its idempotency key is gone.
+        assert run_ids[0] not in capped._runs
+
+
 async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> None:
     """#348: a run kept for idempotency must not be evicted by capacity pressure."""
     capped = RunStore(max_runs=3)
