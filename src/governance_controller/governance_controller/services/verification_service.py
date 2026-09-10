@@ -45,6 +45,8 @@ from governance_controller.services.policy_engine import (
 from governance_controller.services.state_machine import StateMachine
 from governance_controller.utils.paths import normalize_path
 
+_MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
 _logger = structlog.get_logger("governance_controller.verification")
 
 
@@ -885,6 +887,8 @@ class VerificationService:
         await db.commit()
         expected_task_version = task.version
 
+        terminal_run_id: str | None = None
+        terminal_status: str | None = None
         try:
             sandbox = profile.execution.sandbox if profile is not None else "worktree"
             max_parallel_agents = (
@@ -896,9 +900,15 @@ class VerificationService:
                 sandbox=sandbox,
                 max_parallel_agents=max_parallel_agents,
             )
-            macro_agent_run_id = MacroAgentStartResponse.model_validate(
-                result
-            ).run_id
+            start_response = MacroAgentStartResponse.model_validate(result)
+            if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
+                terminal_run_id = start_response.run_id
+                terminal_status = start_response.status
+                raise RuntimeError(
+                    f"macro-agent start returned terminal status: "
+                    f"{start_response.status}"
+                )
+            macro_agent_run_id = start_response.run_id
         except Exception as exc:
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted. Do NOT
@@ -906,10 +916,22 @@ class VerificationService:
             transitioned = await StateMachine.atomic_transition(
                 db, task, TaskState.FAILED
             )
-            failure_class = classify_macro_agent_start_exception(exc)
+            if terminal_status is not None:
+                failure_class = "accepted_response_invalid"
+                error_message = (
+                    f"macro-agent returned terminal status "
+                    f"'{terminal_status}' on start"
+                )
+                error_type = "MacroAgentTerminalStatus"
+            else:
+                failure_class = classify_macro_agent_start_exception(exc)
+                error_message = str(exc)
+                error_type = type(exc).__name__
             if transitioned:
                 execution.state = TaskState.FAILED
                 execution.ended_at = datetime.now(UTC)
+                if terminal_run_id is not None:
+                    execution.macro_agent_run_id = terminal_run_id
                 await db.flush()
                 retry_attempt = task.execution_attempts
                 retry_marker = await self._retry_pending_marker(
@@ -919,12 +941,14 @@ class VerificationService:
                 )
                 failure_payload: dict[str, object] = {
                     "execution_id": execution.id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
+                    "error": error_message,
+                    "error_type": error_type,
                     "failure_class": failure_class,
                     "verification_report": report,
                     "attempt": retry_attempt,
                 }
+                if terminal_run_id is not None:
+                    failure_payload["macro_agent_run_id"] = terminal_run_id
                 if retry_marker is not None:
                     failure_payload["pending_event_id"] = retry_marker.event_id
                 await AuditService.log(
@@ -947,8 +971,8 @@ class VerificationService:
                             "pending_event_id": retry_marker.event_id,
                             "attempt": retry_attempt,
                             "reason": "retry_execution_start_failed",
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
+                            "error": error_message,
+                            "error_type": error_type,
                             "failure_class": failure_class,
                         },
                     )

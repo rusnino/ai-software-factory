@@ -945,6 +945,83 @@ async def test_external_retry_start_failure_is_terminal_for_pending_attempt(
     assert len(terminal) == 1
 
 
+async def test_retry_start_rejects_terminal_macro_agent_status(
+    isolated_db,
+) -> None:
+    """#349: verification retry must not treat a terminal dedup hit as fresh."""
+    from governance_controller.schemas.project_profile import ProjectProfile
+
+    _engine, session_local = isolated_db
+    task_id = "task-retry-terminal-349"
+    project_id = "project-retry-terminal-349"
+
+    contract = TaskContract(
+        task_id=task_id,
+        project_id=project_id,
+        proposed_by="agent-1",
+        objective="Retry receives terminal dedup response",
+        acceptance=["retry treats terminal status as failure"],
+        execution={"timeout_minutes": 1, "max_retries": 2},
+    )
+    profile = ProjectProfile(
+        project_id=project_id,
+        repository={"path": "/tmp/retry-terminal-349"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                state=TaskState.RUNNING,
+                proposed_by=contract.proposed_by,
+                task_contract_json=contract.model_dump(mode="json"),
+                execution_attempts=1,
+                latest_macro_agent_run_id="sentinel",
+            )
+        )
+        await seed.commit()
+
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.start.return_value = {"run_id": "run-terminal-349", "status": "done"}
+
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        with pytest.raises(RuntimeError, match="terminal status"):
+            await VerificationService(executor=executor)._start_retry_execution(
+                db=db,
+                task=task,
+                contract=contract,
+                profile=profile,
+                report={"passed": False},
+            )
+        await db.commit()
+
+    async with session_local() as check:
+        task = await check.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        assert task.state == TaskState.FAILED
+
+        execution = await check.scalar(
+            select(Execution).where(Execution.task_id == task_id)
+        )
+        assert execution is not None
+        assert execution.state == TaskState.FAILED.value
+        assert execution.macro_agent_run_id == "run-terminal-349"
+
+        audit = await check.execute(
+            select(AuditLog).where(
+                AuditLog.task_id == task_id,
+                AuditLog.event_type == "retry_execution_start_failed",
+            )
+        )
+        entries = audit.scalars().all()
+        assert len(entries) == 1
+        assert entries[0].payload.get("failure_class") == "accepted_response_invalid"
+
+
 async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
     """#301: retry start failure audit distinguishes never-sent, lost-response, etc."""
     _engine, session_local = isolated_db
