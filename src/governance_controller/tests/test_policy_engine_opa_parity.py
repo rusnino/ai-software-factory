@@ -216,6 +216,29 @@ def test_opa_matches_embedded_on_sed_direct_two_address_range(
     )
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed '3r /tmp/2024/out.bin' file.txt",
+        "sed '3w /tmp/2024/out.bin' file.txt",
+        "sed '3s/foo/bar/w /tmp/2024/out.bin' file.txt",
+        "sed '1w /tmp/file1.txt' file.txt",
+        "sed '3,5w /tmp/2024/out.bin' file.txt",
+        "sed '3,/end/w /tmp/2024/out.bin' file.txt",
+        "sed '3s/a1/b/w /tmp/out.bin' file.txt",
+    ],
+)
+def test_opa_matches_embedded_on_sed_numeric_address_with_later_digit(
+    opa_path: str, command: str
+) -> None:
+    """#351: _sed_skip_digits must stop at the first non-digit, not jump ahead."""
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert opa_allowed == embedded_allowed, (
+        f"OPA/embedded divergence for {command!r}: "
+        f"embedded={embedded_allowed}, opa={opa_allowed}"
+    )
+
+
 def test_opa_denies_sed_direct_two_address_range_write(opa_path: str) -> None:
     """Regression: OPA previously allowed sed '/start/,/end/w /a/b/c'."""
     command = "sed '/start/,/end/w /tmp/a/b/out.bin' file.txt"

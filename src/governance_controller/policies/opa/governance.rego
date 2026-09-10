@@ -1986,18 +1986,23 @@ _sed_is_digit(char) if { char >= "0"; char <= "9" }
 _sed_skip_digits(script, start) := end if {
     digits := [p |
         some p in numbers.range(start, count(script) - 1)
-        _sed_is_digit(substring(script, p, 1))
+        every q in numbers.range(start, p) {
+            _sed_is_digit(substring(script, q, 1))
+        }
     ]
     count(digits) > 0
     end := digits[count(digits) - 1] + 1
 }
 
 _sed_skip_digits(script, start) := start if {
-    digits := [p |
-        some p in numbers.range(start, count(script) - 1)
-        _sed_is_digit(substring(script, p, 1))
-    ]
-    count(digits) == 0
+    not _sed_has_contiguous_digit(script, start)
+}
+
+_sed_has_contiguous_digit(script, start) if {
+    some p in numbers.range(start, count(script) - 1)
+    every q in numbers.range(start, p) {
+        _sed_is_digit(substring(script, q, 1))
+    }
 }
 
 _sed_skip_step_suffix(script, start) := end if {
