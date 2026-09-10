@@ -2205,6 +2205,43 @@ test_sed_numeric_address_with_later_digit_is_denied if {
     }
 }
 
+test_sed_forward_range_address_file_io_is_denied if {
+    every test_case in [
+        {
+            "command": "sed '/start/,+5w /tmp/out.bin' file.txt",
+            "argv": ["sed", "/start/,+5w /tmp/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '0,+0w /tmp/out.bin' file.txt",
+            "argv": ["sed", "0,+0w /tmp/out.bin", "file.txt"],
+        },
+        {
+            "command": "sed '/start/,+5r /etc/passwd' file.txt",
+            "argv": ["sed", "/start/,+5r /etc/passwd", "file.txt"],
+        },
+        {
+            "command": "sed '/start/,+5s/foo/bar/w /tmp/out.bin' file.txt",
+            "argv": ["sed", "/start/,+5s/foo/bar/w /tmp/out.bin", "file.txt"],
+        },
+    ] {
+        decision := data.governance.approve with input as object.union(
+            _base_input,
+            {
+                "commands": [test_case.command],
+                "parsed_commands": [{
+                    "raw": test_case.command,
+                    "argv": test_case.argv,
+                    "error": "",
+                }],
+            },
+        )
+
+        decision.allow == false
+        some violation in decision.violations
+        contains(lower(violation), "sed file")
+    }
+}
+
 test_incomplete_input_documents_are_denied if {
     every document in [
         {},

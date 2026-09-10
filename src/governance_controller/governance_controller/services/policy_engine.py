@@ -1095,6 +1095,11 @@ def _sed_skip_address(script: str, index: int) -> int:
         return index
     if script[index] == "$":
         return index + 1
+    if script[index] == "+":
+        index += 1
+        while index < len(script) and script[index].isdigit():
+            index += 1
+        return index
     if script[index] not in ("/", "\\"):
         return index
 

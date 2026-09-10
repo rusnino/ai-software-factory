@@ -245,3 +245,25 @@ def test_opa_denies_sed_direct_two_address_range_write(opa_path: str) -> None:
     embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
     assert embedded_allowed is False
     assert opa_allowed is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sed '/start/,+5w /tmp/out.bin' file.txt",
+        "sed '0,+0w /tmp/out.bin' file.txt",
+        "sed '/start/,+5r /etc/passwd' file.txt",
+        "sed '/start/,+5s/foo/bar/w /tmp/out.bin' file.txt",
+        "sed '/start/,+100w /tmp/out.bin' file.txt",
+    ],
+)
+def test_opa_matches_embedded_on_sed_forward_range(
+    opa_path: str, command: str
+) -> None:
+    """#352: both engines must deny GNU sed addr1,+N forward-range forms."""
+    embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
+    assert opa_allowed == embedded_allowed, (
+        f"OPA/embedded divergence for {command!r}: "
+        f"embedded={embedded_allowed}, opa={opa_allowed}"
+    )
+

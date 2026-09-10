@@ -2036,6 +2036,13 @@ _sed_skip_address(script, start) := end if {
 
 _sed_skip_address(script, start) := end if {
     start < count(script)
+    substring(script, start, 1) == "+"
+    digits_end := _sed_skip_digits(script, start + 1)
+    end := max([digits_end, start + 1])
+}
+
+_sed_skip_address(script, start) := end if {
+    start < count(script)
     substring(script, start, 1) == "/"
     positions := _sed_unescaped_delimiters(script, "/", start)
     count(positions) >= 1
@@ -2060,6 +2067,7 @@ _sed_skip_address(script, start) := start if {
     char := substring(script, start, 1)
     not _sed_is_digit(char)
     not char == "$"
+    not char == "+"
     not char == "/"
     not char == "\\"
 }
