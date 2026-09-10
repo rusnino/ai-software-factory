@@ -53,3 +53,7 @@ class Task(SQLModel, table=True):
         default=None,
         sa_column=Column("plane_issue_id", String, nullable=True, index=True),
     )
+    macro_agent_idempotency_key: str | None = Field(
+        default=None,
+        sa_column=Column("macro_agent_idempotency_key", String, nullable=True),
+    )

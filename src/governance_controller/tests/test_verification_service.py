@@ -1022,6 +1022,75 @@ async def test_retry_start_rejects_terminal_macro_agent_status(
         assert entries[0].payload.get("failure_class") == "accepted_response_invalid"
 
 
+async def test_retry_start_reuses_idempotency_key_after_orphan_loss(
+    isolated_db,
+) -> None:
+    """#301: verification retry reuses the prior execution id as dedup key."""
+    from governance_controller.schemas.project_profile import ProjectProfile
+
+    _engine, session_local = isolated_db
+    task_id = "task-retry-idempotency-301"
+    project_id = "project-retry-idempotency-301"
+    prior_key = "exec-orphan-301"
+
+    contract = TaskContract(
+        task_id=task_id,
+        project_id=project_id,
+        proposed_by="agent-1",
+        objective="Recover orphan macro-agent run",
+        acceptance=["retry uses same controller_execution_id"],
+        execution={"timeout_minutes": 1, "max_retries": 2},
+    )
+    profile = ProjectProfile(
+        project_id=project_id,
+        repository={"path": "/tmp/retry-idempotency-301"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                state=TaskState.RUNNING,
+                proposed_by=contract.proposed_by,
+                task_contract_json=contract.model_dump(mode="json"),
+                execution_attempts=1,
+                latest_macro_agent_run_id="sentinel",
+                macro_agent_idempotency_key=prior_key,
+            )
+        )
+        await seed.commit()
+
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.start.return_value = {"run_id": "run-recovered-301"}
+
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        result = await VerificationService(executor=executor)._start_retry_execution(
+            db=db,
+            task=task,
+            contract=contract,
+            profile=profile,
+            report={"passed": False},
+        )
+        assert result is True
+        await db.commit()
+
+    passed_key = executor.start.call_args.kwargs.get(
+        "controller_execution_id"
+    ) or executor.start.call_args.args[1]
+    assert passed_key == prior_key
+
+    async with session_local() as check:
+        execution = await check.scalar(
+            select(Execution).where(Execution.task_id == task_id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == "run-recovered-301"
+
+
 async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
     """#301: retry start failure audit distinguishes never-sent, lost-response, etc."""
     _engine, session_local = isolated_db

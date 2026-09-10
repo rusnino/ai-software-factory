@@ -887,6 +887,11 @@ class VerificationService:
         await db.commit()
         expected_task_version = task.version
 
+        # Reuse the idempotency key from a prior lost-response attempt if one
+        # is still pending; otherwise seed a fresh key for this attempt.
+        if task.macro_agent_idempotency_key is None:
+            task.macro_agent_idempotency_key = execution.id
+
         terminal_run_id: str | None = None
         terminal_status: str | None = None
         try:
@@ -896,7 +901,7 @@ class VerificationService:
             )
             result = await self.executor.start(
                 contract,
-                execution.id,
+                task.macro_agent_idempotency_key,
                 sandbox=sandbox,
                 max_parallel_agents=max_parallel_agents,
             )
@@ -909,6 +914,8 @@ class VerificationService:
                     f"{start_response.status}"
                 )
             macro_agent_run_id = start_response.run_id
+            # Run successfully correlated; future retries need a fresh key.
+            task.macro_agent_idempotency_key = None
         except Exception as exc:
             # If the retry cannot even start, the task cannot recover on its
             # own; move it to terminal FAILED so humans are alerted. Do NOT
@@ -927,6 +934,15 @@ class VerificationService:
                 failure_class = classify_macro_agent_start_exception(exc)
                 error_message = str(exc)
                 error_type = type(exc).__name__
+
+            # Preserve the idempotency key only when a macro-agent run may have
+            # been created without a usable response (#301, #349).
+            if task.macro_agent_idempotency_key is not None and failure_class not in {
+                "orphan_suspected",
+                "accepted_response_invalid",
+            }:
+                task.macro_agent_idempotency_key = None
+
             if transitioned:
                 execution.state = TaskState.FAILED
                 execution.ended_at = datetime.now(UTC)

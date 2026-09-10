@@ -244,6 +244,41 @@ class TestApprovalServiceStateTransitions:
         previous = ready_changes[0].payload.get("previous_state")
         assert previous == TaskState.EXEC_APPROVED.value
 
+    async def test_execution_start_orphan_failure_preserves_idempotency_key(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#301: a lost response keeps the execution id as a dedup key for retry."""
+        import httpx
+
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+        contract = _make_contract()
+        profile = _make_profile()
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+
+        with pytest.raises(RuntimeError, match="macro-agent start failed"):
+            await service.approve(
+                task=task,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="telegram",
+                actor="admin",
+                idempotency_key="key-orphan-301",
+            )
+
+        await db_session.refresh(task)
+        assert task.macro_agent_idempotency_key is not None
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert task.macro_agent_idempotency_key == execution.id
+
     async def test_execution_start_failure_classifies_orphan_risk(
         self,
         service: ApprovalService,

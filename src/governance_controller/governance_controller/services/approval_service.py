@@ -568,12 +568,17 @@ class ApprovalService:
         if opentasks_dag is not None:
             contract.opentasks_dag = opentasks_dag
 
+        # Seed the idempotency key for this execution attempt. If the start
+        # response is lost but the macro-agent accepted the run, retries reuse
+        # this key to recover the same run_id instead of creating a duplicate.
+        task.macro_agent_idempotency_key = execution.id
+
         terminal_run_id: str | None = None
         terminal_status: str | None = None
         try:
             result = await self.executor.start(
                 contract,
-                execution.id,
+                task.macro_agent_idempotency_key,
                 sandbox=profile.execution.sandbox,
                 max_parallel_agents=profile.execution.max_parallel_agents,
             )
@@ -590,6 +595,9 @@ class ApprovalService:
                     f"{start_response.status}"
                 )
             macro_agent_run_id = start_response.run_id
+            # The run is successfully correlated; a fresh key is needed for any
+            # future, genuinely distinct execution attempt.
+            task.macro_agent_idempotency_key = None
         except Exception as exc:  # pragma: no cover - broad error shield
             transitioned = await StateMachine.atomic_transition(
                 self.db, task, TaskState.FAILED
@@ -613,6 +621,14 @@ class ApprovalService:
                 failure_class = classify_macro_agent_start_exception(exc)
                 error_message = str(exc)
                 error_type = type(exc).__name__
+
+            # Preserve the idempotency key only when a macro-agent run may have
+            # been created without a usable response (#301, #349).
+            if task.macro_agent_idempotency_key is not None and failure_class not in {
+                "orphan_suspected",
+                "accepted_response_invalid",
+            }:
+                task.macro_agent_idempotency_key = None
 
             payload: dict[str, object] = {
                 "approval_type": ApprovalType.EXECUTION.value,
