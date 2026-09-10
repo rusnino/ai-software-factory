@@ -56,22 +56,24 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-09): Phase 2 is NOT gate-clean — `#301` has now been falsely closed TWICE.** Round
-22 found the macro-agent-side idempotency fix (`d9578ea`) is real and correct in isolation (genuine
-`controller_execution_id` dedup, live-verified under concurrency), but the Controller never sends the
-same id twice — `approval_service.py`/`verification_service.py` both mint a fresh `Execution` UUID on
-every retry, so the new dedup logic never actually triggers end-to-end. Reopened again with a live
-repro proving two different `run_id`s from the same simulated retry. Separately, `#344`/`#345`
-(round 21's two OPA fail-open findings) are CONFIRMED genuinely fixed with proven pre/post
-differentiation — but the fresh-angle sweep found the identical "Rego helper undefined on certain
-inputs → deny rule silently doesn't fire" shape a FOURTH time: `#347` (HIGH), the sibling direct-sed
-`r`/`w` command path that `#345`'s fix didn't also cover. Four instances of one root cause in a week,
-each fixed the same day it's found, each immediately followed by a sibling — the previously-suggested
-dedicated Rego-helper audit is now overdue. `#346` confirmed fixed with fault-injection proof. Two new
-findings sit directly downstream of `#301`'s remaining work: `#348` (MEDIUM, macro-agent's own run
-eviction silently defeats the just-shipped dedup contract once the store fills up) and `#349` (LOW,
-the Controller never reads a dedup hit's `status`, so a stale terminal run could be mistaken for
-fresh). Total open: 4 (`#301`, `#347` HIGH, `#348` MEDIUM, `#349` LOW), 0 CRITICAL.
+**Status (2026-09-10): Phase 2 is NOT gate-clean — 6 open issues, the worst count since round 18.**
+`#301` remains exactly as broken as round 22 left it (Controller still mints a fresh `Execution` UUID
+on every retry) — it briefly showed auto-closed at the start of round 23 purely because round 22's own
+docs commit contained the literal phrase "fixes #301" inside a sentence describing unfinished work,
+which GitHub's keyword scanner matched; reopened immediately, no code changed. `#347` (round 22's OPA
+sed-range finding) is CONFIRMED genuinely fixed, but the required sibling sweep found a FIFTH instance
+of the "Rego helper wrong/undefined → deny rule silently doesn't fire" class with the broadest blast
+radius yet: `#351` (HIGH, `_sed_skip_digits` overshoots past any numeric sed address followed by a
+later digit anywhere in the script) and `#352` (CRITICAL, provisional — the GNU `addr1,+N` sed address
+form is unrecognized by BOTH backends, not just OPA, meaning it may be live-exploitable through the
+primary embedded engine, not just the optional OPA path every prior sibling in this family was shielded
+by). `#348`'s original defect is fixed, but its own eviction-protection mechanism has no working
+release path in production — filed as `#350` (HIGH): guaranteed permanent 503 on all new run creation
+once usage exceeds capacity, worse than the bug it replaced. `#349` reopened: only half-fixed
+(`approval_service.py` yes, `verification_service.py`'s retry path no — identical bug reproduced
+through that entry point). New finding `#353` (MEDIUM) shows any naive fix for `#350` via wiring up
+`collect()` calls would reintroduce `#301`'s original defect unless gated on terminal status. Total
+open: 6 (`#301` HIGH, `#350` HIGH, `#351` HIGH, `#352` CRITICAL-provisional, `#353` MEDIUM, `#349` LOW).
 
 Round 21 (superseded by the above): opencode closed all 5 of round 20's remaining issues same-day;
 found `#301` was a false close the first time (classification-only, no dedup mechanism at all) and

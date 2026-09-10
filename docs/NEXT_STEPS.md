@@ -1,6 +1,57 @@
 # Next Steps
 
-## Current State (2026-09-09) — Round 22
+## Current State (2026-09-10) — Round 23
+
+**6 open issues — the worst count since round 18, though 0 of them are re-broken prior fixes.** Scope
+was `git log eddf201..origin/main` (3 commits: `8f36c9c`, `1ac1a23`, `9795cf5`). One important process
+note first: `#301` showed as auto-closed at the start of this round even though none of the 3 commits
+touch it — this was a self-inflicted false positive from the PREVIOUS round's own docs commit
+(`eddf201`), whose body contained the English sentence "...finally fixes #301 end-to-end," which
+GitHub's keyword scanner matched as an auto-close trigger despite describing unfinished work. Reopened
+immediately; `#301` remains exactly as broken as round 22 left it (`approval_service.py:529` and
+`verification_service.py:824` still mint a fresh `Execution` UUID on every retry). **Lesson for future
+docs commits: never write the literal string "fixes #&lt;number&gt;" adjacent to an issue number unless
+actually closing it.**
+
+Of the 3 real commits:
+- **`#347` (HIGH) CONFIRMED FIXED** — live pre-fix/post-fix differentiation against the real `opa`
+  binary on all 6 issue reproductions, using an ephemeral worktree. But the required sweep found a
+  **5th instance** of the same "Rego helper wrong/undefined → deny rule silently doesn't fire" class,
+  broader blast radius than any prior one: `#351` (HIGH) — `_sed_skip_digits` collects every digit
+  position anywhere later in the script instead of a contiguous run, so ANY numeric sed address
+  followed by any digit later in the script (e.g. a file path containing a year or port number)
+  overshoots past the real command character. Separately, `#352` (CRITICAL, provisional pending
+  confirmation) — the GNU `addr1,+N` forward-range address form is unrecognized by **both** backends,
+  not just OPA — unlike every prior sibling in this family, this one isn't shielded by "the embedded
+  engine evaluates first," because the embedded engine has the same gap.
+- **`#348` (MEDIUM) — original defect CONFIRMED FIXED, but the fix creates a worse new bug.** The
+  eviction-protection mechanism correctly prevents silent duplicate runs, but has no working release
+  path in production (`RunStore.collect()` is dead code on the Controller side) — filed as `#350`
+  (HIGH): every run becomes permanently un-evictable, so the store guaranteed-permanently 503s all new
+  run creation once normal usage exceeds capacity. Trades an occasional silent bug for a total,
+  permanent outage.
+- **`#349` (LOW) — REOPENED, partially fixed.** `approval_service.py`'s initial-start path correctly
+  rejects a terminal-status dedup hit (confirmed live, fault-injection proved). But
+  `verification_service.py`'s retry-start path was never touched — live-reproduced the identical bug
+  through that entry point instead.
+- **New finding from the fresh-angle pass, directly related to `#350`**: `#353` (MEDIUM) —
+  `RunStore.collect()` releases the idempotency-protection mapping unconditionally, even on a
+  non-terminal run — a naive fix for `#350` (wiring up `collect()` calls without a status gate) would
+  just relocate this exposure rather than close it.
+- A broad differential fuzz of `find`/`npm`/`pnpm`/`pip`/`docker.sock`/`tar` command families (not
+  previously swept) found zero new embedded-vs-OPA divergences. `governance.rego`'s naive `_shlex_split`
+  fallback tokenizer was investigated as a candidate 6th instance of the family and confirmed safely
+  dead code — the input-shape validation rule fails closed whenever `parsed_commands` doesn't match,
+  and the Controller always supplies a matching entry.
+
+**Total open: 6** — `#301` (HIGH), `#350` (HIGH), `#351` (HIGH), `#352` (CRITICAL, provisional),
+`#353` (MEDIUM), `#349` (LOW).
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 22 State
 
 **`#301` false-closed a SECOND time; the OPA fail-open defect class found a FOURTH sibling.** Scope was
 `git log bfb9ca3..origin/main` (4 commits: `a75c64e`, `56b98db`, `d9578ea`, `6c39087`). opencode reported
