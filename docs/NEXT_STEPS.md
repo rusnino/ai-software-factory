@@ -1,6 +1,50 @@
 # Next Steps
 
-## Current State (2026-09-10) — Round 23
+## Current State (2026-09-11) — Round 24
+
+**`#301` and `#350` reopened a 4th and 2nd time respectively — the closing commits are real, correct
+plumbing that is simply never reached in production.** Scope was `git log 791df2d..origin/main` (6
+commits). opencode closed all 6 open issues; 4 hold up, 2 don't, and a related HIGH gap was found in
+a third code path neither touched fix covered.
+
+- **`#301`**: the new `Task.macro_agent_idempotency_key` field is correctly seeded, preserved across
+  an orphan-suspected failure, and would be correctly reused on a subsequent start — proven with
+  genuine pre-fix/post-fix test differentiation. But both call sites that hit this preservation logic
+  then unconditionally transition the Task to `FAILED`, a terminal state with zero outgoing
+  transitions system-wide (`state_machine.py:35`), and neither recovery poller
+  (`_poll_execution_start_pending`, `_poll_verification_retry_pending`) ever sees a `FAILED` task
+  again. Live-reproduced end to end with a real macro-agent subprocess: the external run is created,
+  the Controller task dies `FAILED`, the preserved key is never consumed by anything — no duplicate
+  run gets created, but only because no retry ever happens at all. Same core harm (an accepted
+  macro-agent run becomes permanently uncorrelated), different shape.
+- **`#350`**: the release-on-terminal-status logic only lives inside the post-execution-timeout
+  poller path (`_poll_running`, gated on `now >= deadline`). The dominant real-world completion
+  path — a task finishing normally via the `landing:completed` webhook, well within its timeout —
+  never polls macro-agent status at all, so the release never fires. Live-reproduced the original
+  permanent-503 failure against the real `RunStore` using only the wiring paths the real Controller
+  actually exercises for on-time completions (no GET call).
+- **New finding, same lifecycle, a THIRD leaking path**: a fresh-angle pass found `RunStore.cancel()`
+  (used by the Controller's only CAS-loss cleanup path) also never releases its idempotency-key
+  protection — filed as `#354` (HIGH). CAS races are routine, heavily-tested behavior in this
+  codebase, so this leak accumulates continuously in any long-running deployment.
+- **`#349` and `#351`/`#352` all CONFIRMED genuinely fixed**, each with proven pre-fix/post-fix
+  differentiation on ephemeral worktrees. `#352`'s original CRITICAL rating was independently
+  re-confirmed correct (not a false premise) — pre-fix, the embedded/primary engine really was
+  vulnerable to the `addr1,+N` form, not just the optional OPA backend. An exhaustive 140-combination
+  differential sweep of the full GNU sed address grammar found zero further divergence — this defect
+  family (6 instances since round 20) appears genuinely closed now.
+- A minor test-coverage gap was also filed as `#355` (LOW): `#352`'s Python-side regression test only
+  asserts the two engines agree with each other, not that either one is actually correct — it would
+  pass even if both fixes were reverted together.
+
+**Total open: 4** — `#301` (HIGH, reopened 4th time), `#350` (HIGH, reopened again), `#354` (HIGH),
+`#355` (LOW).
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 23 State
 
 **6 open issues — the worst count since round 18, though 0 of them are re-broken prior fixes.** Scope
 was `git log eddf201..origin/main` (3 commits: `8f36c9c`, `1ac1a23`, `9795cf5`). One important process

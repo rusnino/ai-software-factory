@@ -56,24 +56,19 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-10): Phase 2 is NOT gate-clean — 6 open issues, the worst count since round 18.**
-`#301` remains exactly as broken as round 22 left it (Controller still mints a fresh `Execution` UUID
-on every retry) — it briefly showed auto-closed at the start of round 23 purely because round 22's own
-docs commit contained the literal phrase "fixes #301" inside a sentence describing unfinished work,
-which GitHub's keyword scanner matched; reopened immediately, no code changed. `#347` (round 22's OPA
-sed-range finding) is CONFIRMED genuinely fixed, but the required sibling sweep found a FIFTH instance
-of the "Rego helper wrong/undefined → deny rule silently doesn't fire" class with the broadest blast
-radius yet: `#351` (HIGH, `_sed_skip_digits` overshoots past any numeric sed address followed by a
-later digit anywhere in the script) and `#352` (CRITICAL, provisional — the GNU `addr1,+N` sed address
-form is unrecognized by BOTH backends, not just OPA, meaning it may be live-exploitable through the
-primary embedded engine, not just the optional OPA path every prior sibling in this family was shielded
-by). `#348`'s original defect is fixed, but its own eviction-protection mechanism has no working
-release path in production — filed as `#350` (HIGH): guaranteed permanent 503 on all new run creation
-once usage exceeds capacity, worse than the bug it replaced. `#349` reopened: only half-fixed
-(`approval_service.py` yes, `verification_service.py`'s retry path no — identical bug reproduced
-through that entry point). New finding `#353` (MEDIUM) shows any naive fix for `#350` via wiring up
-`collect()` calls would reintroduce `#301`'s original defect unless gated on terminal status. Total
-open: 6 (`#301` HIGH, `#350` HIGH, `#351` HIGH, `#352` CRITICAL-provisional, `#353` MEDIUM, `#349` LOW).
+**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 4th time, `#350` a 2nd.** Round
+23's `#347`/`#349`/`#351`/`#352`/`#353` batch is now fully confirmed genuine (`#352`'s CRITICAL rating
+independently re-verified correct — the embedded engine really was vulnerable pre-fix, not just OPA —
+and an exhaustive 140-combination sed-address sweep found zero further divergence in that family).
+But round 24's `#301`/`#350` closing commits, while real and well-tested in isolation, turned out to
+be correct machinery that production never actually reaches: `#301`'s preserved idempotency key is
+never consumed because both call sites that would reuse it instead transition the Task to `FAILED`, a
+terminal state with no outgoing transitions and no recovery poller watching it; `#350`'s release logic
+only lives in the post-timeout poller path, which the dominant on-time-completion route never
+exercises. Both reopened with live end-to-end reproduction using a real macro-agent subprocess. A
+fresh-angle pass found a third instance of the same leak in `RunStore.cancel()` (the Controller's only
+CAS-loss cleanup path) — filed as `#354` (HIGH). A minor test-coverage gap in `#352`'s Python parity
+test was also filed (`#355`, LOW). Total open: 4 (`#301` HIGH, `#350` HIGH, `#354` HIGH, `#355` LOW).
 
 Round 21 (superseded by the above): opencode closed all 5 of round 20's remaining issues same-day;
 found `#301` was a false close the first time (classification-only, no dedup mechanism at all) and
