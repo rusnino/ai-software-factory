@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from governance_controller.api import approvals as approvals_api
@@ -114,6 +115,23 @@ async def _pool_timeout_exception_handler(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"detail": "Database pool exhausted, retry later"},
         headers={"Retry-After": "2"},
+    )
+
+
+@app.exception_handler(ValidationError)
+async def _pydantic_validation_exception_handler(
+    _request: Request,
+    exc: ValidationError,
+) -> JSONResponse:
+    """Return 422 for any manual pydantic model construction that fails.
+
+    Endpoints that construct models outside FastAPI's request validation
+    (e.g. intake adapters) rely on this catch-all so a validation failure
+    becomes a clean client error instead of a raw 500 (#356).
+    """
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors(include_url=False)},
     )
 
 

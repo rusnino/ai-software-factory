@@ -7,7 +7,8 @@ pre-fetched and validated email JSON.
 
 from typing import Any
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
+from starlette.status import HTTP_422_UNPROCESSABLE_CONTENT
 
 from governance_controller.schemas.intake import RawIdea
 
@@ -15,18 +16,41 @@ from governance_controller.schemas.intake import RawIdea
 class EmailAdapter:
     """Translate a parsed email payload into a RawIdea."""
 
+    # Mirrors RawIdea field constraints so failures surface as 422 instead of
+    # leaking an uncaught pydantic.ValidationError as 500 (#356).
+    _MAX_LENGTH: dict[str, int] = {
+        "message_id": 256,
+        "from": 256,
+        "subject": 256,
+        "body_text": 16384,
+    }
+
     @staticmethod
     def _coerce(value: Any, field: str) -> str:
-        """Return a cleaned string, raising 422 for non-string values (#258)."""
-        if isinstance(value, str):
-            return value
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Email field {field!r} must be a string, "
-                f"got {type(value).__name__}"
-            ),
-        )
+        """Return a cleaned string, raising 422 for malformed values (#258, #356)."""
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Email field {field!r} must be a string, "
+                    f"got {type(value).__name__}"
+                ),
+            )
+        if not value:
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=f"Email field {field!r} must not be empty",
+            )
+        max_length = EmailAdapter._MAX_LENGTH.get(field, 16384)
+        if len(value) > max_length:
+            raise HTTPException(
+                status_code=HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"Email field {field!r} exceeds maximum length "
+                    f"{max_length}"
+                ),
+            )
+        return value
 
     @staticmethod
     def parse(payload: dict[str, Any]) -> RawIdea:

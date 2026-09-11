@@ -437,6 +437,74 @@ async def test_intake_email_rejects_oversized_body(
     assert response.status_code == 413
 
 
+async def test_intake_email_rejects_empty_body(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#356: empty email fields must return 422, not 500."""
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    response = await async_client.post(
+        "/intake/email",
+        json={
+            "message_id": "msg-empty",
+            "from": {"address": "bob@example.com"},
+            "subject": "Feature request",
+            "body_text": "",
+        },
+        headers={"X-Intake-Secret": "secret"},
+    )
+    assert response.status_code == 422
+
+
+async def test_intake_email_rejects_oversized_body_under_global_cap(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#356: a single field over RawIdea's max_length returns 422, not 500."""
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    response = await async_client.post(
+        "/intake/email",
+        json={
+            "message_id": "msg-oversized",
+            "from": {"address": "bob@example.com"},
+            "subject": "Feature request",
+            "body_text": "A" * 20_000,
+        },
+        headers={"X-Intake-Secret": "secret"},
+    )
+    assert response.status_code == 422
+
+
+async def test_intake_telegram_media_without_caption(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#356: ordinary media messages without text/caption must not 500."""
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "secret",
+    )
+    response = await async_client.post(
+        "/intake/telegram",
+        json={
+            "message": {
+                "message_id": 5,
+                "from": {"username": "alice", "id": 42},
+                "photo": [{"file_id": "abc"}],
+            }
+        },
+        headers={
+            "X-Telegram-Bot-Api-Secret-Token": "secret",
+            "X-Intake-Secret": "secret",
+        },
+    )
+    assert response.status_code == 200
+
+
 async def test_intake_telegram_rejects_oversized_body(
     async_client: AsyncClient,
     fake_ingestion: _FakeIngestionService,

@@ -178,6 +178,29 @@ async def telegram_intake(
     message = TelegramAdapter._extract_message(update)
     text = TelegramAdapter._extract_text(message)
 
+    # Telegram updates for media without a caption arrive with an empty text.
+    # Synthesize a placeholder so that ordinary bot traffic does not crash the
+    # intake pipeline (#356).
+    if not text:
+        media_type = next(
+            (
+                key
+                for key in (
+                    "photo",
+                    "sticker",
+                    "voice",
+                    "video",
+                    "document",
+                    "location",
+                    "poll",
+                    "contact",
+                )
+                if key in message
+            ),
+            "message",
+        )
+        text = f"(no text — message type: {media_type})"
+
     if text.startswith("/approve"):
         result = await adapter.process_update(
             update,
