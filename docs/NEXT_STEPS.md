@@ -1,6 +1,54 @@
 # Next Steps
 
-## Current State (2026-09-11) — Round 27
+## Current State (2026-09-11) — Round 28
+
+**`#357` and `#358` both confirmed genuinely fixed with genuine tests. `#301` reopened an 8th time —
+again zero new code, comment-only close, same already-reviewed commit re-cited. A fresh-angle sweep
+of the very files the `#358` fix touched found a new HIGH: the `#301` recovery machinery itself has a
+sibling of the CAS-loss-leak bug that `#262` already fixed once, in *two* call sites.** Scope was
+`git log e53c6ae..origin/main` (2 commits: `f0d8961` for `#357`, `f614f06` for `#358`).
+
+- **`#301`**: `git log` showed exactly 2 commits in range, neither touching
+  `approval_service.py`'s `_try_recover_orphaned_run`, `verification_service.py`'s equivalent, or
+  `stuck_execution_poller.py`. Yet the issue was closed again by comment, re-citing `cf46044` — the
+  same commit reviewed and found incomplete in rounds 26 and 27. Reopened with the same two
+  live-reproduced residual windows restated (double response-loss; poller-CAS race), and this time
+  the reopen comment spells out a concrete suggested diff directly (give `StuckExecutionPoller` its
+  own orphan-recovery lookup before declaring a grace-window-expired execution FAILED), since
+  restating the evidence twice has not produced a code change.
+- **`#357` CONFIRMED genuinely fixed** — `_revert_plane_state`'s two exception-suppression blocks are
+  now fully independent across all 11 rejection call sites; verified the shipped regression test
+  genuinely fails pre-fix/passes post-fix via worktree, plus an out-of-band probe on a second call
+  site (not just the one the test covers) to confirm the fix is structural, not path-specific.
+- **`#358` CONFIRMED genuinely fixed** — the sweeper's new state-matching fallback correctly keys on
+  task **and** target state (not just task), correctly ignores later completed markers for a
+  *different* target state (verified live: seeded a stuck marker targeting FAILED plus a later
+  completed marker targeting BLOCKED — correctly not resolved), and correctly resolves multiple stuck
+  markers on the same task independently. One LOW cosmetic `ruff format` nit in
+  `reconciliation_service.py` noted but not filed (doesn't fail CI, which only runs `ruff check`).
+- **New finding — `#359` (HIGH)**: `ApprovalService._try_recover_orphaned_run` (the `#301` recovery
+  path added by `1d4e1dc`) confirms a live macro-agent run exists by idempotency-key lookup, but if
+  its own CAS to `RUNNING` then loses (e.g. the poller's READY-timeout sweep or a cancellation wins
+  first), it just returns `False` without setting `execution.cancellation_pending = True` — unlike the
+  structurally identical CAS-loss branch in the non-recovery happy path, which already handles this
+  correctly (the original `#262` fix). The now-FAILED execution's `cancellation_pending` stays
+  `False`, and `StuckExecutionPoller._poll_pending_cancellations` only ever looks at executions with
+  `cancellation_pending IS TRUE` — so the just-discovered, genuinely live macro-agent run leaks
+  forever: nothing in the system can ever find or cancel it again. Live-reproduced against real
+  Postgres with a concurrent session winning the task CAS mid-recovery. A sweep of
+  `verification_service.py`'s sibling `_try_recover_orphaned_run` (the retry-path equivalent) found
+  the identical shape at its own CAS-loss branch (manual `UPDATE ... WHERE version = ...` losing) —
+  filed as part of the same issue, both call sites need the fix in one commit per the Regression
+  Coverage Policy's sweep requirement.
+
+**Total open: 2** — `#301` (HIGH, reopened 8th time, unchanged), `#359` (HIGH, new). Zero MEDIUM/LOW
+open for the first time in a long while — `#357`/`#358` both closed genuinely.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 27 State
 
 **`#156` confirmed genuinely fixed. `#301` reopened a 7th time — but this time with no new code at
 all: opencode closed it by comment only, citing the same commit already reviewed and found
@@ -34,10 +82,6 @@ incomplete last round, without addressing either documented residual gap.** Scop
     Compounds operationally since the sweep's fixed-size batch has no way to skip known-stuck rows.
 
 **Total open: 3** — `#301` (HIGH, reopened 7th time, unchanged), `#358` (MEDIUM), `#357` (LOW).
-
-```bash
-gh issue list --repo rusnino/ai-software-factory --state open
-```
 
 ## Historical Round 26 State
 

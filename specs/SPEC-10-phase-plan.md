@@ -56,20 +56,26 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 7th time with no new code at
-all.** opencode closed it by comment only this round, re-citing the same commit round 26 already
-reviewed and found leaves 2 specific live-reproduced windows open (double response-loss; a race
-against `StuckExecutionPoller._poll_ready`) — neither was addressed, so it was reopened with the same
-evidence restated. `#156` is now CONFIRMED genuinely fixed, verified across 5 distinct rejection paths
-including the legacy-payload edge case. Two new findings landed alongside it: `#357` (LOW) — the
-`#156` fix coupled the revert call and the rejection comment under one exception suppressor, so a
-Plane API failure on revert now also silently drops the comment that used to post unconditionally —
-and `#358` (MEDIUM) — the `plane_projection_pending` sweeper's resolve heuristic for
-`update_state`/`reconciliation_state_fix` markers checks `Task.state` drift, but a successful fix by
-design never changes `Task.state` (only Plane's display), so these marker types can never be
-genuinely self-healed by this mechanism; live-reproduced with a real subsequent successful fix
-leaving the original orphan marker permanently unresolved. Total open: 3 (`#301` HIGH, `#358`
-MEDIUM, `#357` LOW).
+**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened an 8th time, again with no new
+code, and a fresh-angle sweep found a real sibling bug inside the `#301` recovery machinery itself.**
+`#357` and `#358` are both CONFIRMED genuinely fixed this round (structural fix verified across
+multiple call sites for each, real pre-fix-fail/post-fix-pass regression tests, adversarial edge
+cases probed live and found correctly handled). `#301` was closed again by comment only — zero
+commits in this round's range touch its code — re-citing the same already-twice-reviewed `cf46044`;
+reopened with the same two residual windows restated, this time with a concrete suggested diff
+spelled out directly. New finding `#359` (HIGH): `_try_recover_orphaned_run` (the very recovery path
+`#301` is about) confirms a live macro-agent run by idempotency lookup, but if its own CAS to
+`RUNNING` then loses, it returns `False` without marking the execution for cleanup — unlike the
+structurally identical CAS-loss branch in the non-recovery happy path, which the earlier `#262` fix
+already got right. The just-recovered, genuinely live run then leaks forever, invisible to the
+cancellation-cleanup poller. Found in both `approval_service.py`'s and `verification_service.py`'s
+copies of the method — filed as one issue covering both call sites per the Regression Coverage
+Policy's sibling-sweep requirement. Total open: 2 (`#301` HIGH, `#359` HIGH) — zero MEDIUM/LOW open
+for the first time in many rounds.
+
+Round 27 (superseded by the above): `#301` reopened a 7th time with no new code at all — closed by
+comment only, re-citing the same commit already reviewed and found incomplete. `#156` confirmed
+genuinely fixed across 5 rejection paths. `#357`/`#358` first filed.
 
 Round 26 (superseded by the above): `#301` reopened a 6th time (narrowed to 2 specific residual
 windows after real architectural progress — the first of six attempts to get the core recovery
