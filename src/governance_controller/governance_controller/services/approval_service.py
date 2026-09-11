@@ -469,6 +469,54 @@ class ApprovalService:
             raise PolicyViolationError(message, violations=policy_violations)
         raise ValueError(message)
 
+    async def _try_recover_orphaned_run(
+        self,
+        task: Task,
+        execution: object,
+        controller_execution_id: str,
+        actor: str,
+        source: str,
+    ) -> bool:
+        """Recover a macro-agent run whose start response was lost (#301).
+
+        Returns True if an active run was found by idempotency key and the
+        local execution/task were successfully advanced to RUNNING. The caller
+        must return immediately without failing the task.
+        """
+        try:
+            lookup_result = await self.executor.lookup(controller_execution_id)
+        except Exception:
+            return False
+        if lookup_result is None:
+            return False
+        try:
+            start_response = MacroAgentStartResponse.model_validate(lookup_result)
+        except Exception:
+            return False
+        if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
+            return False
+        execution.state = TaskState.RUNNING  # type: ignore[attr-defined]
+        execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
+        await self.db.flush()
+        if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
+            return False
+        task.macro_agent_idempotency_key = None
+        await AuditService.log(
+            db=self.db,
+            event_type="execution_start_recovered",
+            task_id=task.id,
+            actor=actor,
+            source=source,
+            execution_id=execution.id,  # type: ignore[attr-defined]
+            payload={
+                "execution_id": execution.id,  # type: ignore[attr-defined]
+                "macro_agent_run_id": start_response.run_id,
+                "controller_execution_id": controller_execution_id,
+            },
+        )
+        await self.db.commit()
+        return True
+
     async def _trigger_execution(
         self,
         task: Task,
@@ -601,17 +649,6 @@ class ApprovalService:
             # future, genuinely distinct execution attempt.
             task.macro_agent_idempotency_key = None
         except Exception as exc:  # pragma: no cover - broad error shield
-            transitioned = await StateMachine.atomic_transition(
-                self.db, task, TaskState.FAILED
-            )
-            # The external start failed, so this local execution is terminal
-            # regardless of whether another writer won the task CAS.
-            execution.state = TaskState.FAILED
-            execution.ended_at = datetime.now(UTC)
-            if terminal_run_id is not None:
-                execution.macro_agent_run_id = terminal_run_id
-            await self.db.flush()
-
             if terminal_status is not None:
                 failure_class = "accepted_response_invalid"
                 error_message = (
@@ -623,6 +660,34 @@ class ApprovalService:
                 failure_class = classify_macro_agent_start_exception(exc)
                 error_message = str(exc)
                 error_type = type(exc).__name__
+
+            # If the start response was lost but a run was actually created,
+            # recover it by idempotency key instead of failing the execution.
+            if (
+                terminal_status is None
+                and failure_class in {"orphan_suspected", "accepted_response_invalid"}
+                and task.macro_agent_idempotency_key is not None
+            ):
+                recovered = await self._try_recover_orphaned_run(
+                    task,
+                    execution,
+                    task.macro_agent_idempotency_key,
+                    actor,
+                    source,
+                )
+                if recovered:
+                    return task
+
+            transitioned = await StateMachine.atomic_transition(
+                self.db, task, TaskState.FAILED
+            )
+            # The external start failed, so this local execution is terminal
+            # regardless of whether another writer won the task CAS.
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            if terminal_run_id is not None:
+                execution.macro_agent_run_id = terminal_run_id
+            await self.db.flush()
 
             # Preserve the idempotency key only when a macro-agent run may have
             # been created without a usable response (#301, #349).

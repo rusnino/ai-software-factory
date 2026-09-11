@@ -1064,6 +1064,7 @@ async def test_retry_start_reuses_idempotency_key_after_orphan_loss(
 
     executor = AsyncMock(spec=MacroAgentExecutor)
     executor.start.return_value = {"run_id": "run-recovered-301"}
+    executor.lookup.return_value = None
 
     async with session_local() as db:
         task = await db.scalar(select(Task).where(Task.id == task_id))
@@ -1089,6 +1090,78 @@ async def test_retry_start_reuses_idempotency_key_after_orphan_loss(
         )
         assert execution is not None
         assert execution.macro_agent_run_id == "run-recovered-301"
+
+
+async def test_retry_start_recovers_orphaned_run_by_lookup(isolated_db) -> None:
+    """#301: a lost retry-start response recovers the existing run by lookup."""
+    import httpx
+
+    from governance_controller.schemas.project_profile import ProjectProfile
+
+    _engine, session_local = isolated_db
+    task_id = "task-retry-lookup-301"
+    project_id = "project-retry-lookup-301"
+    prior_key = "exec-orphan-lookup-301"
+
+    contract = TaskContract(
+        task_id=task_id,
+        project_id=project_id,
+        proposed_by="agent-1",
+        objective="Recover orphan macro-agent run via lookup",
+        acceptance=["retry looks up existing run before failing"],
+        execution={"timeout_minutes": 1, "max_retries": 2},
+    )
+    profile = ProjectProfile(
+        project_id=project_id,
+        repository={"path": "/tmp/retry-lookup-301"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id=project_id,
+                state=TaskState.RUNNING,
+                proposed_by=contract.proposed_by,
+                task_contract_json=contract.model_dump(mode="json"),
+                execution_attempts=1,
+                latest_macro_agent_run_id="sentinel",
+                macro_agent_idempotency_key=prior_key,
+            )
+        )
+        await seed.commit()
+
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.start.side_effect = httpx.ReadTimeout(
+        "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+    )
+    executor.lookup.return_value = {
+        "run_id": "run-recovered-lookup-301",
+        "status": "queued",
+    }
+
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        assert task is not None
+        result = await VerificationService(executor=executor)._start_retry_execution(
+            db=db,
+            task=task,
+            contract=contract,
+            profile=profile,
+            report={"passed": False},
+        )
+        assert result is True
+        await db.commit()
+
+    executor.lookup.assert_awaited_once_with(prior_key)
+
+    async with session_local() as check:
+        execution = await check.scalar(
+            select(Execution).where(Execution.task_id == task_id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == "run-recovered-lookup-301"
 
 
 async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:

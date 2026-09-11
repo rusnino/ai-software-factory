@@ -805,6 +805,69 @@ class VerificationService:
             for entry in result.scalars().all()
         )
 
+    async def _try_recover_orphaned_run(
+        self,
+        db: AsyncSession,
+        task: Task,
+        execution: Execution,
+        controller_execution_id: str,
+        expected_task_version: int,
+    ) -> bool:
+        """Recover a macro-agent run whose retry-start response was lost (#301).
+
+        Returns True if an active run was found by idempotency key and attached
+        to the local execution. The caller must return success without failing
+        the task.
+        """
+        try:
+            lookup_result = await self.executor.lookup(controller_execution_id)
+        except Exception:
+            return False
+        if lookup_result is None:
+            return False
+        try:
+            start_response = MacroAgentStartResponse.model_validate(lookup_result)
+        except Exception:
+            return False
+        if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
+            return False
+        execution.state = TaskState.RUNNING
+        execution.macro_agent_run_id = start_response.run_id
+        await db.flush()
+        cas_result = await db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,  # type: ignore[arg-type]
+                Task.version == expected_task_version,  # type: ignore[arg-type]
+                Task.state == TaskState.RUNNING.value,  # type: ignore[arg-type]
+                Task.latest_macro_agent_run_id == execution.id,  # type: ignore[arg-type]
+            )
+            .values(
+                latest_macro_agent_run_id=start_response.run_id,
+                version=Task.version + 1,
+                updated_at=datetime.now(UTC),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if not cas_result.rowcount:  # type: ignore[attr-defined]
+            return False
+        task.macro_agent_idempotency_key = None
+        await AuditService.log(
+            db=db,
+            event_type="retry_execution_start_recovered",
+            task_id=task.id,
+            actor="system",
+            source="verification_service",
+            execution_id=execution.id,
+            payload={
+                "execution_id": execution.id,
+                "macro_agent_run_id": start_response.run_id,
+                "controller_execution_id": controller_execution_id,
+            },
+        )
+        await db.commit()
+        return True
+
     async def _start_retry_execution(
         self,
         db: AsyncSession,
@@ -917,12 +980,6 @@ class VerificationService:
             # Run successfully correlated; future retries need a fresh key.
             task.macro_agent_idempotency_key = None
         except Exception as exc:
-            # If the retry cannot even start, the task cannot recover on its
-            # own; move it to terminal FAILED so humans are alerted. Do NOT
-            # attach a new external run ID when no run was returned.
-            transitioned = await StateMachine.atomic_transition(
-                db, task, TaskState.FAILED
-            )
             if terminal_status is not None:
                 failure_class = "accepted_response_invalid"
                 error_message = (
@@ -934,6 +991,30 @@ class VerificationService:
                 failure_class = classify_macro_agent_start_exception(exc)
                 error_message = str(exc)
                 error_type = type(exc).__name__
+
+            # If the retry-start response was lost but a run was actually
+            # created, recover it by idempotency key instead of failing.
+            if (
+                terminal_status is None
+                and failure_class in {"orphan_suspected", "accepted_response_invalid"}
+                and task.macro_agent_idempotency_key is not None
+            ):
+                recovered = await self._try_recover_orphaned_run(
+                    db,
+                    task,
+                    execution,
+                    task.macro_agent_idempotency_key,
+                    expected_task_version,
+                )
+                if recovered:
+                    return True
+
+            # If the retry cannot even start, the task cannot recover on its
+            # own; move it to terminal FAILED so humans are alerted. Do NOT
+            # attach a new external run ID when no run was returned.
+            transitioned = await StateMachine.atomic_transition(
+                db, task, TaskState.FAILED
+            )
 
             # Preserve the idempotency key only when a macro-agent run may have
             # been created without a usable response (#301, #349).

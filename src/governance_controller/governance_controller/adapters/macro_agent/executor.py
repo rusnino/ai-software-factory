@@ -12,6 +12,13 @@ class MacroAgentExecutor:
     def __init__(self, client: MacroAgentClient | None = None) -> None:
         self.client = client or MacroAgentClient()
 
+    async def lookup(
+        self,
+        controller_execution_id: str,
+    ) -> dict[str, Any] | None:
+        """Look up an existing run by controller execution id (#301)."""
+        return await self.client.lookup(controller_execution_id)
+
     async def start(
         self,
         task_contract: TaskContract,

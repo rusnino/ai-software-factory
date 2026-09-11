@@ -60,6 +60,24 @@ async def start_run(
     return await store.create(request)
 
 
+@app.get("/runs/by_controller_execution_id/{controller_execution_id}")
+async def get_run_by_controller_execution_id(
+    controller_execution_id: str,
+    _authenticated: None = Depends(_require_secret),
+) -> RunResponse:
+    """Look up a run by the Controller's execution id (idempotency key) (#301)."""
+    run = await store.run_by_controller_execution_id(controller_execution_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"No run found for controller_execution_id "
+                f"{controller_execution_id}"
+            ),
+        )
+    return RunResponse(run_id=run["run_id"], status=run["status"])
+
+
 @app.get("/runs/{run_id}")
 async def get_run(
     run_id: str,

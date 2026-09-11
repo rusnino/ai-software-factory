@@ -62,7 +62,8 @@ async def _audit_rows_for_task(
 @pytest.fixture
 def fake_executor() -> MacroAgentExecutor:
     executor = AsyncMock(spec=MacroAgentExecutor)
-    executor.start.return_value = {"run_id": "run-test-1"}
+    executor.start.return_value = {"run_id": "run-1", "status": "queued"}
+    executor.lookup.return_value = None
     return executor
 
 
@@ -279,21 +280,27 @@ class TestApprovalServiceStateTransitions:
         assert execution is not None
         assert task.macro_agent_idempotency_key == execution.id
 
-    async def test_execution_start_reuses_prior_idempotency_key(
+    async def test_execution_start_recovers_orphaned_run_by_lookup(
         self,
         service: ApprovalService,
         db_session: AsyncSession,
         fake_executor: MacroAgentExecutor,
     ) -> None:
-        """#301: a retry approval passes the prior execution id as dedup key."""
+        """#301: a lost start response recovers the existing run by lookup."""
+        import httpx
+
         prior_key = "exec-orphan-301"
-        task = await _make_task(
-            db_session, TaskState.PLAN_APPROVED
-        )
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         task.macro_agent_idempotency_key = prior_key
         contract = _make_contract()
         profile = _make_profile()
-        fake_executor.start.return_value = {"run_id": "run-recovered-301"}
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+        fake_executor.lookup.return_value = {
+            "run_id": "run-recovered-301",
+            "status": "queued",
+        }
 
         result = await service.approve(
             task=task,
@@ -306,10 +313,7 @@ class TestApprovalServiceStateTransitions:
         )
 
         assert result.state == TaskState.RUNNING
-        passed_key = fake_executor.start.call_args.kwargs.get(
-            "controller_execution_id"
-        ) or fake_executor.start.call_args.args[1]
-        assert passed_key == prior_key
+        fake_executor.lookup.assert_awaited_once_with(prior_key)
 
         execution = await db_session.scalar(
             select(Execution).where(Execution.task_id == task.id)
@@ -527,6 +531,7 @@ class TestApprovalServiceIdempotency:
             permission_service=PermissionService(admins={"admin"}),
         )
         service.executor.start.return_value = {"run_id": "run-test"}
+        service.executor.lookup.return_value = None
 
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
@@ -617,6 +622,7 @@ class TestApprovalServiceIdempotency:
             permission_service=PermissionService(admins={"admin", "human-1"}),
         )
         service.executor.start.return_value = {"run_id": "run-test"}
+        service.executor.lookup.return_value = None
 
         task_plan = await _make_task(
             db_session, TaskState.PROPOSED, task_id="task-plan"
@@ -814,6 +820,7 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
 
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         fake_executor.start.return_value = {"run_id": "run-first"}
+        fake_executor.lookup.return_value = None
 
         # Open session A and load the stale task object BEFORE session B
         # commits the approval.

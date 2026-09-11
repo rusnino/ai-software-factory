@@ -54,6 +54,32 @@ class MacroAgentClient:
                 ) from exc
             return parsed.model_dump(exclude_none=True)
 
+    async def lookup(self, controller_execution_id: str) -> dict[str, Any] | None:
+        """Look up an existing run by controller execution id (#301).
+
+        Returns None when no run has been recorded for this id, when the
+        service reports a client error (e.g. an older macro-agent service
+        without this endpoint), or when the network request cannot complete.
+        Any 5xx server error is propagated so the caller can retry.
+        """
+        async with self._client() as client:
+            try:
+                response = await client.get(
+                    f"{self.base_url}/runs/by_controller_execution_id/{controller_execution_id}"
+                )
+            except httpx.RequestError:
+                return None
+            if 400 <= response.status_code < 500:
+                return None
+            response.raise_for_status()
+            try:
+                parsed = MacroAgentStartResponse.model_validate(response.json())
+            except (TypeError, ValueError) as exc:
+                raise MacroAgentResponseError(
+                    "Invalid macro-agent lookup response"
+                ) from exc
+            return parsed.model_dump(exclude_none=True)
+
     async def status(self, run_id: str) -> dict[str, Any]:
         """Query macro-agent run status."""
         async with self._client() as client:
