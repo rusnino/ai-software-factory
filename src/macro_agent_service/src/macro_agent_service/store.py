@@ -62,11 +62,19 @@ class RunStore:
         """Drop oldest terminal runs when the store reaches its cap.
 
         Runs that are still valid idempotency targets (have a live
-        controller_execution_id mapping) are never evicted. This preserves the
-        idempotency contract from #301 under capacity pressure.
+        controller_execution_id mapping) are preserved while they are
+        non-terminal. Once a run reaches a terminal status its idempotency
+        protection is no longer needed for correctness; if the Controller has
+        not explicitly released it via status/collect, the store falls back to
+        evicting the oldest terminal protected run rather than permanently
+        rejecting all new creation (#350).
 
-        Prefer collected terminal runs, then any terminal runs. Raises
-        HTTPException when no evictable terminal runs remain.
+        Preference order:
+        1. collected and unprotected terminal runs,
+        2. unprotected terminal runs,
+        3. terminal protected runs (fail-safe release path).
+
+        Raises HTTPException only when no terminal runs at all remain.
         """
         while len(self._runs) >= self._max_runs:
             collected_terminal_keys = [
@@ -82,6 +90,14 @@ class RunStore:
                 if run["status"] in _TERMINAL_STATUSES
                 and not self._is_idempotency_protected(run_id)
             ]
+            # Fail-safe: terminal runs no longer need idempotency protection.
+            # Evict them even if the protection was never explicitly released.
+            if not terminal_keys:
+                terminal_keys = [
+                    run_id
+                    for run_id, run in self._runs.items()
+                    if run["status"] in _TERMINAL_STATUSES
+                ]
             if not terminal_keys:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

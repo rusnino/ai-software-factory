@@ -111,6 +111,54 @@ async def test_collect_on_non_terminal_run_preserves_idempotency(
         assert len(fresh_store._runs) == 1
 
 
+async def test_capacity_pressure_releases_terminal_protected_runs(
+    fresh_store: RunStore,
+) -> None:
+    """#350: terminal protected runs must be evictable without GET/collect."""
+    capped = RunStore(max_runs=5)
+    from macro_agent_service import main as main_module
+    from macro_agent_service import store as store_module
+
+    store_module.store = capped
+    main_module.store = capped
+
+    run_ids: list[str] = []
+    async with _client() as client:
+        for idx in range(5):
+            created = await client.post(
+                "/runs",
+                json={
+                    "task_id": f"task-cap-{idx}",
+                    "objective": "Terminal run",
+                    "metadata": {
+                        "controller_execution_id": f"exec-cap-{idx}",
+                    },
+                },
+            )
+            run_id = created.json()["run_id"]
+            run_ids.append(run_id)
+            # Simulate the macro-agent finishing the run without any Controller
+            # status/collect call, leaving the idempotency mapping live.
+            capped._runs[run_id]["status"] = "done"
+
+        assert len(capped._runs) == 5
+        assert len(capped._idempotency_keys) == 5
+
+        extra = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-extra",
+                "objective": "New run after steady-state churn",
+                "metadata": {"controller_execution_id": "exec-extra-350"},
+            },
+        )
+        assert extra.status_code == 201
+        assert len(capped._runs) == 5
+        # Oldest terminal run was evicted and its key released.
+        assert run_ids[0] not in capped._runs
+        assert all(k != "exec-cap-0" for k in capped._idempotency_keys)
+
+
 async def test_cancel_releases_idempotency_protection(
     fresh_store: RunStore,
 ) -> None:
