@@ -1,6 +1,45 @@
 # Next Steps
 
-## Current State (2026-09-11) — Round 26
+## Current State (2026-09-11) — Round 27
+
+**`#156` confirmed genuinely fixed. `#301` reopened a 7th time — but this time with no new code at
+all: opencode closed it by comment only, citing the same commit already reviewed and found
+incomplete last round, without addressing either documented residual gap.** Scope was `git log
+9e6f49f..origin/main` (1 commit).
+
+- **`#301`**: `gh issue list --state open` showed 0 at the start of this round, but `git log` showed
+  zero commits touching `approval_service.py`'s recovery logic, `verification_service.py`'s
+  equivalent, or `stuck_execution_poller.py`. The closing comment simply re-cited `cf46044` — the
+  exact commit round 26's reopen comment already reviewed in depth and found leaves two specific,
+  live-reproduced windows open (double response-loss; a race against
+  `StuckExecutionPoller._poll_ready`). Reopened immediately with the same evidence restated, since
+  nothing changed to address it.
+- **`#156` CONFIRMED genuinely fixed** — verified across 5 distinct rejection paths (not just one),
+  including correct handling of the legacy SPEC-04 payload shape that lacks a previous-state value
+  (falls back to comment-only, no crash). The commit also added a related-but-technically-out-of-scope
+  feature (projecting verification outcomes to Plane, a gap `#156` itself never named) — confirmed
+  working correctly on its own merits with genuine pre/post test differentiation, and confirmed not to
+  race the pre-existing `ReconciliationService` Plane-sync path (same advisory lock, same
+  fresh-read-before-write pattern).
+- **Two new findings from this round's verification and fresh-angle passes**:
+  - `#357` (LOW) — `#156`'s fix wrapped both the new revert call and the pre-existing rejection
+    comment in one exception-suppression block, so a Plane API failure on the revert now also
+    silently swallows the explanatory comment that used to post unconditionally.
+  - `#358` (MEDIUM) — `StuckExecutionPoller`'s `plane_projection_pending` sweeper (the mechanism
+    behind `#314`/`#322`/`#325`) resolves orphaned markers by checking whether `Task.state` has
+    drifted from the pushed value — but for `update_state`/`reconciliation_state_fix` markers, that
+    value is always the task's *own* state at write time, so a successful fix (which only changes
+    Plane's display, never `Task.state`) can never be observed by this heuristic. Live-reproduced: a
+    genuinely successful subsequent fix leaves the original orphan marker permanently unresolved.
+    Compounds operationally since the sweep's fixed-size batch has no way to skip known-stuck rows.
+
+**Total open: 3** — `#301` (HIGH, reopened 7th time, unchanged), `#358` (MEDIUM), `#357` (LOW).
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 26 State
 
 **`#350` and `#356` confirmed genuinely fixed. `#301` finally shows real architectural progress — the
 first of 6 attempts whose core mechanism actually works — but 2 narrow residual windows keep it open

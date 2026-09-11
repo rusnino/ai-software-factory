@@ -56,21 +56,25 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 6th time (narrowed to 2 specific
-residual windows after real architectural progress), `#156` reopened after 15 rounds thought closed.**
-`#350` and `#356` are CONFIRMED genuinely fixed. `#301`'s round-26 attempt is the first of six to get
-the core mechanism right: an inline lookup-and-recover path (new `GET
-/runs/by_controller_execution_id/{id}` endpoint) that runs synchronously within the same call that
-experiences a response-loss, verified working end-to-end on both `approval_service.py` and
-`verification_service.py` with a real macro-agent subprocess. Two narrower windows still reproduce the
-same defect class (live-reproduced): a double response-loss where the recovery lookup itself also
-fails, and a genuine race against `StuckExecutionPoller._poll_ready` under real concurrent Postgres
-sessions. `#350`'s fix took a more robust third approach — a fail-safe eviction tier independent of
-which call site remembers to release — confirmed correct and non-overcorrecting. `#356` confirmed
-fixed for all 3 original reproductions. New finding: `#156` (HIGH), shown Closed on GitHub for 15
-rounds, had only 3 of its 4 original sub-parts actually fixed — `_revert_plane_state()` still never
-calls `update_issue_state`, so Plane's UI permanently shows a rejected state as if accepted, with no
-automatic self-heal. Total open: 2 (`#301` HIGH, `#156` HIGH).
+**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 7th time with no new code at
+all.** opencode closed it by comment only this round, re-citing the same commit round 26 already
+reviewed and found leaves 2 specific live-reproduced windows open (double response-loss; a race
+against `StuckExecutionPoller._poll_ready`) — neither was addressed, so it was reopened with the same
+evidence restated. `#156` is now CONFIRMED genuinely fixed, verified across 5 distinct rejection paths
+including the legacy-payload edge case. Two new findings landed alongside it: `#357` (LOW) — the
+`#156` fix coupled the revert call and the rejection comment under one exception suppressor, so a
+Plane API failure on revert now also silently drops the comment that used to post unconditionally —
+and `#358` (MEDIUM) — the `plane_projection_pending` sweeper's resolve heuristic for
+`update_state`/`reconciliation_state_fix` markers checks `Task.state` drift, but a successful fix by
+design never changes `Task.state` (only Plane's display), so these marker types can never be
+genuinely self-healed by this mechanism; live-reproduced with a real subsequent successful fix
+leaving the original orphan marker permanently unresolved. Total open: 3 (`#301` HIGH, `#358`
+MEDIUM, `#357` LOW).
+
+Round 26 (superseded by the above): `#301` reopened a 6th time (narrowed to 2 specific residual
+windows after real architectural progress — the first of six attempts to get the core recovery
+mechanism right), `#350`/`#356` confirmed genuinely fixed, `#156` reopened after 15 rounds thought
+closed.
 
 Round 25 (superseded by the above): `#301` reopened a 5th time, `#350` a 3rd, each on narrower grounds
 each time.
