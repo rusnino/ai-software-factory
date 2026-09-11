@@ -279,6 +279,44 @@ class TestApprovalServiceStateTransitions:
         assert execution is not None
         assert task.macro_agent_idempotency_key == execution.id
 
+    async def test_execution_start_reuses_prior_idempotency_key(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#301: a retry approval passes the prior execution id as dedup key."""
+        prior_key = "exec-orphan-301"
+        task = await _make_task(
+            db_session, TaskState.PLAN_APPROVED
+        )
+        task.macro_agent_idempotency_key = prior_key
+        contract = _make_contract()
+        profile = _make_profile()
+        fake_executor.start.return_value = {"run_id": "run-recovered-301"}
+
+        result = await service.approve(
+            task=task,
+            contract=contract,
+            profile=profile,
+            approval_type=ApprovalType.EXECUTION,
+            source="telegram",
+            actor="admin",
+            idempotency_key="key-retry-301",
+        )
+
+        assert result.state == TaskState.RUNNING
+        passed_key = fake_executor.start.call_args.kwargs.get(
+            "controller_execution_id"
+        ) or fake_executor.start.call_args.args[1]
+        assert passed_key == prior_key
+
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.macro_agent_run_id == "run-recovered-301"
+
     async def test_execution_start_failure_classifies_orphan_risk(
         self,
         service: ApprovalService,

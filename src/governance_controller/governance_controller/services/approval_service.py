@@ -571,7 +571,9 @@ class ApprovalService:
         # Seed the idempotency key for this execution attempt. If the start
         # response is lost but the macro-agent accepted the run, retries reuse
         # this key to recover the same run_id instead of creating a duplicate.
-        task.macro_agent_idempotency_key = execution.id
+        # Preserve any existing key from a prior lost-response attempt.
+        if task.macro_agent_idempotency_key is None:
+            task.macro_agent_idempotency_key = execution.id
 
         terminal_run_id: str | None = None
         terminal_status: str | None = None
