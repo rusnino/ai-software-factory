@@ -517,13 +517,14 @@ async def _revert_plane_state(
         return
 
     client = PlaneClient()
-    with contextlib.suppress(Exception):
-        if isinstance(previous_state, str) and previous_state:
+    if isinstance(previous_state, str) and previous_state:
+        with contextlib.suppress(Exception):
             await client.update_issue_state(
                 task_id,
                 state_id=previous_state,
                 project_id=project_id,
             )
+    with contextlib.suppress(Exception):
         await client.add_comment(
             task_id,
             f"Controller rejected state change: {reason}",
