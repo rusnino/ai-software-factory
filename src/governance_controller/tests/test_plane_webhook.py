@@ -295,6 +295,52 @@ async def test_webhook_stale_state_returns_409(
     assert response.status_code == 409
 
 
+async def test_webhook_rejection_reverts_plane_state(
+    async_client: AsyncClient,
+    seeded_db: AsyncSession,
+    _auth_ok: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#156: Controller rejection must set Plane issue back to previous state."""
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_api_token",
+        "token",
+    )
+    reverts: list[tuple[str, str]] = []
+    comments: list[tuple[str, str]] = []
+
+    async def _update_state(
+        _self: Any, issue_id: str, state_id: str, project_id: str | None = None
+    ) -> dict[str, Any]:
+        reverts.append((issue_id, state_id))
+        return {}
+
+    async def _add_comment(
+        _self: Any, issue_id: str, text: str, project_id: str | None = None
+    ) -> dict[str, Any]:
+        comments.append((issue_id, text))
+        return {}
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.update_issue_state",
+        _update_state,
+    )
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.add_comment",
+        _add_comment,
+    )
+
+    event = _event(previous_state="Plan Approved", current_state="Approved")
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
+    assert response.status_code == 409
+    assert reverts == [("TASK-1", _STATE_UUIDS["Plan Approved"])]
+    assert comments and "Controller rejected state change" in comments[0][1]
+
+
 async def test_webhook_plan_approval_advances_state(
     async_client: AsyncClient,
     seeded_db: AsyncSession,

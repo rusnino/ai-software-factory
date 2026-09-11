@@ -510,15 +510,20 @@ async def _revert_plane_state(
 
     This is a best-effort projection correction. Failures are logged but not
     raised, because the webhook must still return its HTTP error to Plane.
+    When ``previous_state`` is a Plane state UUID, the issue state is moved
+    back to it; otherwise only a comment is added (#156).
     """
     if not settings.plane_base_url or not settings.plane_api_token:
         return
 
     client = PlaneClient()
-    # We cannot reliably map back to a Plane state UUID here without fetching
-    # the state list; as a pragmatic fallback we comment the reason. Failures
-    # are swallowed so Plane projection errors do not mask the HTTP response.
     with contextlib.suppress(Exception):
+        if isinstance(previous_state, str) and previous_state:
+            await client.update_issue_state(
+                task_id,
+                state_id=previous_state,
+                project_id=project_id,
+            )
         await client.add_comment(
             task_id,
             f"Controller rejected state change: {reason}",

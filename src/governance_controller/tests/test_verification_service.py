@@ -2,6 +2,7 @@ import asyncio
 import os
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -1635,6 +1636,68 @@ async def test_verify_and_advance_finalizes_execution_to_human_review(
     assert refreshed is not None
     assert refreshed.state == TaskState.HUMAN_REVIEW
     assert refreshed.ended_at is not None
+
+
+async def test_verify_and_advance_projects_state_to_plane(
+    db_session: AsyncSession,
+) -> None:
+    """#156: a passing verification pushes the new state to Plane."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller.adapters.macro_agent.executor import MacroAgentExecutor
+    from governance_controller.constants import TaskState
+    from governance_controller.models.execution import Execution
+
+    execution = Execution(
+        id="exec-plane-projection",
+        task_id="task-plane-projection",
+        state=TaskState.RUNNING,
+        macro_agent_run_id="run-123",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(execution)
+
+    task = Task(
+        id="task-plane-projection",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        plane_issue_id="plane-issue-156",
+        latest_macro_agent_run_id="run-123",
+        task_contract_json=TaskContract(
+            task_id="task-plane-projection",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Project to Plane",
+            acceptance=["project"],
+            execution={"max_retries": 2, "harness": "opencode", "role": "worker"},
+            verification={"commands": ["true"]},
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    contract = TaskContract(**task.task_contract_json)
+    fake_executor = MacroAgentExecutor()
+    fake_executor.start = AsyncMock(return_value={"run_id": "run-124"})
+    fake_projection: Any = AsyncMock()
+    fake_projection.update_state.return_value = {"id": "plane-issue-156"}
+
+    await VerificationService.verify_and_advance(
+        db_session,
+        task,
+        contract,
+        executor=fake_executor,
+        plane_projection=fake_projection,
+    )
+
+    fake_projection.update_state.assert_awaited_once_with(
+        controller_task_id="task-plane-projection",
+        plane_issue_id="plane-issue-156",
+        state=TaskState.HUMAN_REVIEW,
+        project_id="proj-1",
+        opentasks_id=None,
+    )
 
 
 async def test_verify_and_advance_finalizes_execution_to_failed(

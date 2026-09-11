@@ -38,6 +38,10 @@ from governance_controller.services.cancellation_service import (
     claim_cancellation,
     release_cancellation_claim,
 )
+from governance_controller.services.plane_projection import (
+    PlaneProjectionService,
+    acquire_plane_projection_lock,
+)
 from governance_controller.services.policy_engine import (
     _extract_command_paths,
     _forbidden_path_conflicts,
@@ -56,8 +60,97 @@ class VerificationService:
     def __init__(
         self,
         executor: MacroAgentExecutor | None = None,
+        plane_projection: PlaneProjectionService | None = None,
     ) -> None:
         self.executor = executor or MacroAgentExecutor()
+        self.plane_projection = plane_projection
+
+    async def _project_state_to_plane(
+        self,
+        db: AsyncSession,
+        task: Task,
+        state: TaskState,
+        opentasks_id: str | None = None,
+    ) -> None:
+        """Project the new Controller state to Plane when configured.
+
+        Failures are logged and swallowed so a Plane projection outage does not
+        block the authoritative Controller state machine.
+        """
+        projection = self.plane_projection
+        if projection is None and settings.plane_base_url:
+            projection = PlaneProjectionService()
+        if projection is None:
+            return
+        plane_issue_id = task.plane_issue_id
+        if not plane_issue_id:
+            return
+
+        pending = await AuditService.log(
+            db=db,
+            event_type="plane_projection_pending",
+            task_id=task.id,
+            actor="system",
+            source="verification_service",
+            payload={
+                "operation": "update_state",
+                "state": state.value,
+                "plane_issue_id": plane_issue_id,
+            },
+        )
+        await db.commit()
+        await acquire_plane_projection_lock(db, task.id)
+        fresh_result = await db.execute(
+            select(Task)
+            .where(Task.id == task.id)  # type: ignore[arg-type]
+            .execution_options(populate_existing=True)
+        )
+        fresh_task = fresh_result.scalar_one_or_none()
+        if fresh_task is not None:
+            task = fresh_task
+            state = fresh_task.state
+            fresh_plane_issue_id = fresh_task.plane_issue_id
+            if fresh_plane_issue_id:
+                plane_issue_id = fresh_plane_issue_id
+
+        try:
+            await projection.update_state(
+                controller_task_id=task.id,
+                plane_issue_id=plane_issue_id,
+                state=state,
+                project_id=task.project_id,
+                opentasks_id=opentasks_id,
+            )
+        except Exception as exc:
+            await AuditService.log(
+                db=db,
+                event_type="plane_projection_failed",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "state": state.value,
+                    "plane_issue_id": plane_issue_id,
+                    "pending_event_id": pending.event_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await db.commit()
+        else:
+            await AuditService.log(
+                db=db,
+                event_type="plane_projection_completed",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                payload={
+                    "operation": "update_state",
+                    "pending_event_id": pending.event_id,
+                    "plane_issue_id": plane_issue_id,
+                },
+            )
+            await db.commit()
 
     # Environment variables that are safe to propagate to verification checks.
     # Controller secrets (DB credentials, macro-agent tokens, etc.) are excluded.
@@ -380,6 +473,7 @@ class VerificationService:
         contract: TaskContract,
         profile: ProjectProfile | None = None,
         executor: MacroAgentExecutor | None = None,
+        plane_projection: PlaneProjectionService | None = None,
     ) -> dict[str, object]:
         """Verify *contract* and atomically advance *task* out of ``AGENT_REVIEW``.
 
@@ -387,10 +481,10 @@ class VerificationService:
         to ``HUMAN_REVIEW``; on failure it transitions to ``FAILED`` unless a
         retry remains, in which case it transitions to ``RUNNING`` and starts a
         new macro-agent execution. The state change uses the same
-        compare-and-swap discipline as ``ApprovalService`` so concurrent events
+        compare-and-set discipline as ``ApprovalService`` so concurrent events
         cannot silently clobber each other.
         """
-        service = cls(executor=executor)
+        service = cls(executor=executor, plane_projection=plane_projection)
 
         # Determine a task-specific worktree when a repository path is provided.
         # Only use the path if it actually exists; otherwise fall back to no cwd
@@ -471,6 +565,8 @@ class VerificationService:
             source="verification_service",
             payload=report,
         )
+
+        await service._project_state_to_plane(db, task, target_state)
 
         # SPEC-09 §9.6: after failing verification, retry before marking FAILED
         # if retries remain. Each failed verification from AGENT_REVIEW counts as
