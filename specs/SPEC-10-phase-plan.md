@@ -56,23 +56,24 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 5th time, `#350` a 3rd, each on
-narrower grounds each time.** `#354` and `#355` are CONFIRMED genuinely fixed. Round 25's `#301`
-attempt only preserves an existing idempotency key instead of overwriting it — `TaskState.FAILED`
-still has zero outgoing transitions and no poller references the key, so it's preserved but never
-consumed; live-reproduced end to end (real macro-agent subprocess) to the same operational outcome as
-round 24. The new regression test constructs a state combination production can never reach and
-contains no second retry call, so it doesn't test a retry at all. Recommendation recorded: this needs
-one complete design covering the full lifecycle, verified end-to-end, rather than another incremental
-patch. `#350`'s closing commit fixed the separate `#354` leak in `RunStore.cancel()` but left the
-actual root cause — the dominant on-time-completion path never releasing at all — untouched;
-reopened with the same live reproduction as before. New finding `#356` (MEDIUM): intake adapters crash
-with an unhandled 500 on empty/oversized fields, reachable through ordinary Telegram media messages
-without a caption, not just adversarial input. Total open: 3 (`#301` HIGH, `#350` HIGH, `#356`
-MEDIUM).
+**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 6th time (narrowed to 2 specific
+residual windows after real architectural progress), `#156` reopened after 15 rounds thought closed.**
+`#350` and `#356` are CONFIRMED genuinely fixed. `#301`'s round-26 attempt is the first of six to get
+the core mechanism right: an inline lookup-and-recover path (new `GET
+/runs/by_controller_execution_id/{id}` endpoint) that runs synchronously within the same call that
+experiences a response-loss, verified working end-to-end on both `approval_service.py` and
+`verification_service.py` with a real macro-agent subprocess. Two narrower windows still reproduce the
+same defect class (live-reproduced): a double response-loss where the recovery lookup itself also
+fails, and a genuine race against `StuckExecutionPoller._poll_ready` under real concurrent Postgres
+sessions. `#350`'s fix took a more robust third approach — a fail-safe eviction tier independent of
+which call site remembers to release — confirmed correct and non-overcorrecting. `#356` confirmed
+fixed for all 3 original reproductions. New finding: `#156` (HIGH), shown Closed on GitHub for 15
+rounds, had only 3 of its 4 original sub-parts actually fixed — `_revert_plane_state()` still never
+calls `update_issue_state`, so Plane's UI permanently shows a rejected state as if accepted, with no
+automatic self-heal. Total open: 2 (`#301` HIGH, `#156` HIGH).
 
-Round 24 (superseded by the above): `#301` reopened a 4th time, `#350` a 2nd — both closing commits
-were real, well-tested machinery that production never actually reached.
+Round 25 (superseded by the above): `#301` reopened a 5th time, `#350` a 3rd, each on narrower grounds
+each time.
 
 Round 21 (superseded by the above): opencode closed all 5 of round 20's remaining issues same-day;
 found `#301` was a false close the first time (classification-only, no dedup mechanism at all) and

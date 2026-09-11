@@ -1,6 +1,52 @@
 # Next Steps
 
-## Current State (2026-09-11) — Round 25
+## Current State (2026-09-11) — Round 26
+
+**`#350` and `#356` confirmed genuinely fixed. `#301` finally shows real architectural progress — the
+first of 6 attempts whose core mechanism actually works — but 2 narrow residual windows keep it open
+for a 6th time. A fresh-angle pass also reopened a closed issue on a subsystem cold since round ~11.**
+Scope was `git log b467d55..origin/main` (4 commits).
+
+- **`#301`'s 6th attempt is a genuinely different design**: a new `GET
+  /runs/by_controller_execution_id/{id}` lookup endpoint plus an inline recovery path
+  (`_try_recover_orphaned_run`) that runs synchronously inside the same call that experiences a
+  response-loss, before the task is ever marked FAILED — no retry/poller re-entry needed for the
+  primary case. Live-verified working end to end (real macro-agent subprocess, real Postgres) for both
+  `approval_service.py` and `verification_service.py`: a lost-response run is correctly recovered, no
+  duplicate, correct final state. **But two narrower windows still reproduce the exact same defect
+  class** (a FAILED task with a preserved key nothing ever consumes, a live orphaned macro-agent run):
+  (1) if the recovery *lookup itself* also fails (double response-loss), and (2) a genuine race against
+  `StuckExecutionPoller._poll_ready`, live-reproduced with real concurrent Postgres sessions. Reopened
+  with both reproductions and a note that this attempt got the core mechanism right — the next one
+  likely only needs to close these 2 specific windows, not redesign the approach again.
+- **`#350` CONFIRMED genuinely fixed** — a third, more robust design: `RunStore`'s eviction logic now
+  has a fail-safe tier that evicts the oldest terminal run even if never explicitly released, making
+  the fix independent of which call site remembers to release. Verified it doesn't overcorrect (still
+  503s when all runs are genuinely active). Note: a second commit this round carried an identical
+  "Fixes #350" trailer but its actual diff was unrelated infrastructure for `#301` — a labeling
+  mistake, not a duplicate fix; only one commit (`4d4842b`) does the real work.
+- **`#356` CONFIRMED genuinely fixed** — all 3 original reproductions (oversized/empty email body,
+  caption-less Telegram media) now handled cleanly; ordinary Telegram media without a caption gets a
+  synthesized placeholder and real processing rather than a crash or silent drop.
+- **New finding from the fresh-angle pass**: `#156` (HIGH) reopened — GitHub showed it Closed, but the
+  closing commit only fixed 3 of its 4 sub-parts (wiring reconciliation, the CLI, projection fixes).
+  The "revert doesn't revert" sub-part is byte-for-byte still present: `_revert_plane_state()` posts an
+  explanatory Plane comment on every rejected webhook-driven approval but never calls
+  `update_issue_state`, so Plane's UI permanently shows a state the Controller never accepted after any
+  rejection, undermining the "Controller authoritative, Plane a projection" guarantee. Cold subsystem —
+  last touched by review ~15 rounds ago.
+- A real concurrent-Postgres sanity check of the audit-log hash chain (25 genuine concurrent writers)
+  still held clean. Process note, not filed as a bug: the only *concurrent-writer* hash-chain
+  regression test is skipped on Postgres, so this specific path has no permanent Postgres-side
+  coverage even though it's currently correct.
+
+**Total open: 2** — `#301` (HIGH, reopened 6th time, narrowed scope), `#156` (HIGH, reopened).
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 25 State
 
 **`#301` reopened a 5th time, `#350` a 3rd — both closed-again commits addressed a narrower slice than
 the issue's actual remaining gap.** Scope was `git log 1f3c42a..origin/main` (4 commits: `313fe61`
