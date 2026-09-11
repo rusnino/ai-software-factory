@@ -424,6 +424,7 @@ class ApprovalService:
                     "operation": "update_state",
                     "pending_event_id": pending.event_id,
                     "plane_issue_id": task.plane_issue_id or task.id,
+                    "state": state.value,
                 },
             )
             # Release the task-scoped advisory lock after the external call.

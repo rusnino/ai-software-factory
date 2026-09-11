@@ -349,6 +349,7 @@ class ReconciliationService:
                             "operation": "reconciliation_state_fix",
                             "pending_event_id": pending_event_id,
                             "result": "no_op",
+                            "state": state.value,
                         },
                     )
                     await self._db.commit()
@@ -376,11 +377,12 @@ class ReconciliationService:
                     task_id=controller_task_id,
                     actor="system",
                     source="reconciliation_service",
-                    payload={
-                        "operation": "reconciliation_state_fix",
-                        "pending_event_id": pending_event_id,
-                        "plane_issue_id": plane_issue_id,
-                    },
+                        payload={
+                            "operation": "reconciliation_state_fix",
+                            "pending_event_id": pending_event_id,
+                            "plane_issue_id": plane_issue_id,
+                            "state": state.value,
+                        },
                 )
                 await self._db.commit()
         except Exception as exc:

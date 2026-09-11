@@ -3532,6 +3532,63 @@ class TestPlaneProjectionSweeper:
         assert completed[0].payload["reason"] == "resolved_independently"
         assert completed[0].payload["pending_event_id"] == pending.event_id
 
+    async def test_sweeper_resolves_stuck_update_state_when_later_fix_succeeded(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#358: stuck update_state marker is resolved by a later completed fix."""
+        internal_id = str(uuid4())
+        task_id = f"task-plane-stuck-358-{internal_id[:8]}"
+        db_session.add(
+            Task(
+                id=task_id,
+                project_id="proj-1",
+                proposed_by="agent-1",
+                state=TaskState.FAILED,
+            )
+        )
+        await db_session.flush()
+        pending = AuditLog(
+            event_id=f"evt-plane-pending-358-{internal_id[:8]}",
+            event_type="plane_projection_pending",
+            task_id=task_id,
+            actor="system",
+            source="verification_service",
+            timestamp=datetime.now(UTC) - timedelta(hours=1),
+            payload={
+                "operation": "update_state",
+                "state": TaskState.FAILED.value,
+            },
+        )
+        db_session.add(pending)
+        await db_session.flush()
+
+        # A later, genuinely successful projection for the same target state.
+        db_session.add(
+            AuditLog(
+                event_id=f"evt-plane-fixed-358-{internal_id[:8]}",
+                event_type="plane_projection_completed",
+                task_id=task_id,
+                actor="system",
+                source="stuck_execution_poller",
+                timestamp=datetime.now(UTC) - timedelta(minutes=30),
+                payload={
+                    "operation": "update_state",
+                    "state": TaskState.FAILED.value,
+                },
+            )
+        )
+        await db_session.commit()
+
+        actions = await StuckExecutionPoller(db_session).poll()
+        resolved = [
+            action
+            for action in actions
+            if action.get("action") == "plane_projection_resolved"
+        ]
+        assert len(resolved) == 1
+        assert resolved[0]["task_id"] == task_id
+
     async def test_synthetic_completion_does_not_hide_real_failure(
         self,
         db_session: AsyncSession,

@@ -1234,27 +1234,37 @@ class StuckExecutionPoller:
 
             operation = marker.payload.get("operation")
             resolved = False
-            if operation == "update_state":
-                # Reconciliation has independently moved Plane past the state
-                # this marker was projecting; if the task is still exactly at
-                # the pending state, leave the marker for normal completion.
+            if operation in {"update_state", "reconciliation_state_fix"}:
                 pending_state = marker.payload.get("state")
                 resolved = (
                     pending_state is not None
                     and task.state.value != pending_state
                 )
+                if not resolved and pending_state is not None:
+                    # A subsequent successful projection to Plane for the same
+                    # target state means the fix happened even though
+                    # Task.state did not change by design (#358).
+                    later_completed = await self.db.scalar(
+                        select(AuditLog)
+                        .where(
+                            and_(
+                                AuditLog.task_id == marker.task_id,  # type: ignore[arg-type]
+                                AuditLog.id > marker.id,  # type: ignore[arg-type,operator]
+                                AuditLog.event_type
+                                == "plane_projection_completed",  # type: ignore[arg-type]
+                                AuditLog.payload["state"].as_string() == pending_state,
+                            )
+                        )
+                        .limit(1)
+                        .execution_options(populate_existing=True)
+                    )
+                    resolved = later_completed is not None
             elif operation == "terminal_failure_alert":
                 # Terminal state is the condition that requires this alert; it
                 # is not evidence that the external human notification arrived.
                 resolved = False
             elif operation == "verification_failure_alert":
-                resolved = task.state != TaskState.FAILED.value
-            elif operation == "reconciliation_state_fix":
-                pending_state = marker.payload.get("state")
-                resolved = (
-                    pending_state is not None
-                    and task.state.value != pending_state
-                )
+                resolved = task.state.value != TaskState.FAILED.value
 
             if not resolved:
                 if not self._dry_run:

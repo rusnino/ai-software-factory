@@ -148,6 +148,7 @@ class VerificationService:
                     "operation": "update_state",
                     "pending_event_id": pending.event_id,
                     "plane_issue_id": plane_issue_id,
+                    "state": state.value,
                 },
             )
             await db.commit()
