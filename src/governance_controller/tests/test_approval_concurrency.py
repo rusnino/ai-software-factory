@@ -1521,10 +1521,10 @@ class TestApprovalConcurrency:
         recovery path's own CAS to RUNNING loses to a concurrent writer."""
         import httpx
 
+        from governance_controller import config
         from governance_controller.services.stuck_execution_poller import (
             StuckExecutionPoller,
         )
-        from governance_controller import config
 
         monkeypatch.setattr(config.settings, "plane_base_url", "")
         _engine, local_session = isolated_db
