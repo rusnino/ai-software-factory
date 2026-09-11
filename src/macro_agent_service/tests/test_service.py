@@ -111,6 +111,62 @@ async def test_collect_on_non_terminal_run_preserves_idempotency(
         assert len(fresh_store._runs) == 1
 
 
+async def test_cancel_releases_idempotency_protection(
+    fresh_store: RunStore,
+) -> None:
+    """#354: cancelling a protected run must make it evictable without GET/collect."""
+    capped = RunStore(max_runs=3)
+    from macro_agent_service import main as main_module
+    from macro_agent_service import store as store_module
+
+    store_module.store = capped
+    main_module.store = capped
+
+    async with _client() as client:
+        created = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-cancel",
+                "objective": "Run to be cancelled",
+                "metadata": {"controller_execution_id": "exec-cancel-354"},
+            },
+        )
+        run_id = created.json()["run_id"]
+
+        # Cancel the run and do NOT call GET or collect afterwards.
+        cancel_resp = await client.post(f"/runs/{run_id}/cancel")
+        assert cancel_resp.status_code == 200
+
+        # The cancelled run must no longer block eviction.
+        filler1 = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-filler-1",
+                "objective": "Filler 1",
+            },
+        )
+        await client.post(f"/runs/{filler1.json()['run_id']}/cancel")
+        filler2 = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-filler-2",
+                "objective": "Filler 2",
+            },
+        )
+        await client.post(f"/runs/{filler2.json()['run_id']}/cancel")
+        filler3 = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-filler-3",
+                "objective": "Filler 3",
+            },
+        )
+        await client.post(f"/runs/{filler3.json()['run_id']}/cancel")
+
+        assert len(capped._runs) == 3
+        assert run_id not in capped._runs
+
+
 async def test_idempotency_releases_on_terminal_status_observation(
     fresh_store: RunStore,
 ) -> None:
@@ -158,7 +214,7 @@ async def test_idempotency_releases_on_terminal_status_observation(
 
 
 async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> None:
-    """#348: a run kept for idempotency must not be evicted by capacity pressure."""
+    """#348: an active idempotency-protected run must not be evicted."""
     capped = RunStore(max_runs=3)
     from macro_agent_service import main as main_module
     from macro_agent_service import store as store_module
@@ -178,12 +234,8 @@ async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> 
         assert first.status_code == 201
         first_id = first.json()["run_id"]
 
-        # Make the protected run terminal *without* collecting it, so it would
-        # be a normal eviction candidate in the pre-fix store.
-        cancel_resp = await client.post(f"/runs/{first_id}/cancel")
-        assert cancel_resp.status_code == 200
-
-        # Push the store past its cap with unrelated terminal runs.
+        # The protected run stays active (queued). Push the store past its cap
+        # with unrelated terminal runs; the active protected run must survive.
         for idx in range(3):
             created = await client.post(
                 "/runs",
@@ -205,6 +257,8 @@ async def test_idempotency_survives_capacity_eviction(fresh_store: RunStore) -> 
         )
         assert retry.status_code == 201
         assert retry.json()["run_id"] == first_id
+        assert first_id in capped._runs
+        assert len(capped._runs) == 3
         assert first_id in capped._runs
 
 

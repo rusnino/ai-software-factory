@@ -169,6 +169,10 @@ class RunStore:
             return None
         if run["status"] not in {"done", "failed", "cancelled"}:
             run["status"] = "cancelled"
+        # Cancel leaves the run terminal. The Controller only cancels runs it no
+        # longer intends to retry, so release the idempotency key immediately
+        # (#354).
+        self._release_idempotency_key(run_id)
         return RunStatus(
             run_id=run_id,
             status=run["status"],
