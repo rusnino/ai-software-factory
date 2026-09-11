@@ -866,6 +866,11 @@ class StuckExecutionPoller:
         while the external macro-agent run ID is unknown. This sentinel must be
         recovered separately: it is not a real run ID and must never be sent to
         the macro-agent status endpoint.
+
+        Before giving up, this attempts the same idempotency-key lookup
+        ``VerificationService`` uses on a lost retry-start response (#301), so
+        a run that macro-agent actually accepted is recovered into RUNNING
+        instead of being permanently orphaned by a poller/in-process race.
         """
         result = await self.db.execute(
             select(Task, Execution)
@@ -878,6 +883,10 @@ class StuckExecutionPoller:
             )
             .limit(self._batch_size)
             .execution_options(populate_existing=True)
+        )
+
+        from governance_controller.services.verification_service import (
+            VerificationService,
         )
 
         now = datetime.now(UTC)
@@ -902,30 +911,67 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            retry_marker = await self._verification_retry_marker(
-                task.id, task.execution_attempts
-            )
-            retry_detail: dict[str, Any] = {}
-            if retry_marker is not None:
-                retry_detail = {
-                    "pending_event_id": retry_marker.event_id,
-                    "attempt": task.execution_attempts,
-                }
-            await self._mark_failed(
+            controller_execution_id = task.macro_agent_idempotency_key or execution.id
+            recovered = await VerificationService(
+                executor=self._executor_for_recovery()
+            )._try_recover_orphaned_run(
+                self.db,
                 task,
                 execution,
-                "retry_execution_start_never_completed",
-                detail=retry_detail,
+                controller_execution_id,
+                task.version,
             )
-            actions.append(
-                {
-                    "task_id": task.id,
-                    "execution_id": execution.id,
-                    "action": "failed_retry_start",
-                    "reason": "retry execution start never completed",
-                    "deadline": deadline.isoformat(),
-                }
-            )
+            if recovered:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "retry_execution_start_recovered",
+                        "reason": (
+                            "orphaned macro-agent run found by lookup before "
+                            "failing retry execution start"
+                        ),
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            # The recovery attempt above may have refreshed this shared `task`
+            # object from the database (e.g. to check whether a concurrent
+            # recovery already won). Only proceed to fail the execution if the
+            # task is genuinely still sitting on this exact stuck attempt --
+            # otherwise someone else already resolved it and _mark_failed's
+            # own CAS, seeing a refreshed state/version, could incorrectly
+            # re-fail a task that a concurrent recovery just brought RUNNING.
+            if (
+                task.state == TaskState.RUNNING
+                and task.latest_macro_agent_run_id == execution.id
+            ):
+                retry_marker = await self._verification_retry_marker(
+                    task.id, task.execution_attempts
+                )
+                retry_detail: dict[str, Any] = {}
+                if retry_marker is not None:
+                    retry_detail = {
+                        "pending_event_id": retry_marker.event_id,
+                        "attempt": task.execution_attempts,
+                    }
+                failed = await self._mark_failed(
+                    task,
+                    execution,
+                    "retry_execution_start_never_completed",
+                    detail=retry_detail,
+                )
+                if failed:
+                    actions.append(
+                        {
+                            "task_id": task.id,
+                            "execution_id": execution.id,
+                            "action": "failed_retry_start",
+                            "reason": "retry execution start never completed",
+                            "deadline": deadline.isoformat(),
+                        }
+                    )
             await self.db.commit()
 
         return actions
@@ -1020,8 +1066,12 @@ class StuckExecutionPoller:
         A crash between the READY transition commit and the macro-agent /runs
         response leaves the task at READY with an Execution row in READY state
         and ``macro_agent_run_id`` still NULL. After a short grace window we
-        treat this as a failed execution start so the task is not stranded
-        forever.
+        first attempt the same idempotency-key lookup ``ApprovalService`` uses
+        on a lost start response (#301): if macro-agent actually accepted the
+        run, we recover it into RUNNING here instead of racing (and losing
+        against) an in-process recovery attempt that is still awaiting its own
+        lookup. Only when no active run is found do we treat this as a failed
+        execution start so the task is not stranded forever.
         """
         result = await self.db.execute(
             select(Task, Execution)
@@ -1032,6 +1082,8 @@ class StuckExecutionPoller:
             .limit(self._batch_size)
             .execution_options(populate_existing=True)
         )
+
+        from governance_controller.services.approval_service import ApprovalService
 
         now = datetime.now(UTC)
         actions: list[dict[str, Any]] = []
@@ -1055,16 +1107,52 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            await self._mark_failed(task, execution, "execution_start_never_completed")
-            actions.append(
-                {
-                    "task_id": task.id,
-                    "execution_id": execution.id,
-                    "action": "failed_ready",
-                    "reason": "execution start never completed",
-                    "deadline": deadline.isoformat(),
-                }
+            controller_execution_id = task.macro_agent_idempotency_key or execution.id
+            recovered = await ApprovalService(
+                db=self.db, executor=self._executor_for_recovery()
+            )._try_recover_orphaned_run(
+                task=task,
+                execution=execution,
+                controller_execution_id=controller_execution_id,
+                actor="system:poller",
+                source="stuck_execution_poller",
             )
+            if recovered:
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "execution_start_recovered",
+                        "reason": (
+                            "orphaned macro-agent run found by lookup before "
+                            "failing execution start"
+                        ),
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            # The recovery attempt above may have refreshed this shared `task`
+            # object from the database (e.g. to check whether a concurrent
+            # recovery already won). Only proceed to fail the execution if the
+            # task is genuinely still READY -- otherwise someone else already
+            # resolved it and _mark_failed's own CAS, seeing a refreshed
+            # state/version, could incorrectly re-fail a task that a
+            # concurrent recovery just brought RUNNING.
+            if task.state == TaskState.READY:
+                failed = await self._mark_failed(
+                    task, execution, "execution_start_never_completed"
+                )
+                if failed:
+                    actions.append(
+                        {
+                            "task_id": task.id,
+                            "execution_id": execution.id,
+                            "action": "failed_ready",
+                            "reason": "execution start never completed",
+                            "deadline": deadline.isoformat(),
+                        }
+                    )
             await self.db.commit()
 
         return actions
@@ -1436,11 +1524,16 @@ class StuckExecutionPoller:
         execution: Execution,
         reason_code: str,
         detail: dict[str, Any] | None = None,
-    ) -> None:
-        """Transition a READY/RUNNING execution and its task to FAILED."""
+    ) -> bool:
+        """Transition a READY/RUNNING execution and its task to FAILED.
+
+        Returns False without recording anything if the CAS lost, e.g. to a
+        concurrent recovery that already moved the task to RUNNING -- callers
+        must not report a failure action in that case.
+        """
         success = await StateMachine.atomic_transition(self.db, task, TaskState.FAILED)
         if not success:
-            return
+            return False
 
         execution.state = TaskState.FAILED
         execution.ended_at = datetime.now(UTC)
@@ -1462,3 +1555,4 @@ class StuckExecutionPoller:
             execution_id=execution.id,
             payload=payload,
         )
+        return True

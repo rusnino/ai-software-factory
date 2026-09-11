@@ -500,12 +500,29 @@ class ApprovalService:
         execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
         await self.db.flush()
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
-            # The run is confirmed live (lookup() returned a non-terminal
-            # status) but this caller lost the task CAS. Persist FAILED and
-            # cancellation intent together, before returning, so the
-            # recovered-but-orphaned run is durably queued for the existing
-            # cancellation-claim/poller cleanup path instead of silently
-            # dropped (mirrors the happy-path CAS-loss handling below, #262).
+            # A concurrent recovery attempt (e.g. the poller racing this same
+            # in-process handler) may have already attached this exact run --
+            # that is a benign redundant race, not an orphan, so leave the
+            # winner's committed state untouched.
+            fresh_task = await self.db.scalar(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            if (
+                fresh_task is not None
+                and fresh_task.state == TaskState.RUNNING
+                and fresh_task.latest_macro_agent_run_id == start_response.run_id
+            ):
+                return False
+            # Otherwise the run is confirmed live (lookup() returned a
+            # non-terminal status) but this caller lost the task CAS for an
+            # unrelated reason (a cancellation, or another recovery/timeout
+            # sweep). Persist FAILED and cancellation intent together, before
+            # returning, so the recovered-but-orphaned run is durably queued
+            # for the existing cancellation-claim/poller cleanup path instead
+            # of silently dropped (mirrors the happy-path CAS-loss handling
+            # below, #262).
             execution.state = TaskState.FAILED  # type: ignore[attr-defined]
             execution.ended_at = datetime.now(UTC)  # type: ignore[attr-defined]
             execution.cancellation_pending = True  # type: ignore[attr-defined]
@@ -534,11 +551,17 @@ class ApprovalService:
                 payload={
                     "macro_agent_run_id": start_response.run_id,
                     "reason": "execution_start_recovery_cas_lost",
+                    "controller_execution_id": controller_execution_id,
                 },
             )
             await self.db.commit()
             return False
         task.macro_agent_idempotency_key = None
+        # Without this, the recovered run is invisible to the running-execution
+        # timeout poller: it joins on Task.latest_macro_agent_run_id, which the
+        # normal success path (below) always sets alongside
+        # execution.macro_agent_run_id.
+        task.latest_macro_agent_run_id = start_response.run_id
         await AuditService.log(
             db=self.db,
             event_type="execution_start_recovered",

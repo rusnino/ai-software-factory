@@ -1,12 +1,13 @@
 """Tests for the ApprovalService."""
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from governance_controller.adapters.macro_agent.client import MacroAgentResponseError
@@ -320,6 +321,66 @@ class TestApprovalServiceStateTransitions:
         )
         assert execution is not None
         assert execution.macro_agent_run_id == "run-recovered-301"
+
+    async def test_orphan_recovery_cas_loss_marks_live_run_for_cleanup(
+        self,
+        service: ApprovalService,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """#359: a lookup hit that then loses the RUNNING CAS to a concurrent
+        writer must not silently drop the genuinely live run it just found.
+        """
+        task = await _make_task(db_session, TaskState.READY, task_id="task-359")
+        execution = Execution(
+            id="exec-359",
+            task_id=task.id,
+            state=TaskState.READY,
+            started_at=datetime.now(UTC),
+        )
+        db_session.add(execution)
+        await db_session.flush()
+
+        fake_executor.lookup.return_value = {
+            "run_id": "run-cas-loss-359",
+            "status": "queued",
+        }
+
+        # Simulate a concurrent writer (e.g. a cancellation or the poller's own
+        # timeout sweep) moving the task away from READY without updating this
+        # in-memory `task` object, so the CAS below observes a stale version.
+        await db_session.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(state=TaskState.FAILED.value, version=Task.version + 1)
+            .execution_options(synchronize_session=False)
+        )
+        await db_session.commit()
+
+        recovered = await service._try_recover_orphaned_run(
+            task=task,
+            execution=execution,
+            controller_execution_id="key-cas-loss-359",
+            actor="system",
+            source="stuck_execution_poller",
+        )
+
+        assert recovered is False
+
+        refreshed_execution = await db_session.scalar(
+            select(Execution).where(Execution.id == execution.id)
+        )
+        assert refreshed_execution is not None
+        assert refreshed_execution.cancellation_pending is True
+        assert refreshed_execution.macro_agent_run_id == "run-cas-loss-359"
+
+        audit_rows = await _audit_rows_for_task(db_session, task.id)
+        assert any(
+            row.event_type == "execution_cancel_pending"
+            and row.payload.get("reason") == "orphan_recovery_cas_lost"
+            and row.payload.get("macro_agent_run_id") == "run-cas-loss-359"
+            for row in audit_rows
+        )
 
     async def test_execution_start_failure_classifies_orphan_risk(
         self,

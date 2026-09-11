@@ -947,6 +947,45 @@ class VerificationService:
             .execution_options(synchronize_session=False)
         )
         if not cas_result.rowcount:  # type: ignore[attr-defined]
+            # A concurrent recovery attempt (e.g. the poller racing this same
+            # in-process handler) may have already attached this exact run --
+            # that is a benign redundant race, not an orphan, so leave the
+            # winner's committed state untouched.
+            fresh_task = await db.scalar(
+                select(Task)
+                .where(Task.id == task.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
+            if (
+                fresh_task is not None
+                and fresh_task.state == TaskState.RUNNING
+                and fresh_task.latest_macro_agent_run_id == start_response.run_id
+            ):
+                return False
+            # Otherwise someone else (a cancellation, or another recovery/
+            # timeout sweep) already moved the task away from the attempt we
+            # attached to. The run we just found is genuinely live, so mark it
+            # for cleanup the same way ``_start_retry_execution``'s own
+            # CAS-loss branch does -- otherwise it is never recorded anywhere
+            # and leaks forever (#359).
+            execution.state = TaskState.FAILED
+            execution.ended_at = datetime.now(UTC)
+            execution.cancellation_pending = True
+            await db.flush()
+            await AuditService.log(
+                db=db,
+                event_type="retry_execution_cancel_pending",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                execution_id=execution.id,
+                payload={
+                    "macro_agent_run_id": start_response.run_id,
+                    "reason": "orphan_recovery_cas_lost",
+                    "controller_execution_id": controller_execution_id,
+                },
+            )
+            await db.commit()
             return False
         task.macro_agent_idempotency_key = None
         await AuditService.log(
