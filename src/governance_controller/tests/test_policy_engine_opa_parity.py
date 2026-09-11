@@ -260,10 +260,16 @@ def test_opa_denies_sed_direct_two_address_range_write(opa_path: str) -> None:
 def test_opa_matches_embedded_on_sed_forward_range(
     opa_path: str, command: str
 ) -> None:
-    """#352: both engines must deny GNU sed addr1,+N forward-range forms."""
+    """#352/#355: both engines must deny GNU sed addr1,+N forward-range forms."""
     embedded_allowed, opa_allowed = _evaluate_both(opa_path, command)
     assert opa_allowed == embedded_allowed, (
         f"OPA/embedded divergence for {command!r}: "
         f"embedded={embedded_allowed}, opa={opa_allowed}"
+    )
+    assert embedded_allowed is False, (
+        f"embedded engine must deny {command!r}; parity alone is not enough"
+    )
+    assert opa_allowed is False, (
+        f"OPA must deny {command!r}; parity alone is not enough"
     )
 
