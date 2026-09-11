@@ -500,6 +500,43 @@ class ApprovalService:
         execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
         await self.db.flush()
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
+            # The run is confirmed live (lookup() returned a non-terminal
+            # status) but this caller lost the task CAS. Persist FAILED and
+            # cancellation intent together, before returning, so the
+            # recovered-but-orphaned run is durably queued for the existing
+            # cancellation-claim/poller cleanup path instead of silently
+            # dropped (mirrors the happy-path CAS-loss handling below, #262).
+            execution.state = TaskState.FAILED  # type: ignore[attr-defined]
+            execution.ended_at = datetime.now(UTC)  # type: ignore[attr-defined]
+            execution.cancellation_pending = True  # type: ignore[attr-defined]
+            await self.db.flush()
+            await AuditService.log(
+                db=self.db,
+                event_type="concurrent_modification",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,  # type: ignore[attr-defined]
+                payload={
+                    "approval_type": ApprovalType.EXECUTION.value,
+                    "expected_state": TaskState.READY.value,
+                    "target_state": TaskState.RUNNING.value,
+                    "macro_agent_run_id": start_response.run_id,
+                },
+            )
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_cancel_pending",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,  # type: ignore[attr-defined]
+                payload={
+                    "macro_agent_run_id": start_response.run_id,
+                    "reason": "execution_start_recovery_cas_lost",
+                },
+            )
+            await self.db.commit()
             return False
         task.macro_agent_idempotency_key = None
         await AuditService.log(

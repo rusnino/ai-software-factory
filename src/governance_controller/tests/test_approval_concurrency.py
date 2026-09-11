@@ -1512,6 +1512,127 @@ class TestApprovalConcurrency:
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
+    async def test_recover_orphaned_run_cas_loss_queues_cancellation(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#359: a run recovered by lookup must not become untracked when the
+        recovery path's own CAS to RUNNING loses to a concurrent writer."""
+        import httpx
+
+        from governance_controller.services.stuck_execution_poller import (
+            StuckExecutionPoller,
+        )
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        _engine, local_session = isolated_db
+        task_id = "task-recover-orphan-cas-loss-359"
+        run_id = "run-recovered-cas-loss-359"
+        prior_key = "exec-recover-cas-loss-359"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+            seeded = await seed.scalar(select(Task).where(Task.id == task_id))
+            assert seeded is not None
+            seeded.macro_agent_idempotency_key = prior_key
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+
+        async def _lookup_then_lose_elsewhere(
+            *_args: object, **_kwargs: object
+        ) -> dict[str, str]:
+            # The recovery path confirms the run is live via lookup() before
+            # attempting its own CAS to RUNNING. Race a concurrent writer (the
+            # poller's own READY-timeout sweep, in production) into moving the
+            # task away from READY first, so the recovery CAS loses.
+            async with local_session() as racer:
+                racing_task = await racer.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert racing_task is not None
+                won = await StateMachine.atomic_transition(
+                    racer, racing_task, TaskState.FAILED
+                )
+                assert won is True
+                await racer.commit()
+            return {"run_id": run_id, "status": "queued"}
+
+        fake_executor.lookup.side_effect = _lookup_then_lose_elsewhere
+
+        async with local_session() as db:
+            task = await db.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await ApprovalService(db=db, executor=fake_executor).approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-recover-cas-loss-359",
+                )
+
+        fake_executor.lookup.assert_awaited_once_with(prior_key)
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            executions = await check.execute(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            rows = executions.scalars().all()
+            assert len(rows) == 1
+            assert rows[0].state == TaskState.FAILED
+            assert rows[0].ended_at is not None
+            assert rows[0].macro_agent_run_id == run_id
+            # The core regression: without the fix this stays False and the
+            # run is permanently invisible to _poll_pending_cancellations.
+            assert rows[0].cancellation_pending is True
+
+            audits = (
+                await check.execute(
+                    select(AuditLog).where(AuditLog.task_id == task_id)
+                )
+            ).scalars().all()
+            assert any(
+                row.event_type == "execution_cancel_pending"
+                and row.payload["macro_agent_run_id"] == run_id
+                and row.payload["reason"] == "execution_start_recovery_cas_lost"
+                for row in audits
+            )
+
+        # The run must now be durably queued for the existing cleanup path:
+        # the poller should discover and cancel it.
+        poller_executor = AsyncMock(spec=MacroAgentExecutor)
+        poller_executor.cancel.return_value = {}
+        async with local_session() as poller_db:
+            actions = await StuckExecutionPoller(
+                poller_db,
+                executor=poller_executor,
+            )._poll_pending_cancellations()
+
+        poller_executor.cancel.assert_awaited_once_with(run_id)
+        assert any(
+            action["action"] == "execution_cancel_completed"
+            and action["macro_agent_run_id"] == run_id
+            for action in actions
+        )
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
     async def test_cancellation_cleanup_locks_execution_before_task(
         self,
         isolated_db: tuple,
