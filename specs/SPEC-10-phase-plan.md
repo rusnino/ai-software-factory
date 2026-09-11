@@ -56,19 +56,23 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 4th time, `#350` a 2nd.** Round
-23's `#347`/`#349`/`#351`/`#352`/`#353` batch is now fully confirmed genuine (`#352`'s CRITICAL rating
-independently re-verified correct — the embedded engine really was vulnerable pre-fix, not just OPA —
-and an exhaustive 140-combination sed-address sweep found zero further divergence in that family).
-But round 24's `#301`/`#350` closing commits, while real and well-tested in isolation, turned out to
-be correct machinery that production never actually reaches: `#301`'s preserved idempotency key is
-never consumed because both call sites that would reuse it instead transition the Task to `FAILED`, a
-terminal state with no outgoing transitions and no recovery poller watching it; `#350`'s release logic
-only lives in the post-timeout poller path, which the dominant on-time-completion route never
-exercises. Both reopened with live end-to-end reproduction using a real macro-agent subprocess. A
-fresh-angle pass found a third instance of the same leak in `RunStore.cancel()` (the Controller's only
-CAS-loss cleanup path) — filed as `#354` (HIGH). A minor test-coverage gap in `#352`'s Python parity
-test was also filed (`#355`, LOW). Total open: 4 (`#301` HIGH, `#350` HIGH, `#354` HIGH, `#355` LOW).
+**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened a 5th time, `#350` a 3rd, each on
+narrower grounds each time.** `#354` and `#355` are CONFIRMED genuinely fixed. Round 25's `#301`
+attempt only preserves an existing idempotency key instead of overwriting it — `TaskState.FAILED`
+still has zero outgoing transitions and no poller references the key, so it's preserved but never
+consumed; live-reproduced end to end (real macro-agent subprocess) to the same operational outcome as
+round 24. The new regression test constructs a state combination production can never reach and
+contains no second retry call, so it doesn't test a retry at all. Recommendation recorded: this needs
+one complete design covering the full lifecycle, verified end-to-end, rather than another incremental
+patch. `#350`'s closing commit fixed the separate `#354` leak in `RunStore.cancel()` but left the
+actual root cause — the dominant on-time-completion path never releasing at all — untouched;
+reopened with the same live reproduction as before. New finding `#356` (MEDIUM): intake adapters crash
+with an unhandled 500 on empty/oversized fields, reachable through ordinary Telegram media messages
+without a caption, not just adversarial input. Total open: 3 (`#301` HIGH, `#350` HIGH, `#356`
+MEDIUM).
+
+Round 24 (superseded by the above): `#301` reopened a 4th time, `#350` a 2nd — both closing commits
+were real, well-tested machinery that production never actually reached.
 
 Round 21 (superseded by the above): opencode closed all 5 of round 20's remaining issues same-day;
 found `#301` was a false close the first time (classification-only, no dedup mechanism at all) and

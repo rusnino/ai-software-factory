@@ -1,6 +1,49 @@
 # Next Steps
 
-## Current State (2026-09-11) — Round 24
+## Current State (2026-09-11) — Round 25
+
+**`#301` reopened a 5th time, `#350` a 3rd — both closed-again commits addressed a narrower slice than
+the issue's actual remaining gap.** Scope was `git log 1f3c42a..origin/main` (4 commits: `313fe61`
+docs-only research survey, plus 3 closing commits). `gh issue list --state open` showed 0 at the
+start of this round.
+
+- **`#301`'s 5th attempt**: the new commit only changes one thing — preserve an existing
+  `Task.macro_agent_idempotency_key` instead of overwriting it. `TaskState.FAILED` still has zero
+  outgoing transitions (`state_machine.py:35`), and no poller anywhere references
+  `macro_agent_idempotency_key`, so the preserved key still has no consumer. Live-reproduced end to
+  end with a real macro-agent subprocess: a real run gets created, the task dies `FAILED`, a
+  re-`approve()` call raises `Invalid transition: failed -> exec_approved`, and a full poller sweep
+  takes zero action — the external run stays orphaned forever, byte-for-byte the same operational
+  outcome as round 24's reopen. The new regression test manually constructs a task state combination
+  (`PLAN_APPROVED` with a pre-seeded key) that production can never actually produce, and contains no
+  second `.approve()` call, so it doesn't exercise a retry at all. This is the 5th consecutive
+  close-and-reopen cycle on this issue. **Recommendation recorded in the reopen comment: this needs a
+  single complete design before the next attempt** — either a bounded, explicitly-gated
+  `FAILED -> EXEC_APPROVED`/`RUNNING` re-entry keyed on the preserved key (with its own poller), or a
+  reconciliation sweep querying macro-agent by that key for orphaned `FAILED` tasks — verified
+  end-to-end with a test that drives two real attempts through the real API, not a single-call unit
+  test.
+- **`#350`'s 3rd reopen**: the closing commit adds a real, correct release-on-cancel to
+  `RunStore.cancel()` — genuinely fixing the separate `#354` leak — but does nothing about `#350`'s
+  actual root cause: the dominant on-time-completion path (`EventBridge`'s `landing:completed`
+  handling) never calls `get()`/`collect()`/`cancel()` at all, so the leak persists for ordinary
+  successful task completions. Live-reproduced the original permanent-503 failure using only that
+  wiring path. `#354` and `#355` (the parity-test-strength fix) are both CONFIRMED genuinely fixed with
+  proven pre/post differentiation.
+- **New finding from the fresh-angle pass**: `#356` (MEDIUM) — the Email/Telegram intake adapters
+  crash with an unhandled 500 on an empty or oversized string field, reachable through completely
+  ordinary usage (any Telegram photo/sticker/voice/location message without a caption 500s instead of
+  being handled), not just malformed/adversarial input like the already-closed `#258` this is a
+  residual gap in.
+
+**Total open: 3** — `#301` (HIGH, reopened 5th time), `#350` (HIGH, reopened 3rd time), `#356`
+(MEDIUM).
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 24 State
 
 **`#301` and `#350` reopened a 4th and 2nd time respectively — the closing commits are real, correct
 plumbing that is simply never reached in production.** Scope was `git log 791df2d..origin/main` (6
