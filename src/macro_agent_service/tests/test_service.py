@@ -111,6 +111,33 @@ async def test_collect_on_non_terminal_run_preserves_idempotency(
         assert len(fresh_store._runs) == 1
 
 
+async def test_lookup_run_by_controller_execution_id(fresh_store: RunStore) -> None:
+    """#301: lookup endpoint returns a run by its controller execution id."""
+    async with _client() as client:
+        created = await client.post(
+            "/runs",
+            json={
+                "task_id": "task-lookup",
+                "objective": "Lookup test",
+                "metadata": {"controller_execution_id": "exec-lookup-301"},
+            },
+        )
+        run_id = created.json()["run_id"]
+
+        response = await client.get(
+            "/runs/by_controller_execution_id/exec-lookup-301"
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["run_id"] == run_id
+        assert data["status"] == "queued"
+
+        missing = await client.get(
+            "/runs/by_controller_execution_id/exec-does-not-exist"
+        )
+        assert missing.status_code == 404
+
+
 async def test_capacity_pressure_releases_terminal_protected_runs(
     fresh_store: RunStore,
 ) -> None:

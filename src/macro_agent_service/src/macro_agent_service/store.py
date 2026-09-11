@@ -123,6 +123,12 @@ class RunStore:
                 return run
         return None
 
+    async def run_by_controller_execution_id(
+        self, controller_execution_id: str
+    ) -> dict[str, Any] | None:
+        """Public async wrapper for lookup by controller execution id (#301)."""
+        return self._run_by_controller_execution_id(controller_execution_id)
+
     async def create(self, request: RunRequest) -> RunResponse:
         """Create a new run and return its handle.
 
