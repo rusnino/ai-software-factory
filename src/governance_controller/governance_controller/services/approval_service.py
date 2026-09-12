@@ -477,12 +477,17 @@ class ApprovalService:
         controller_execution_id: str,
         actor: str,
         source: str,
-    ) -> bool:
+    ) -> bool | None:
         """Recover a macro-agent run whose start response was lost (#301).
 
         Returns True if an active run was found by idempotency key and the
-        local execution/task were successfully advanced to RUNNING. The caller
-        must return immediately without failing the task.
+        local execution/task were successfully advanced to RUNNING by this
+        call. Returns None if a concurrent writer (e.g. the stuck-execution
+        poller) already recovered this exact run first -- the caller must
+        still return immediately without failing the task in that case, but
+        should not attribute the recovery to itself. Returns False only when
+        no active run could be found or attached at all, in which case the
+        caller should proceed with its normal failure handling.
         """
         try:
             lookup_result = await self.executor.lookup(controller_execution_id)
@@ -514,7 +519,7 @@ class ApprovalService:
                 and fresh_task.state == TaskState.RUNNING
                 and fresh_task.latest_macro_agent_run_id == start_response.run_id
             ):
-                return False
+                return None
             # Otherwise the run is confirmed live (lookup() returned a
             # non-terminal status) but this caller lost the task CAS for an
             # unrelated reason (a cancellation, or another recovery/timeout
@@ -737,6 +742,15 @@ class ApprovalService:
                     source,
                 )
                 if recovered:
+                    return task
+                if recovered is None:
+                    # A concurrent writer (e.g. the stuck-execution poller)
+                    # already recovered this exact run while our own lookup
+                    # was in flight. Return cleanly instead of falling into
+                    # the FAILED path below, which would otherwise use the
+                    # refreshed RUNNING state/version _try_recover_orphaned_run
+                    # left on this shared `task` object to legally CAS the
+                    # just-recovered task back to FAILED (#362).
                     return task
 
             transitioned = await StateMachine.atomic_transition(
