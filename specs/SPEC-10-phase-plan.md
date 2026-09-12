@@ -56,22 +56,33 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-11): Phase 2 is NOT gate-clean — `#301` reopened an 8th time, again with no new
-code, and a fresh-angle sweep found a real sibling bug inside the `#301` recovery machinery itself.**
-`#357` and `#358` are both CONFIRMED genuinely fixed this round (structural fix verified across
-multiple call sites for each, real pre-fix-fail/post-fix-pass regression tests, adversarial edge
-cases probed live and found correctly handled). `#301` was closed again by comment only — zero
-commits in this round's range touch its code — re-citing the same already-twice-reviewed `cf46044`;
-reopened with the same two residual windows restated, this time with a concrete suggested diff
-spelled out directly. New finding `#359` (HIGH): `_try_recover_orphaned_run` (the very recovery path
-`#301` is about) confirms a live macro-agent run by idempotency lookup, but if its own CAS to
-`RUNNING` then loses, it returns `False` without marking the execution for cleanup — unlike the
-structurally identical CAS-loss branch in the non-recovery happy path, which the earlier `#262` fix
-already got right. The just-recovered, genuinely live run then leaks forever, invisible to the
-cancellation-cleanup poller. Found in both `approval_service.py`'s and `verification_service.py`'s
-copies of the method — filed as one issue covering both call sites per the Regression Coverage
-Policy's sibling-sweep requirement. Total open: 2 (`#301` HIGH, `#359` HIGH) — zero MEDIUM/LOW open
-for the first time in many rounds.
+**Status (2026-09-13): a new engineering team ("Multica") took over via a PR/code-review workflow —
+a real quality jump — and genuinely closed the 8x-reopened `#301` saga plus `#359` across 3 merged
+PRs, self-catching and fixing a real bug in their own work (`#362`) before this round even started.
+Phase 2 is still NOT gate-clean: the review found a genuinely new HIGH clobbering bug in the
+just-merged fix itself, plus 3 more findings.** Scope: `git log 5a62384..origin/main` (PRs #360/#361/
+#363, 7 commits).
+
+`#301` and `#359` CONFIRMED genuinely fixed: `StuckExecutionPoller` now attempts the same
+idempotency-key lookup before failing a grace-window-expired execution (verified via a genuine 3-way
+real-Postgres concurrency test — in-process recovery vs. poller recovery vs. each other, exactly one
+winner, no orphan); the CAS-loss branch in both recovery helpers now durably queues a confirmed-live
+run for cancellation cleanup instead of dropping it. `#362` (found and fixed by the new team
+themselves) CONFIRMED genuinely fixed: a benign-race guard that could let a losing recovery attempt
+clobber a concurrent winner's committed RUNNING state now returns a proper tri-state so both callers
+short-circuit cleanly. New findings: `#364` (HIGH) — that same benign-race guard only recognizes a
+winner still in `RUNNING`; a winner that's legitimately advanced further (e.g. to `AGENT_REVIEW`) gets
+its execution row clobbered back to FAILED anyway, live-reproduced in both call sites. `#365`
+(MEDIUM) — the "double-lookup-failure" gap PR #361 itself honestly flagged as unfixed is confirmed
+real and unchanged, since it fails synchronously before any poller cycle could intervene. `#366`
+(HIGH, process) — this private Free-plan repo cannot configure branch protection or rulesets at all
+(confirmed via the GitHub API), so the new PR workflow has no enforceable gate. `#367` (HIGH) — the
+Plane webhook actor-resolution function returns the first display-name match with no uniqueness
+check, letting any workspace member impersonate an allow-listed approver's identity by renaming their
+own profile. Total open: 4 (`#364`/`#366`/`#367` HIGH, `#365` MEDIUM) — zero CRITICAL.
+
+Round 28 (superseded by the above): `#357`/`#358` both confirmed genuinely fixed; `#301` reopened an
+8th time with no new code, a fresh-angle sweep found `#359` inside the recovery machinery itself.
 
 Round 27 (superseded by the above): `#301` reopened a 7th time with no new code at all — closed by
 comment only, re-citing the same commit already reviewed and found incomplete. `#156` confirmed

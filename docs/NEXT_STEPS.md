@@ -1,6 +1,70 @@
 # Next Steps
 
-## Current State (2026-09-11) — Round 28
+## Current State (2026-09-13) — Round 29
+
+**New engineering team ("Multica") took over via a PR/code-review workflow — a marked quality jump
+over the previous direct-to-main process. 3 PRs merged (#360, #361, #363) genuinely close `#301`
+(8 reopens) and `#359`, and the team self-caught and fixed a real bug in their own work (`#362`)
+before this review round even started.** But the review still found 4 new issues: a genuinely new
+HIGH clobbering bug in the just-merged fix itself, a MEDIUM residual gap the team had already and
+honestly flagged as unfixed, and two HIGH findings from a fresh-angle pass (one process/governance,
+one a real webhook-actor-impersonation vector). Scope was `git log 5a62384..origin/main` (merge of
+PRs #360/#361/#363, 7 commits).
+
+- **`#301` (8x-reopened saga) CONFIRMED genuinely fixed for its primary scope**: `StuckExecutionPoller
+  ._poll_ready`/`_poll_retry_start` now attempt the same idempotency-key lookup before failing a
+  grace-window-expired execution, instead of unconditionally failing it. Verified via worktree:
+  targeted tests fail pre-fix/pass post-fix, including a genuine 3-way real-Postgres concurrency test
+  (in-process recovery vs. poller recovery vs. each other) — exactly one racer wins, the loser no-ops,
+  no duplicate run, no orphan.
+- **`#359` CONFIRMED genuinely fixed**: the CAS-loss branch in both `approval_service.py`'s and
+  `verification_service.py`'s `_try_recover_orphaned_run` now marks the confirmed-live-but-orphaned
+  run `cancellation_pending = True` instead of dropping it; `StuckExecutionPoller
+  ._poll_pending_cancellations` verified to actually discover and cancel it. Regression test verified
+  genuine (fails pre-fix, passes post-fix via worktree).
+- **`#362` (self-found by the new team) CONFIRMED genuinely fixed for the reported scenario**: the
+  benign-race guard added while resolving PR #361's merge conflict could refresh a loser's shared
+  `task` object to a concurrent winner's committed RUNNING state, then return `False` — which both
+  inline callers (`ApprovalService._trigger_execution`, `VerificationService._start_retry_execution`)
+  treated as "really failed," letting their own subsequent CAS legally re-transition the winner's task
+  back to FAILED. Fixed via a tri-state return (`True`/`None`/`False`); both new regression tests
+  (real end-to-end callers, genuine concurrent winner) verified to fail pre-fix with the exact
+  predicted clobbering sequence in the audit log, and pass post-fix.
+- **New finding — `#364` (HIGH)**: the very benign-race guard `#362` just fixed only recognizes a
+  winner still sitting in `TaskState.RUNNING`. If the winner has legitimately advanced *past* RUNNING
+  (e.g. to `AGENT_REVIEW`) by the time a loser's stalled lookup resolves, the guard doesn't fire, and
+  the "genuine orphan" branch clobbers the execution row back to `FAILED`/`cancellation_pending=True`
+  anyway — corrupting the audit trail and queuing a wrongful `cancel()` against a run that's genuinely
+  in (or past) review. Live-reproduced in both call sites. Same defect class as `#362`, just keyed on
+  the wrong piece of state (task state instead of the execution's own state).
+- **New finding — `#365` (MEDIUM)**: the residual "double-lookup-failure" gap PR #361 itself honestly
+  flagged as unfixed is confirmed real and unchanged — if the recovery lookup *also* errors (not just
+  "finds nothing"), the task lands permanently FAILED synchronously, before any poller cycle could
+  intervene, so the new poller-side recovery never gets a chance to help this specific path. Narrower
+  than the primary `#301` scenario (needs two stacked failures), but live-reproduced with no run
+  correlation ever established — worse than `#359`'s leak in that respect.
+- **New finding — `#366` (HIGH, process/governance)**: this repo is private on GitHub's Free plan,
+  where branch protection and rulesets are both unavailable entirely (confirmed via `gh api` — 403
+  "Upgrade to GitHub Pro or make this repository public"). The new PR workflow has no enforceable gate
+  at all: nothing stops a direct push to `main`, a merge with red/in-flight CI, or an admin override.
+  This round's 3 PRs did show real review and green CI, but that's a social convention, not a control.
+- **New finding — `#367` (HIGH)**: `api/webhooks.py`'s `_resolve_actor_email` resolves a Plane
+  webhook's self-reported actor display name against the workspace member list and returns the
+  **first** match with no uniqueness check — but `display_name` is an ordinary, self-editable Plane
+  field, not enforced-unique like email. Any workspace member can rename their own display name to
+  collide with an allow-listed approver's, and if resolved first, an EXECUTION/MERGE approval gets
+  attributed to the impersonated approver instead of the real actor. Live-reproduced directly against
+  the real function. This is the sole authorization check gating webhook-driven approvals, and it
+  fails open under attacker-controlled conditions instead of failing closed like every other branch
+  of the same function.
+
+**Total open: 4** — `#364` (HIGH), `#366` (HIGH), `#367` (HIGH), `#365` (MEDIUM). Zero CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 28 State
 
 **`#357` and `#358` both confirmed genuinely fixed with genuine tests. `#301` reopened an 8th time —
 again zero new code, comment-only close, same already-reviewed commit re-cited. A fresh-angle sweep
