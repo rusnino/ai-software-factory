@@ -377,9 +377,13 @@ class TestApprovalServiceStateTransitions:
         audit_rows = await _audit_rows_for_task(db_session, task.id)
         assert any(
             row.event_type == "execution_cancel_pending"
-            and row.payload.get("reason") == "orphan_recovery_cas_lost"
+            and row.payload.get("reason") == "execution_start_recovery_cas_lost"
             and row.payload.get("macro_agent_run_id") == "run-cas-loss-359"
+            and row.payload.get("controller_execution_id") == "key-cas-loss-359"
             for row in audit_rows
+        )
+        assert any(
+            row.event_type == "concurrent_modification" for row in audit_rows
         )
 
     async def test_execution_start_failure_classifies_orphan_risk(
