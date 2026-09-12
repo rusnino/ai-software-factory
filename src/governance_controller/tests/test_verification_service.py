@@ -2542,6 +2542,134 @@ class TestVerificationConcurrency:
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
+    async def test_retry_recovery_race_caller_does_not_clobber_concurrent_winner(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#362: _start_retry_execution's own CAS-loss path must not re-fail a
+        task that a concurrent recovery (e.g. the stuck-execution poller)
+        already brought to RUNNING for the exact same run, while this
+        caller's own lookup was still in flight.
+
+        Unlike ``test_retry_start_recovers_orphaned_run_by_lookup`` (which
+        only exercises a single attempt) or a direct call into
+        ``_try_recover_orphaned_run`` (which only exercises the helper),
+        this drives ``_start_retry_execution`` itself -- the real caller --
+        with a genuine concurrent winner racing in a second Postgres
+        session.
+        """
+        import httpx
+
+        _engine, local_session = isolated_db
+        task_id = "task-retry-recovery-race-362"
+        prior_key = "exec-retry-recovery-race-362"
+        run_id = "run-retry-recovery-race-362"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    macro_agent_idempotency_key=prior_key,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise retry recovery race",
+            acceptance=["a concurrent winner's RUNNING state is not clobbered"],
+        )
+
+        lookup_entered = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+
+        async def _lookup(_key: str) -> dict[str, str]:
+            lookup_entered.set()
+            await release_lookup.wait()
+            return {"run_id": run_id, "status": "queued"}
+
+        fake_executor.lookup.side_effect = _lookup
+
+        async def _run_retry() -> bool:
+            async with local_session() as db:
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                return await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        retry_task = asyncio.create_task(_run_retry())
+        await asyncio.wait_for(lookup_entered.wait(), timeout=5)
+
+        # A concurrent writer (the poller, in production) wins the recovery
+        # race first, using the real production helper on its own session.
+        async with local_session() as winner_db:
+            winner_task = await winner_db.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            winner_execution = await winner_db.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert winner_task is not None
+            assert winner_execution is not None
+            expected_version = winner_task.version
+            winner_executor = AsyncMock(spec=MacroAgentExecutor)
+            winner_executor.lookup.return_value = {
+                "run_id": run_id,
+                "status": "queued",
+            }
+            won = await VerificationService(
+                executor=winner_executor
+            )._try_recover_orphaned_run(
+                winner_db,
+                winner_task,
+                winner_execution,
+                prior_key,
+                expected_version,
+            )
+            assert won is True
+
+        release_lookup.set()
+        # Pre-fix, this raises RuntimeError("retry macro-agent start failed:
+        # ...") because the caller's own CAS-loss path re-reads the winner's
+        # refreshed RUNNING state/version and legally CASes it back to
+        # FAILED. Post-fix, it returns True cleanly instead.
+        result = await asyncio.wait_for(retry_task, timeout=5)
+        assert result is True
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+            assert task.latest_macro_agent_run_id == run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.RUNNING
+            assert execution.macro_agent_run_id == run_id
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
     async def test_retry_start_cas_loss_crash_persists_cancel_intent_atomically(
         self,
         isolated_db: tuple,

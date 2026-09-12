@@ -909,12 +909,17 @@ class VerificationService:
         execution: Execution,
         controller_execution_id: str,
         expected_task_version: int,
-    ) -> bool:
+    ) -> bool | None:
         """Recover a macro-agent run whose retry-start response was lost (#301).
 
-        Returns True if an active run was found by idempotency key and attached
-        to the local execution. The caller must return success without failing
-        the task.
+        Returns True if an active run was found by idempotency key and
+        attached to the local execution by this call. Returns None if a
+        concurrent writer (e.g. the stuck-execution poller) already recovered
+        this exact run first -- the caller must still return success without
+        failing the task in that case, but should not attribute the recovery
+        to itself. Returns False only when no active run could be found or
+        attached at all, in which case the caller should proceed with its
+        normal failure handling.
         """
         try:
             lookup_result = await self.executor.lookup(controller_execution_id)
@@ -961,7 +966,7 @@ class VerificationService:
                 and fresh_task.state == TaskState.RUNNING
                 and fresh_task.latest_macro_agent_run_id == start_response.run_id
             ):
-                return False
+                return None
             # Otherwise someone else (a cancellation, or another recovery/
             # timeout sweep) already moved the task away from the attempt we
             # attached to. The run we just found is genuinely live, so mark it
@@ -1143,6 +1148,17 @@ class VerificationService:
                     expected_task_version,
                 )
                 if recovered:
+                    return True
+                if recovered is None:
+                    # A concurrent writer (e.g. the stuck-execution poller)
+                    # already recovered this exact run while our own lookup
+                    # was in flight. Return cleanly instead of falling into
+                    # the FAILED path below -- unlike the approval path,
+                    # ``task.state`` here is RUNNING for the entire retry
+                    # attempt regardless of outcome, so it cannot be used to
+                    # detect this; only the helper's own version/pointer CAS
+                    # can tell "already recovered" apart from "not recovered"
+                    # (#362).
                     return True
 
             # If the retry cannot even start, the task cannot recover on its
