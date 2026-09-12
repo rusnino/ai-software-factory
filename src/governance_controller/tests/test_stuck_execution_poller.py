@@ -30,6 +30,7 @@ from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import TaskContract
+from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.audit_service import AuditService
 from governance_controller.services.cancellation_service import (
     CANCELLATION_CLAIM_LEASE,
@@ -483,6 +484,86 @@ class TestStuckExecutionPoller:
             )
             assert any(
                 row.event_type == "execution_start_failed"
+                for row in audit_rows.scalars().all()
+            )
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="retry-start recovery requires a real PostgreSQL database",
+    )
+    async def test_retry_start_recovers_orphaned_run_by_lookup(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#301 round 26/28: a verification-retry run macro-agent actually
+        accepted must be recovered into RUNNING instead of being failed and
+        left permanently orphaned.
+        """
+        _engine, local_session = isolated_db
+        execution_id = str(uuid4())
+        task_id = f"task-retry-recover-{execution_id[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    latest_macro_agent_run_id=execution_id,
+                    task_contract_json={"execution": {"timeout_minutes": 1}},
+                )
+            )
+            seed.add(
+                Execution(
+                    id=execution_id,
+                    task_id=task_id,
+                    state=TaskState.RUNNING,
+                    started_at=datetime.now(UTC) - timedelta(minutes=10),
+                    macro_agent_run_id=None,
+                )
+            )
+            await seed.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.return_value = {
+            "run_id": "run-recovered-retry-301",
+            "status": "queued",
+        }
+        # The recovered execution is immediately eligible for _poll_running's
+        # own timeout check within the same poll() pass; report it alive so
+        # this test isolates retry-start recovery from that unrelated poller.
+        executor.status.return_value = {"status": "queued"}
+
+        async with local_session() as db:
+            actions = await StuckExecutionPoller(db, executor=executor).poll()
+
+        executor.lookup.assert_awaited_once_with(execution_id)
+        recovered_actions = [
+            a for a in actions if a["action"] == "retry_execution_start_recovered"
+        ]
+        assert len(recovered_actions) == 1
+        assert recovered_actions[0]["task_id"] == task_id
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+            assert task.latest_macro_agent_run_id == "run-recovered-retry-301"
+            assert task.macro_agent_idempotency_key is None
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.RUNNING
+            assert execution.macro_agent_run_id == "run-recovered-retry-301"
+
+            audit_rows = await check.execute(
+                select(AuditLog).where(AuditLog.task_id == task_id)
+            )
+            assert any(
+                row.event_type == "retry_execution_start_recovered"
                 for row in audit_rows.scalars().all()
             )
 
@@ -1771,7 +1852,10 @@ class TestPollReady:
             timeout_minutes=1,
         )
 
-        poller = StuckExecutionPoller(db_session)
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.return_value = None
+
+        poller = StuckExecutionPoller(db_session, executor=executor)
         actions = await poller.poll()
 
         ready_actions = [a for a in actions if a["action"] == "failed_ready"]
@@ -1788,6 +1872,122 @@ class TestPollReady:
         refreshed_execution = result.scalar_one()
         assert refreshed_execution.state == TaskState.FAILED
         assert refreshed_execution.ended_at is not None
+
+    async def test_recovers_orphaned_run_by_lookup_instead_of_failing(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """#301 round 26/28: a run macro-agent actually accepted must be
+        recovered into RUNNING instead of being failed and orphaned.
+        """
+        task, execution = await _ready_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            timeout_minutes=1,
+        )
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.return_value = {
+            "run_id": "run-recovered-ready-301",
+            "status": "queued",
+        }
+
+        poller = StuckExecutionPoller(db_session, executor=executor)
+        actions = await poller.poll()
+
+        assert [a for a in actions if a["action"] == "failed_ready"] == []
+        recovered_actions = [
+            a for a in actions if a["action"] == "execution_start_recovered"
+        ]
+        assert len(recovered_actions) == 1
+        assert recovered_actions[0]["task_id"] == task.id
+        assert recovered_actions[0]["execution_id"] == execution.id
+        executor.lookup.assert_awaited_once_with(execution.id)
+
+        state = await _fetch_task_state(db_session, task.id)
+        assert state == TaskState.RUNNING
+
+        result = await db_session.execute(
+            select(Execution).where(Execution.id == execution.id)
+        )
+        refreshed_execution = result.scalar_one()
+        assert refreshed_execution.state == TaskState.RUNNING
+        assert refreshed_execution.macro_agent_run_id == "run-recovered-ready-301"
+
+        refreshed_task = await db_session.scalar(
+            select(Task).where(Task.id == task.id)
+        )
+        assert refreshed_task is not None
+        assert refreshed_task.macro_agent_idempotency_key is None
+        assert refreshed_task.latest_macro_agent_run_id == "run-recovered-ready-301"
+
+        audit_rows = await db_session.execute(
+            select(AuditLog).where(AuditLog.task_id == task.id)
+        )
+        assert any(
+            row.event_type == "execution_start_recovered"
+            for row in audit_rows.scalars().all()
+        )
+
+    async def test_recovery_reuses_preserved_idempotency_key(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A prior failed attempt's preserved key, not a fresh execution id,
+        must be the one looked up when this attempt also stalls.
+        """
+        task, execution = await _ready_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            timeout_minutes=1,
+        )
+        preserved_key = "preserved-key-from-earlier-attempt"
+        task.macro_agent_idempotency_key = preserved_key
+        await db_session.flush()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.return_value = {
+            "run_id": "run-recovered-preserved-key",
+            "status": "queued",
+        }
+
+        poller = StuckExecutionPoller(db_session, executor=executor)
+        await poller.poll()
+
+        executor.lookup.assert_awaited_once_with(preserved_key)
+        state = await _fetch_task_state(db_session, task.id)
+        assert state == TaskState.RUNNING
+
+    async def test_terminal_lookup_result_still_fails_execution(
+        self,
+        db_session: AsyncSession,
+    ) -> None:
+        """A run that already reached a terminal state is not "still active";
+        the execution must fail rather than being recovered into RUNNING.
+        """
+        task, execution = await _ready_task_with_execution(
+            db_session,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            timeout_minutes=1,
+        )
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.return_value = {
+            "run_id": "run-already-done",
+            "status": "done",
+        }
+
+        poller = StuckExecutionPoller(db_session, executor=executor)
+        actions = await poller.poll()
+
+        assert [
+            a for a in actions if a["action"] == "execution_start_recovered"
+        ] == []
+        ready_actions = [a for a in actions if a["action"] == "failed_ready"]
+        assert len(ready_actions) == 1
+
+        state = await _fetch_task_state(db_session, task.id)
+        assert state == TaskState.FAILED
 
     async def test_execution_within_grace_window_is_not_failed(
         self,
@@ -1825,6 +2025,111 @@ class TestPollReady:
         assert [a for a in actions if a["action"] == "failed_ready"] == []
         state = await _fetch_task_state(db_session, task.id)
         assert state == TaskState.READY
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="genuine CAS-race concurrency test requires PostgreSQL",
+    )
+    async def test_poller_recovery_races_inline_recovery_without_orphaning_run(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#301 rounds 26/28: the poller's own recovery attempt and the
+        in-process ``ApprovalService`` recovery attempt (triggered by the same
+        lost start response) can race each other. Exactly one must win the
+        CAS to RUNNING and correlate the real macro-agent run; neither may
+        leave the task permanently FAILED with the run orphaned.
+        """
+        _engine, local_session = isolated_db
+        idempotency_key = f"key-race-{uuid4().hex[:8]}"
+        recovered_run_id = f"run-recovered-race-{uuid4().hex[:8]}"
+
+        async with local_session() as seed:
+            task, execution = await _ready_task_with_execution(
+                seed,
+                started_at=datetime.now(UTC) - timedelta(minutes=10),
+                timeout_minutes=1,
+            )
+            task.macro_agent_idempotency_key = idempotency_key
+            await seed.commit()
+            task_id, execution_id = task.id, execution.id
+
+        release = asyncio.Event()
+        inline_started = asyncio.Event()
+        poller_started = asyncio.Event()
+
+        def _make_executor(started: asyncio.Event) -> Any:
+            executor = AsyncMock(spec=MacroAgentExecutor)
+
+            async def _lookup(_key: str) -> dict[str, Any]:
+                started.set()
+                await release.wait()
+                return {"run_id": recovered_run_id, "status": "queued"}
+
+            executor.lookup.side_effect = _lookup
+            return executor
+
+        session_inline = local_session()
+        session_poller = local_session()
+
+        async def _run_inline() -> bool:
+            task_row = await session_inline.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            execution_row = await session_inline.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert task_row is not None
+            assert execution_row is not None
+            return await ApprovalService(
+                db=session_inline, executor=_make_executor(inline_started)
+            )._try_recover_orphaned_run(
+                task=task_row,
+                execution=execution_row,
+                controller_execution_id=idempotency_key,
+                actor="admin",
+                source="telegram",
+            )
+
+        async def _run_poller() -> list[dict[str, Any]]:
+            return await StuckExecutionPoller(
+                session_poller, executor=_make_executor(poller_started)
+            )._poll_ready()
+
+        inline_task = asyncio.create_task(_run_inline())
+        poller_task = asyncio.create_task(_run_poller())
+        try:
+            await asyncio.wait_for(inline_started.wait(), timeout=5)
+            await asyncio.wait_for(poller_started.wait(), timeout=5)
+            release.set()
+            inline_recovered, poller_actions = await asyncio.wait_for(
+                asyncio.gather(inline_task, poller_task), timeout=5
+            )
+        finally:
+            await session_inline.close()
+            await session_poller.close()
+
+        poller_recovered = any(
+            a["action"] == "execution_start_recovered" for a in poller_actions
+        )
+        assert not any(a["action"] == "failed_ready" for a in poller_actions)
+        # Exactly one racer must have won the CAS to RUNNING; the loser must
+        # not have also reported success or clobbered the winner's state.
+        assert inline_recovered != poller_recovered
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.RUNNING
+            assert task.macro_agent_idempotency_key is None
+            assert task.latest_macro_agent_run_id == recovered_run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.RUNNING
+            assert execution.macro_agent_run_id == recovered_run_id
 
 
 class TestPollAgentReview:

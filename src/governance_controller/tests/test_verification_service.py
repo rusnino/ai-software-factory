@@ -1165,6 +1165,94 @@ async def test_retry_start_recovers_orphaned_run_by_lookup(isolated_db) -> None:
         assert execution.macro_agent_run_id == "run-recovered-lookup-301"
 
 
+async def test_retry_orphan_recovery_cas_loss_marks_live_run_for_cleanup(
+    isolated_db,
+) -> None:
+    """#359: a lookup hit that then loses the RUNNING CAS to a concurrent
+    writer must not silently drop the genuinely live run it just found.
+    """
+    _engine, session_local = isolated_db
+    task_id = "task-retry-359"
+    execution_id = "exec-retry-359"
+
+    async with session_local() as seed:
+        seed.add(
+            Task(
+                id=task_id,
+                project_id="project-retry-359",
+                state=TaskState.RUNNING,
+                proposed_by="agent-1",
+                task_contract_json={"execution": {"timeout_minutes": 1}},
+                latest_macro_agent_run_id=execution_id,
+            )
+        )
+        seed.add(
+            Execution(
+                id=execution_id,
+                task_id=task_id,
+                state=TaskState.RUNNING,
+                started_at=datetime.now(UTC),
+            )
+        )
+        await seed.commit()
+
+    executor = AsyncMock(spec=MacroAgentExecutor)
+    executor.lookup.return_value = {
+        "run_id": "run-retry-cas-loss-359",
+        "status": "queued",
+    }
+
+    async with session_local() as db:
+        task = await db.scalar(select(Task).where(Task.id == task_id))
+        execution = await db.scalar(
+            select(Execution).where(Execution.id == execution_id)
+        )
+        assert task is not None
+        assert execution is not None
+        expected_version = task.version
+
+        # Simulate a concurrent writer (e.g. a cancellation) moving the
+        # task's pointer away from this attempt without updating this
+        # in-memory `task` object, so the CAS below observes a stale value.
+        await db.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                latest_macro_agent_run_id="something-else",
+                version=Task.version + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await db.commit()
+
+        recovered = await VerificationService(
+            executor=executor
+        )._try_recover_orphaned_run(
+            db, task, execution, "key-retry-cas-loss-359", expected_version
+        )
+        assert recovered is False
+
+    async with session_local() as check:
+        execution = await check.scalar(
+            select(Execution).where(Execution.id == execution_id)
+        )
+        assert execution is not None
+        assert execution.cancellation_pending is True
+        assert execution.macro_agent_run_id == "run-retry-cas-loss-359"
+
+        audit_rows = (
+            (await check.execute(select(AuditLog).where(AuditLog.task_id == task_id)))
+            .scalars()
+            .all()
+        )
+        assert any(
+            row.event_type == "retry_execution_cancel_pending"
+            and row.payload.get("reason") == "orphan_recovery_cas_lost"
+            and row.payload.get("macro_agent_run_id") == "run-retry-cas-loss-359"
+            for row in audit_rows
+        )
+
+
 async def test_retry_start_failure_classifies_orphan_risk(isolated_db) -> None:
     """#301: retry start failure audit distinguishes never-sent, lost-response, etc."""
     _engine, session_local = isolated_db
