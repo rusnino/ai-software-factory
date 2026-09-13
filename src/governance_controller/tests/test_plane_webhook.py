@@ -537,7 +537,10 @@ async def test_webhook_rejects_ambiguous_display_name_match(
         webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
     )
 
+    member_lookup_calls: list[Any] = []
+
     async def _colliding_members(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        member_lookup_calls.append((args, kwargs))
         return {
             "results": [
                 {"email": "admin@example.com", "display_name": "Jane Doe"},
@@ -559,8 +562,11 @@ async def test_webhook_rejects_ambiguous_display_name_match(
     assert response.status_code == 403
     # Pins the ambiguous-match branch specifically: if the resolver restore
     # above were dropped, `_auth_ok`'s fake resolver would return None for
-    # "Jane Doe" too, giving the same 403 without ever calling
-    # `list_workspace_members` or exercising the ambiguity logic.
+    # "Jane Doe" too, giving the same 403 *without* ever calling
+    # `list_workspace_members` or exercising the ambiguity logic. The detail
+    # string alone doesn't catch that (both paths produce "Unresolvable
+    # actor"), so assert the mock was actually invoked.
+    assert len(member_lookup_calls) == 1
     assert response.json()["detail"] == "Unresolvable actor"
 
     refreshed = await seeded_db.scalar(
