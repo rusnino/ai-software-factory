@@ -933,9 +933,14 @@ class VerificationService:
             return False
         if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
             return False
-        execution.state = TaskState.RUNNING
-        execution.macro_agent_run_id = start_response.run_id
-        await db.flush()
+        # Do not mutate/flush the local `execution` object until the Task CAS
+        # below has actually won. Flushing eagerly here would blindly
+        # overwrite the Execution row (no WHERE-state guard on an ORM flush)
+        # regardless of whether we win or lose the race, corrupting a
+        # concurrent winner's already-committed progress (e.g. AGENT_REVIEW)
+        # the moment this transaction eventually commits -- and it would also
+        # make the benign-race guard below unable to distinguish "already
+        # there" from "just written by me" (#364).
         cas_result = await db.execute(
             update(Task)
             .where(
@@ -955,16 +960,33 @@ class VerificationService:
             # A concurrent recovery attempt (e.g. the poller racing this same
             # in-process handler) may have already attached this exact run --
             # that is a benign redundant race, not an orphan, so leave the
-            # winner's committed state untouched.
+            # winner's committed state untouched. Key this off the execution
+            # row itself (the resource actually being protected), not the
+            # task's state: the winner may have legitimately progressed past
+            # RUNNING (e.g. to AGENT_REVIEW) by the time this CAS loses, and
+            # that is still not an orphan (#364).
+            #
+            # Refresh the shared `task` object too (populate_existing merges
+            # into the identity-mapped instance the caller already holds), so
+            # a caller that re-checks `task.state`/`task.latest_macro_agent_run_id`
+            # after a benign None sees the winner's real committed state
+            # instead of this call's stale pre-attempt snapshot.
             fresh_task = await db.scalar(
                 select(Task)
                 .where(Task.id == task.id)  # type: ignore[arg-type]
                 .execution_options(populate_existing=True)
             )
+            fresh_execution = await db.scalar(
+                select(Execution)
+                .where(Execution.id == execution.id)  # type: ignore[arg-type]
+                .execution_options(populate_existing=True)
+            )
             if (
                 fresh_task is not None
-                and fresh_task.state == TaskState.RUNNING
                 and fresh_task.latest_macro_agent_run_id == start_response.run_id
+                and fresh_execution is not None
+                and fresh_execution.macro_agent_run_id == start_response.run_id
+                and fresh_execution.state != TaskState.FAILED
             ):
                 return None
             # Otherwise someone else (a cancellation, or another recovery/
@@ -974,6 +996,7 @@ class VerificationService:
             # CAS-loss branch does -- otherwise it is never recorded anywhere
             # and leaks forever (#359).
             execution.state = TaskState.FAILED
+            execution.macro_agent_run_id = start_response.run_id
             execution.ended_at = datetime.now(UTC)
             execution.cancellation_pending = True
             await db.flush()
@@ -992,7 +1015,10 @@ class VerificationService:
             )
             await db.commit()
             return False
+        execution.state = TaskState.RUNNING
+        execution.macro_agent_run_id = start_response.run_id
         task.macro_agent_idempotency_key = None
+        await db.flush()
         await AuditService.log(
             db=db,
             event_type="retry_execution_start_recovered",

@@ -2670,6 +2670,157 @@ class TestVerificationConcurrency:
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
+    async def test_retry_recovery_race_caller_does_not_clobber_winner_past_running(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#364: the benign-race guard must not require the concurrent winner
+        to still be sitting in RUNNING. If the winner legitimately advances
+        past RUNNING (e.g. to AGENT_REVIEW, via ordinary verification) before
+        this caller's own stalled lookup resolves, the CAS loss is still
+        benign -- not a genuine orphan -- and must not clobber the winner's
+        execution row.
+
+        Unlike ``test_retry_recovery_race_caller_does_not_clobber_concurrent_winner``
+        (#362, where the winner is still RUNNING when the loser's CAS loses),
+        this drives the winner one step further -- to AGENT_REVIEW -- with a
+        real concurrent Postgres session before releasing the loser, so the
+        pre-fix guard's ``fresh_task.state == TaskState.RUNNING`` check is
+        genuinely false and falls into the clobbering branch.
+        """
+        _engine, local_session = isolated_db
+        task_id = "task-retry-recovery-race-past-running-364"
+        prior_key = "exec-retry-recovery-race-past-running-364"
+        run_id = "run-retry-recovery-race-past-running-364"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    macro_agent_idempotency_key=prior_key,
+                )
+            )
+            await seed.commit()
+
+        contract = TaskContract(
+            task_id=task_id,
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Exercise retry recovery race past RUNNING",
+            acceptance=["a winner's AGENT_REVIEW state is not clobbered"],
+        )
+
+        lookup_entered = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+
+        async def _lookup(_key: str) -> dict[str, str]:
+            lookup_entered.set()
+            await release_lookup.wait()
+            return {"run_id": run_id, "status": "queued"}
+
+        fake_executor.lookup.side_effect = _lookup
+
+        async def _run_retry() -> bool:
+            async with local_session() as db:
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                return await VerificationService(
+                    executor=fake_executor
+                )._start_retry_execution(
+                    db=db,
+                    task=task,
+                    contract=contract,
+                    profile=None,
+                    report={"passed": False},
+                )
+
+        retry_task = asyncio.create_task(_run_retry())
+        await asyncio.wait_for(lookup_entered.wait(), timeout=5)
+
+        # A concurrent writer (the poller, in production) wins the recovery
+        # race first, then ordinary verification legitimately advances the
+        # task/execution past RUNNING to AGENT_REVIEW -- all committed before
+        # this caller's own stalled lookup resolves.
+        async with local_session() as winner_db:
+            winner_task = await winner_db.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            winner_execution = await winner_db.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert winner_task is not None
+            assert winner_execution is not None
+            expected_version = winner_task.version
+            winner_executor = AsyncMock(spec=MacroAgentExecutor)
+            winner_executor.lookup.return_value = {
+                "run_id": run_id,
+                "status": "queued",
+            }
+            won = await VerificationService(
+                executor=winner_executor
+            )._try_recover_orphaned_run(
+                winner_db,
+                winner_task,
+                winner_execution,
+                prior_key,
+                expected_version,
+            )
+            assert won is True
+
+            # ``_try_recover_orphaned_run`` attaches the run via a raw
+            # ``update()`` with ``synchronize_session=False``, which does not
+            # refresh ``winner_task`` in place -- re-read it so the version
+            # used below matches what was actually committed.
+            winner_task = await winner_db.scalar(
+                select(Task)
+                .where(Task.id == task_id)
+                .execution_options(populate_existing=True)
+            )
+            assert winner_task is not None
+            advanced = await StateMachine.atomic_transition(
+                winner_db, winner_task, TaskState.AGENT_REVIEW
+            )
+            assert advanced is True
+            winner_execution.state = TaskState.AGENT_REVIEW
+            await winner_db.commit()
+
+        release_lookup.set()
+        # Pre-fix, this raises RuntimeError("retry macro-agent start failed:
+        # ...") because the guard only recognizes the winner as benign while
+        # it is still exactly RUNNING; seeing AGENT_REVIEW instead, it falls
+        # into the genuine-orphan branch, and the caller's own fallthrough
+        # then clobbers with a ValueError. Post-fix, it returns True cleanly
+        # instead, leaving the winner's progress untouched.
+        result = await asyncio.wait_for(retry_task, timeout=5)
+        assert result is True
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.AGENT_REVIEW
+            assert task.latest_macro_agent_run_id == run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.AGENT_REVIEW
+            assert execution.macro_agent_run_id == run_id
+            assert execution.cancellation_pending is False
+            assert execution.ended_at is None
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
     async def test_retry_start_cas_loss_crash_persists_cancel_intent_atomically(
         self,
         isolated_db: tuple,

@@ -1755,6 +1755,143 @@ class TestApprovalConcurrency:
         not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
         reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
     )
+    async def test_recovery_race_caller_does_not_clobber_winner_past_running(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#364: the benign-race guard must not require the concurrent winner
+        to still be sitting in RUNNING. If the winner legitimately advances
+        past RUNNING (e.g. to AGENT_REVIEW, via ordinary verification) before
+        this caller's own stalled lookup resolves, the CAS loss is still
+        benign -- not a genuine orphan -- and must not clobber the winner's
+        execution row.
+
+        Unlike ``test_recovery_race_caller_does_not_clobber_concurrent_winner``
+        (#362, where the winner is still RUNNING when the loser's CAS loses),
+        this drives the winner one step further -- to AGENT_REVIEW -- with a
+        real concurrent Postgres session before releasing the loser, so the
+        pre-fix guard's ``fresh_task.state == TaskState.RUNNING`` check is
+        genuinely false and falls into the clobbering branch.
+        """
+        import httpx
+
+        from governance_controller import config
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "")
+        _engine, local_session = isolated_db
+        task_id = "task-recovery-race-past-running-364"
+        prior_key = "exec-recovery-race-past-running-364"
+        run_id = "run-recovery-race-past-running-364"
+
+        async with local_session() as seed:
+            await _seed_task(seed, task_id)
+            seeded = await seed.scalar(select(Task).where(Task.id == task_id))
+            assert seeded is not None
+            seeded.macro_agent_idempotency_key = prior_key
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+
+        lookup_entered = asyncio.Event()
+        release_lookup = asyncio.Event()
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = httpx.ReadTimeout(
+            "lost response", request=httpx.Request("POST", "http://macro.example/runs")
+        )
+
+        async def _lookup(_key: str) -> dict[str, str]:
+            lookup_entered.set()
+            await release_lookup.wait()
+            return {"run_id": run_id, "status": "queued"}
+
+        fake_executor.lookup.side_effect = _lookup
+
+        async def _run_approve() -> Task:
+            async with local_session() as db:
+                task = await db.scalar(select(Task).where(Task.id == task_id))
+                assert task is not None
+                return await ApprovalService(db=db, executor=fake_executor).approve(
+                    task=task,
+                    contract=contract,
+                    profile=profile,
+                    approval_type=ApprovalType.EXECUTION,
+                    source="test",
+                    actor="admin",
+                    idempotency_key="key-recovery-race-past-running-364",
+                )
+
+        approve_task = asyncio.create_task(_run_approve())
+        await asyncio.wait_for(lookup_entered.wait(), timeout=5)
+
+        # A concurrent writer (the poller, in production) wins the recovery
+        # race first, then ordinary verification legitimately advances the
+        # task/execution past RUNNING to AGENT_REVIEW -- all committed before
+        # this caller's own stalled lookup resolves.
+        async with local_session() as winner_db:
+            winner_task = await winner_db.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            winner_execution = await winner_db.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert winner_task is not None
+            assert winner_execution is not None
+            winner_executor = AsyncMock(spec=MacroAgentExecutor)
+            winner_executor.lookup.return_value = {
+                "run_id": run_id,
+                "status": "queued",
+            }
+            won = await ApprovalService(
+                db=winner_db, executor=winner_executor
+            )._try_recover_orphaned_run(
+                task=winner_task,
+                execution=winner_execution,
+                controller_execution_id=prior_key,
+                actor="system:poller",
+                source="stuck_execution_poller",
+            )
+            assert won is True
+
+            advanced = await StateMachine.atomic_transition(
+                winner_db, winner_task, TaskState.AGENT_REVIEW
+            )
+            assert advanced is True
+            winner_execution.state = TaskState.AGENT_REVIEW
+            await winner_db.commit()
+
+        release_lookup.set()
+        # Pre-fix, this raises RuntimeError("macro-agent start failed: ...")
+        # because the guard only recognizes the winner as benign while it is
+        # still exactly RUNNING; seeing AGENT_REVIEW instead, it falls into
+        # the genuine-orphan branch and clobbers the execution row with
+        # state=FAILED, cancellation_pending=True. Post-fix, it returns the
+        # task cleanly instead, leaving the winner's progress untouched.
+        result = await asyncio.wait_for(approve_task, timeout=5)
+
+        assert result.state == TaskState.AGENT_REVIEW
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.AGENT_REVIEW
+            assert task.latest_macro_agent_run_id == run_id
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.AGENT_REVIEW
+            assert execution.macro_agent_run_id == run_id
+            assert execution.cancellation_pending is False
+            assert execution.ended_at is None
+
+    @pytest.mark.skipif(
+        not os.environ.get("GC_TEST_DATABASE_URL", "").startswith("postgresql"),
+        reason="requires a real PostgreSQL database via GC_TEST_DATABASE_URL",
+    )
     async def test_cancellation_cleanup_locks_execution_before_task(
         self,
         isolated_db: tuple,

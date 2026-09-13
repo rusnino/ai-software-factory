@@ -501,23 +501,46 @@ class ApprovalService:
             return False
         if start_response.status in _MACRO_AGENT_TERMINAL_STATUSES:
             return False
-        execution.state = TaskState.RUNNING  # type: ignore[attr-defined]
-        execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
-        await self.db.flush()
+        # Do not mutate/flush the local `execution` object until the Task CAS
+        # below has actually won. Flushing eagerly here would blindly
+        # overwrite the Execution row (no WHERE-state guard on an ORM flush)
+        # regardless of whether we win or lose the race, corrupting a
+        # concurrent winner's already-committed progress (e.g. AGENT_REVIEW)
+        # the moment this transaction eventually commits -- and it would also
+        # make the benign-race guard below unable to distinguish "already
+        # there" from "just written by me" (#364).
         if not await StateMachine.atomic_transition(self.db, task, TaskState.RUNNING):
             # A concurrent recovery attempt (e.g. the poller racing this same
             # in-process handler) may have already attached this exact run --
             # that is a benign redundant race, not an orphan, so leave the
-            # winner's committed state untouched.
+            # winner's committed state untouched. Key this off the execution
+            # row itself (the resource actually being protected), not the
+            # task's state: the winner may have legitimately progressed past
+            # RUNNING (e.g. to AGENT_REVIEW) by the time this CAS loses, and
+            # that is still not an orphan (#364).
+            from governance_controller.models import Execution
+
+            # Refresh the shared `task` object too (populate_existing merges
+            # into the identity-mapped instance the caller already holds), so
+            # a caller that returns `task` after a benign None sees the
+            # winner's real committed state instead of this call's stale
+            # pre-attempt snapshot.
             fresh_task = await self.db.scalar(
                 select(Task)
                 .where(Task.id == task.id)  # type: ignore[arg-type]
                 .execution_options(populate_existing=True)
             )
+            fresh_execution = await self.db.scalar(
+                select(Execution)
+                .where(Execution.id == execution.id)  # type: ignore[attr-defined]
+                .execution_options(populate_existing=True)
+            )
             if (
                 fresh_task is not None
-                and fresh_task.state == TaskState.RUNNING
                 and fresh_task.latest_macro_agent_run_id == start_response.run_id
+                and fresh_execution is not None
+                and fresh_execution.macro_agent_run_id == start_response.run_id
+                and fresh_execution.state != TaskState.FAILED
             ):
                 return None
             # Otherwise the run is confirmed live (lookup() returned a
@@ -529,6 +552,7 @@ class ApprovalService:
             # of silently dropped (mirrors the happy-path CAS-loss handling
             # below, #262).
             execution.state = TaskState.FAILED  # type: ignore[attr-defined]
+            execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
             execution.ended_at = datetime.now(UTC)  # type: ignore[attr-defined]
             execution.cancellation_pending = True  # type: ignore[attr-defined]
             await self.db.flush()
@@ -561,12 +585,15 @@ class ApprovalService:
             )
             await self.db.commit()
             return False
+        execution.state = TaskState.RUNNING  # type: ignore[attr-defined]
+        execution.macro_agent_run_id = start_response.run_id  # type: ignore[attr-defined]
         task.macro_agent_idempotency_key = None
         # Without this, the recovered run is invisible to the running-execution
         # timeout poller: it joins on Task.latest_macro_agent_run_id, which the
         # normal success path (below) always sets alongside
         # execution.macro_agent_run_id.
         task.latest_macro_agent_run_id = start_response.run_id
+        await self.db.flush()
         await AuditService.log(
             db=self.db,
             event_type="execution_start_recovered",
