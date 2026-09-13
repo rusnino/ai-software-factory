@@ -9,11 +9,18 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from governance_controller.api import webhooks as webhooks_module
 from governance_controller.constants import TaskState
 from governance_controller.models.project_profile import ProjectProfileModel
 from governance_controller.models.task import Task
 from governance_controller.schemas import ProjectProfile, RepositoryConfig
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
+
+# Captured at import time, before any test's `_auth_ok` fixture monkeypatches
+# `webhooks_module._resolve_actor_email` to a fake resolver. Tests targeting
+# `_resolve_actor_email` itself must restore this real implementation, or
+# they exercise the fixture's fake resolver instead of the code under test.
+_REAL_RESOLVE_ACTOR_EMAIL = webhooks_module._resolve_actor_email
 
 _STATE_UUIDS = {
     "Proposed": "state-uuid-proposed",
@@ -477,6 +484,63 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 403
+
+
+async def test_webhook_rejects_ambiguous_display_name_match(
+    async_client: AsyncClient,
+    seeded_db: AsyncSession,
+    _auth_ok: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#367: a display-name collision must fail closed, not resolve to the
+    first match. An attacker who renames their own Plane ``display_name`` to
+    match an allow-listed approver's must not have their webhook attributed
+    to that approver, even if the real approver happens to sort first in the
+    member list.
+    """
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_base_url",
+        "http://plane.example.com",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_secret", "secret"
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_webhook_allowed_actors",
+        "admin@example.com",
+    )
+    # _auth_ok replaces _resolve_actor_email with a fake resolver; undo that
+    # so this test exercises the real ambiguous-match logic under test.
+    monkeypatch.setattr(
+        webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
+    )
+
+    async def _colliding_members(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "results": [
+                {"email": "admin@example.com", "display_name": "Jane Doe"},
+                {"email": "attacker@example.com", "display_name": "Jane Doe"},
+            ]
+        }
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.plane_client.PlaneClient.list_workspace_members",
+        _colliding_members,
+    )
+
+    event = _event(actor={"id": "attacker-uuid", "display_name": "Jane Doe"})
+    response = await async_client.post(
+        "/webhooks/plane",
+        json=event,
+        headers={"X-Plane-Webhook-Secret": "secret"},
+    )
+    assert response.status_code == 403
+
+    refreshed = await seeded_db.scalar(
+        select(Task).where(Task.id == "TASK-1")  # type: ignore[arg-type]
+    )
+    assert refreshed is not None
+    assert refreshed.state == TaskState.PROPOSED
 
 
 async def test_webhook_rejects_unresolvable_actor(
