@@ -549,6 +549,19 @@ async def test_webhook_rejects_unresolvable_actor(
     _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An actor that `_resolve_actor_email` cannot match to a member is
+    rejected via the "Unresolvable actor" branch, distinct from the
+    "Actor not authorised" branch for a resolved-but-disallowed actor.
+
+    NEXT-11: `_auth_ok` replaces `_resolve_actor_email` with a fake resolver
+    that never calls `list_workspace_members`. Left in place, this test's
+    "no members" mock below is dead code: the fake resolver still resolves
+    the default event's actor email successfully, so the 403 previously
+    observed here actually came from the allow-list mismatch branch
+    ("Actor not authorised"), not from the unresolvable-actor branch this
+    test claims to cover. Restore the real resolver so `list_workspace_members`
+    returning no match genuinely drives the unresolvable-actor path.
+    """
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_base_url",
         "http://plane.example.com",
@@ -560,7 +573,12 @@ async def test_webhook_rejects_unresolvable_actor(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
     )
-    # Force member lookup to return no match so the allowed-list check rejects.
+    monkeypatch.setattr(
+        webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
+    )
+
+    # Force member lookup to return no match so the real resolver's
+    # allowed-list check rejects with "Unresolvable actor".
     async def _no_members(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"results": []}
 
@@ -574,3 +592,4 @@ async def test_webhook_rejects_unresolvable_actor(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 403
+    assert response.json()["detail"] == "Unresolvable actor"
