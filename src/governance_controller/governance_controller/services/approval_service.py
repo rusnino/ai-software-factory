@@ -44,6 +44,25 @@ from governance_controller.services.state_machine import StateMachine
 
 _MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
+
+class _OrphanLookupInconclusive:
+    """Sentinel: the recovery lookup call itself errored (#365).
+
+    Distinct from a clean "no active run found" (``False``): the lookup
+    never confirmed anything either way, so the caller should give the task
+    a bounded retry instead of stranding it terminally ``FAILED`` with an
+    idempotency key nothing will ever consume again. Falsy like ``False``/
+    ``None`` so existing ``if recovered:`` truthy checks keep treating it as
+    "not recovered"; callers that need to tell it apart from a confirmed
+    miss check identity against ``ORPHAN_LOOKUP_INCONCLUSIVE``.
+    """
+
+    def __bool__(self) -> bool:
+        return False
+
+
+ORPHAN_LOOKUP_INCONCLUSIVE = _OrphanLookupInconclusive()
+
 _APPROVAL_TARGET_STATES: dict[ApprovalType, TaskState] = {
     ApprovalType.PLAN: TaskState.PLAN_APPROVED,
     ApprovalType.EXECUTION: TaskState.EXEC_APPROVED,
@@ -477,7 +496,7 @@ class ApprovalService:
         controller_execution_id: str,
         actor: str,
         source: str,
-    ) -> bool | None:
+    ) -> bool | None | _OrphanLookupInconclusive:
         """Recover a macro-agent run whose start response was lost (#301).
 
         Returns True if an active run was found by idempotency key and the
@@ -485,14 +504,32 @@ class ApprovalService:
         call. Returns None if a concurrent writer (e.g. the stuck-execution
         poller) already recovered this exact run first -- the caller must
         still return immediately without failing the task in that case, but
-        should not attribute the recovery to itself. Returns False only when
-        no active run could be found or attached at all, in which case the
-        caller should proceed with its normal failure handling.
+        should not attribute the recovery to itself. Returns
+        ``ORPHAN_LOOKUP_INCONCLUSIVE`` if the lookup call itself errored
+        rather than cleanly finding nothing -- the caller should leave the
+        task/execution as-is for a bounded retry instead of failing it
+        outright (#365). Returns False only when no active run could be
+        found or attached at all, in which case the caller should proceed
+        with its normal failure handling.
         """
         try:
             lookup_result = await self.executor.lookup(controller_execution_id)
-        except Exception:
-            return False
+        except Exception as exc:
+            await AuditService.log(
+                db=self.db,
+                event_type="execution_start_recovery_lookup_failed",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                execution_id=execution.id,  # type: ignore[attr-defined]
+                payload={
+                    "controller_execution_id": controller_execution_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await self.db.commit()
+            return ORPHAN_LOOKUP_INCONCLUSIVE
         if lookup_result is None:
             return False
         try:
@@ -778,6 +815,15 @@ class ApprovalService:
                     # refreshed RUNNING state/version _try_recover_orphaned_run
                     # left on this shared `task` object to legally CAS the
                     # just-recovered task back to FAILED (#362).
+                    return task
+                if recovered is ORPHAN_LOOKUP_INCONCLUSIVE:
+                    # The recovery lookup itself errored rather than cleanly
+                    # finding nothing. Task/execution are still sitting
+                    # exactly at the READY crash-recovery window #253
+                    # already covers, so leave them there for the poller's
+                    # bounded retry instead of stranding this task FAILED
+                    # with an idempotency key nothing will ever consume
+                    # again (#365).
                     return task
 
             transitioned = await StateMachine.atomic_transition(
