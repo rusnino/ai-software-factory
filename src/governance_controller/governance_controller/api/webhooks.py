@@ -274,7 +274,12 @@ async def _resolve_actor_email(
 
     Plane CE webhooks deliver a display name, not a verifiable member UUID.
     We resolve it against the workspace member list so the Controller only acts
-    on behalf of real, allowed members.
+    on behalf of real, allowed members. ``display_name`` is a mutable,
+    self-editable profile field (unlike ``email``), so if more than one member
+    matches, which one is the "real" actor is ambiguous: any member could
+    rename themselves to collide with an allow-listed approver's display name.
+    We therefore fail closed on an ambiguous match instead of returning the
+    first one, the same as the no-match case.
     """
     try:
         members_response = await client.list_workspace_members()
@@ -285,6 +290,7 @@ async def _resolve_actor_email(
     if not isinstance(results, list):
         return None
     display_lower = actor_display_name.lower()
+    matched_emails: set[str] = set()
     for member in results:
         if not isinstance(member, dict):
             continue
@@ -293,8 +299,12 @@ async def _resolve_actor_email(
         display = member.get("display_name", "")
         display_str = display.lower() if isinstance(display, str) else ""
         if display_str == display_lower or email_str == display_lower:
-            return email_str
-    return None
+            matched_emails.add(email_str)
+    if len(matched_emails) != 1:
+        # No match, or an ambiguous match across more than one distinct
+        # member email: fail closed either way.
+        return None
+    return next(iter(matched_emails))
 
 
 @router.post("/plane", status_code=status.HTTP_204_NO_CONTENT)
