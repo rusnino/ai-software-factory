@@ -69,6 +69,7 @@ class StuckExecutionPoller:
         self._batch_size = batch_size
 
     _retry_recovery_backoff = timedelta(minutes=1)
+    _orphan_lookup_max_attempts = 3
 
     def _timeout_factor(self) -> int:
         return 2
@@ -462,6 +463,40 @@ class StuckExecutionPoller:
             )
 
         return actions
+
+    async def _orphan_lookup_recovery_status(
+        self, execution_id: str, now: datetime
+    ) -> tuple[int, bool]:
+        """Return ``(failure_count, should_wait)`` for orphan-lookup retries.
+
+        Counts prior ``*_recovery_lookup_failed`` audit entries recorded by
+        ``ApprovalService``/``VerificationService`` when their own recovery
+        lookup call errored rather than cleanly finding nothing (#365). This
+        gives such a task a few more bounded, backed-off lookup attempts on
+        this poller's own schedule instead of the immediate terminal
+        ``FAILED`` that stranded it -- with its idempotency key unconsumable
+        -- before this fix.
+        """
+        result = await self.db.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.execution_id == execution_id,  # type: ignore[arg-type]
+                AuditLog.__table__.c.event_type.in_(  # type: ignore[attr-defined]
+                    [
+                        "execution_start_recovery_lookup_failed",
+                        "retry_execution_start_recovery_lookup_failed",
+                    ]
+                ),
+            )
+            .order_by(AuditLog.__table__.c.timestamp.desc())  # type: ignore[attr-defined]
+        )
+        entries = result.scalars().all()
+        if not entries:
+            return 0, False
+        should_wait = now < self._as_utc(entries[0].timestamp) + (
+            self._retry_recovery_backoff
+        )
+        return len(entries), should_wait
 
     async def _execution_start_recovery_is_backing_off(
         self,
@@ -886,6 +921,7 @@ class StuckExecutionPoller:
         )
 
         from governance_controller.services.verification_service import (
+            ORPHAN_LOOKUP_INCONCLUSIVE,
             VerificationService,
         )
 
@@ -911,16 +947,26 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            controller_execution_id = task.macro_agent_idempotency_key or execution.id
-            recovered = await VerificationService(
-                executor=self._executor_for_recovery()
-            )._try_recover_orphaned_run(
-                self.db,
-                task,
-                execution,
-                controller_execution_id,
-                task.version,
+            attempts, should_wait = await self._orphan_lookup_recovery_status(
+                execution.id, now
             )
+            if should_wait:
+                continue
+
+            recovered: object = False
+            if attempts < self._orphan_lookup_max_attempts:
+                controller_execution_id = (
+                    task.macro_agent_idempotency_key or execution.id
+                )
+                recovered = await VerificationService(
+                    executor=self._executor_for_recovery()
+                )._try_recover_orphaned_run(
+                    self.db,
+                    task,
+                    execution,
+                    controller_execution_id,
+                    task.version,
+                )
             if recovered:
                 actions.append(
                     {
@@ -931,6 +977,27 @@ class StuckExecutionPoller:
                             "orphaned macro-agent run found by lookup before "
                             "failing retry execution start"
                         ),
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            if recovered is ORPHAN_LOOKUP_INCONCLUSIVE:
+                # The lookup itself errored rather than cleanly finding
+                # nothing; ``_try_recover_orphaned_run`` already recorded the
+                # attempt, so give it a bounded number of further tries on
+                # this poller's schedule instead of failing the task now
+                # (#365).
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "orphan_lookup_retry_pending",
+                        "reason": (
+                            "recovery lookup itself errored; bounded retry "
+                            "pending before failing retry execution start"
+                        ),
+                        "attempts": attempts + 1,
                         "deadline": deadline.isoformat(),
                     }
                 )
@@ -1083,7 +1150,10 @@ class StuckExecutionPoller:
             .execution_options(populate_existing=True)
         )
 
-        from governance_controller.services.approval_service import ApprovalService
+        from governance_controller.services.approval_service import (
+            ORPHAN_LOOKUP_INCONCLUSIVE,
+            ApprovalService,
+        )
 
         now = datetime.now(UTC)
         actions: list[dict[str, Any]] = []
@@ -1107,16 +1177,26 @@ class StuckExecutionPoller:
                 )
                 continue
 
-            controller_execution_id = task.macro_agent_idempotency_key or execution.id
-            recovered = await ApprovalService(
-                db=self.db, executor=self._executor_for_recovery()
-            )._try_recover_orphaned_run(
-                task=task,
-                execution=execution,
-                controller_execution_id=controller_execution_id,
-                actor="system:poller",
-                source="stuck_execution_poller",
+            attempts, should_wait = await self._orphan_lookup_recovery_status(
+                execution.id, now
             )
+            if should_wait:
+                continue
+
+            recovered: object = False
+            if attempts < self._orphan_lookup_max_attempts:
+                controller_execution_id = (
+                    task.macro_agent_idempotency_key or execution.id
+                )
+                recovered = await ApprovalService(
+                    db=self.db, executor=self._executor_for_recovery()
+                )._try_recover_orphaned_run(
+                    task=task,
+                    execution=execution,
+                    controller_execution_id=controller_execution_id,
+                    actor="system:poller",
+                    source="stuck_execution_poller",
+                )
             if recovered:
                 actions.append(
                     {
@@ -1127,6 +1207,27 @@ class StuckExecutionPoller:
                             "orphaned macro-agent run found by lookup before "
                             "failing execution start"
                         ),
+                        "deadline": deadline.isoformat(),
+                    }
+                )
+                continue
+
+            if recovered is ORPHAN_LOOKUP_INCONCLUSIVE:
+                # The lookup itself errored rather than cleanly finding
+                # nothing; ``_try_recover_orphaned_run`` already recorded the
+                # attempt, so give it a bounded number of further tries on
+                # this poller's schedule instead of failing the task now
+                # (#365).
+                actions.append(
+                    {
+                        "task_id": task.id,
+                        "execution_id": execution.id,
+                        "action": "orphan_lookup_retry_pending",
+                        "reason": (
+                            "recovery lookup itself errored; bounded retry "
+                            "pending before failing execution start"
+                        ),
+                        "attempts": attempts + 1,
                         "deadline": deadline.isoformat(),
                     }
                 )
