@@ -455,6 +455,12 @@ class TestStuckExecutionPoller:
             async def status(self, _run_id: str) -> dict[str, Any]:
                 raise AssertionError("retry-start sentinel must never be polled")
 
+            async def lookup(self, _controller_execution_id: str) -> None:
+                # A clean "nothing found" (#301 recovery lookup), distinct
+                # from a lookup call itself erroring (#365) -- this test
+                # covers the no-active-run case, not the bounded-retry one.
+                return None
+
         async with local_session() as db:
             actions = await StuckExecutionPoller(
                 db,
@@ -565,6 +571,123 @@ class TestStuckExecutionPoller:
             assert any(
                 row.event_type == "retry_execution_start_recovered"
                 for row in audit_rows.scalars().all()
+            )
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="orphan-lookup bounded retry touches poller scheduling; "
+        "requires a real PostgreSQL database",
+    )
+    async def test_retry_start_lookup_error_gets_bounded_retry(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#365: PR #361 documented this as a known residual gap -- if the
+        recovery lookup call itself errors (not a clean "nothing found"),
+        the task must not be stranded terminally FAILED after a single
+        attempt. Pre-fix, ``_try_recover_orphaned_run`` swallowed the lookup
+        exception and returned ``False`` indistinguishably from "confirmed no
+        active run", so the very first transient lookup error permanently
+        failed the task with its idempotency key unconsumable (invisible to
+        every poller query, which never selects ``FAILED``). Post-fix, the
+        task gets ``_orphan_lookup_max_attempts`` bounded retries before
+        being treated as genuinely unrecoverable.
+        """
+        _engine, local_session = isolated_db
+        execution_id = str(uuid4())
+        task_id = f"task-retry-lookup-error-{execution_id[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.RUNNING,
+                    latest_macro_agent_run_id=execution_id,
+                    task_contract_json={"execution": {"timeout_minutes": 1}},
+                )
+            )
+            seed.add(
+                Execution(
+                    id=execution_id,
+                    task_id=task_id,
+                    state=TaskState.RUNNING,
+                    started_at=datetime.now(UTC) - timedelta(minutes=10),
+                    macro_agent_run_id=None,
+                )
+            )
+            await seed.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.side_effect = httpx.ConnectError("connection refused")
+
+        async def _poll_once() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                poller = StuckExecutionPoller(db, executor=executor)
+                # Isolate the bounded-retry-count behavior under test from
+                # the unrelated backoff-cooldown timing.
+                poller._retry_recovery_backoff = timedelta(seconds=0)
+                return await poller._poll_retry_start()
+
+        # Bounded-retry budget the fix is expected to grant (#365); hardcoded
+        # rather than read off the class so this test still fails meaningfully
+        # (task strands FAILED after attempt 1) against pre-fix code that lacks
+        # the attribute entirely.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            actions = await _poll_once()
+            assert [
+                a for a in actions if a["action"] == "failed_retry_start"
+            ] == [], f"task failed prematurely on attempt {attempt}"
+            pending = [
+                a
+                for a in actions
+                if a["action"] == "orphan_lookup_retry_pending"
+            ]
+            assert len(pending) == 1
+            assert pending[0]["task_id"] == task_id
+
+            async with local_session() as check:
+                task = await check.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                assert task is not None
+                assert task.state == TaskState.RUNNING
+
+        # The bounded retry budget is now exhausted: the next pass must give
+        # up and fail the task for real, without attempting the lookup again.
+        executor.lookup.reset_mock()
+        actions = await _poll_once()
+        failed = [a for a in actions if a["action"] == "failed_retry_start"]
+        assert len(failed) == 1
+        assert failed[0]["task_id"] == task_id
+        executor.lookup.assert_not_awaited()
+
+        async with local_session() as check:
+            task = await check.scalar(select(Task).where(Task.id == task_id))
+            assert task is not None
+            assert task.state == TaskState.FAILED
+
+            execution = await check.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+
+            audit_rows = await check.execute(
+                select(AuditLog).where(AuditLog.execution_id == execution_id)
+            )
+            rows = audit_rows.scalars().all()
+            lookup_failures = [
+                row
+                for row in rows
+                if row.event_type
+                == "retry_execution_start_recovery_lookup_failed"
+            ]
+            assert len(lookup_failures) == max_attempts
+            assert any(
+                row.event_type == "execution_start_failed" for row in rows
             )
 
 
@@ -2130,6 +2253,103 @@ class TestPollReady:
             assert execution is not None
             assert execution.state == TaskState.RUNNING
             assert execution.macro_agent_run_id == recovered_run_id
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="orphan-lookup bounded retry touches poller scheduling; "
+        "requires a real PostgreSQL database",
+    )
+    async def test_lookup_error_gets_bounded_retry_instead_of_immediate_failure(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """#365: PR #361 documented this as a known residual gap -- if the
+        recovery lookup call itself errors (not a clean "nothing found"),
+        the task must not be stranded terminally FAILED after a single
+        attempt. Pre-fix, ``_try_recover_orphaned_run`` swallowed the lookup
+        exception and returned ``False`` indistinguishably from "confirmed no
+        active run", so the very first transient lookup error permanently
+        failed the task with its idempotency key unconsumable -- and because
+        that happens synchronously (not via a grace-window timeout), it is
+        invisible to every poller query, which never selects ``FAILED``.
+        Post-fix, the task gets ``_orphan_lookup_max_attempts`` bounded
+        retries before being treated as genuinely unrecoverable.
+        """
+        _engine, local_session = isolated_db
+        async with local_session() as seed:
+            task, execution = await _ready_task_with_execution(
+                seed,
+                started_at=datetime.now(UTC) - timedelta(minutes=10),
+                timeout_minutes=1,
+            )
+            task_id, execution_id = task.id, execution.id
+            await seed.commit()
+
+        executor = AsyncMock(spec=MacroAgentExecutor)
+        executor.lookup.side_effect = httpx.ConnectError("connection refused")
+
+        async def _poll_once() -> list[dict[str, Any]]:
+            async with local_session() as db:
+                poller = StuckExecutionPoller(db, executor=executor)
+                # Isolate the bounded-retry-count behavior under test from
+                # the unrelated backoff-cooldown timing.
+                poller._retry_recovery_backoff = timedelta(seconds=0)
+                return await poller._poll_ready()
+
+        # Bounded-retry budget the fix is expected to grant (#365); hardcoded
+        # rather than read off the class so this test still fails meaningfully
+        # (task strands FAILED after attempt 1) against pre-fix code that lacks
+        # the attribute entirely.
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            actions = await _poll_once()
+            assert [
+                a for a in actions if a["action"] == "failed_ready"
+            ] == [], f"task failed prematurely on attempt {attempt}"
+            pending = [
+                a
+                for a in actions
+                if a["action"] == "orphan_lookup_retry_pending"
+            ]
+            assert len(pending) == 1
+            assert pending[0]["task_id"] == task_id
+
+            async with local_session() as check:
+                assert await _fetch_task_state(check, task_id) == (
+                    TaskState.READY
+                )
+
+        # The bounded retry budget is now exhausted: the next pass must give
+        # up and fail the task for real, without attempting the lookup again.
+        executor.lookup.reset_mock()
+        actions = await _poll_once()
+        failed = [a for a in actions if a["action"] == "failed_ready"]
+        assert len(failed) == 1
+        assert failed[0]["task_id"] == task_id
+        executor.lookup.assert_not_awaited()
+
+        async with local_session() as check:
+            assert await _fetch_task_state(check, task_id) == TaskState.FAILED
+
+            execution_row = await check.scalar(
+                select(Execution).where(Execution.id == execution_id)
+            )
+            assert execution_row is not None
+            assert execution_row.state == TaskState.FAILED
+
+            audit_rows = await check.execute(
+                select(AuditLog).where(AuditLog.execution_id == execution_id)
+            )
+            rows = audit_rows.scalars().all()
+            lookup_failures = [
+                row
+                for row in rows
+                if row.event_type == "execution_start_recovery_lookup_failed"
+            ]
+            assert len(lookup_failures) == max_attempts
+            assert any(
+                row.event_type == "execution_start_failed" for row in rows
+            )
 
 
 class TestPollAgentReview:

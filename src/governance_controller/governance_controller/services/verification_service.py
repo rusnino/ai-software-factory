@@ -51,6 +51,25 @@ from governance_controller.utils.paths import normalize_path
 
 _MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
 
+
+class _OrphanLookupInconclusive:
+    """Sentinel: the recovery lookup call itself errored (#365).
+
+    Distinct from a clean "no active run found" (``False``): the lookup
+    never confirmed anything either way, so the caller should give the task
+    a bounded retry instead of stranding it terminally ``FAILED`` with an
+    idempotency key nothing will ever consume again. Falsy like ``False``/
+    ``None`` so existing ``if recovered:`` truthy checks keep treating it as
+    "not recovered"; callers that need to tell it apart from a confirmed
+    miss check identity against ``ORPHAN_LOOKUP_INCONCLUSIVE``.
+    """
+
+    def __bool__(self) -> bool:
+        return False
+
+
+ORPHAN_LOOKUP_INCONCLUSIVE = _OrphanLookupInconclusive()
+
 _logger = structlog.get_logger("governance_controller.verification")
 
 
@@ -909,7 +928,7 @@ class VerificationService:
         execution: Execution,
         controller_execution_id: str,
         expected_task_version: int,
-    ) -> bool | None:
+    ) -> bool | None | _OrphanLookupInconclusive:
         """Recover a macro-agent run whose retry-start response was lost (#301).
 
         Returns True if an active run was found by idempotency key and
@@ -917,14 +936,31 @@ class VerificationService:
         concurrent writer (e.g. the stuck-execution poller) already recovered
         this exact run first -- the caller must still return success without
         failing the task in that case, but should not attribute the recovery
-        to itself. Returns False only when no active run could be found or
-        attached at all, in which case the caller should proceed with its
-        normal failure handling.
+        to itself. Returns ``ORPHAN_LOOKUP_INCONCLUSIVE`` if the lookup call
+        itself errored rather than cleanly finding nothing -- the caller
+        should leave the task/execution as-is for a bounded retry instead of
+        failing it outright (#365). Returns False only when no active run
+        could be found or attached at all, in which case the caller should
+        proceed with its normal failure handling.
         """
         try:
             lookup_result = await self.executor.lookup(controller_execution_id)
-        except Exception:
-            return False
+        except Exception as exc:
+            await AuditService.log(
+                db=db,
+                event_type="retry_execution_start_recovery_lookup_failed",
+                task_id=task.id,
+                actor="system",
+                source="verification_service",
+                execution_id=execution.id,
+                payload={
+                    "controller_execution_id": controller_execution_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
+            await db.commit()
+            return ORPHAN_LOOKUP_INCONCLUSIVE
         if lookup_result is None:
             return False
         try:
@@ -1185,6 +1221,15 @@ class VerificationService:
                     # detect this; only the helper's own version/pointer CAS
                     # can tell "already recovered" apart from "not recovered"
                     # (#362).
+                    return True
+                if recovered is ORPHAN_LOOKUP_INCONCLUSIVE:
+                    # The recovery lookup itself errored rather than cleanly
+                    # finding nothing. Task/execution are still sitting
+                    # exactly at the RUNNING crash-recovery window
+                    # ``_poll_retry_start`` already covers, so leave them
+                    # there for the poller's bounded retry instead of
+                    # stranding this task FAILED with an idempotency key
+                    # nothing will ever consume again (#365).
                     return True
 
             # If the retry cannot even start, the task cannot recover on its
