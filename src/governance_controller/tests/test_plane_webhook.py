@@ -460,8 +460,19 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
     _auth_ok: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An authenticated webhook from an actor not on the allow-list is rejected."""
-    monkeypatch.setattr("governance_controller.config.settings.plane_base_url", "")
+    """An authenticated webhook from an actor not on the allow-list is
+    rejected via the "Actor not authorised" branch, distinct from the
+    "Unresolvable actor" branch for an actor the resolver cannot match.
+
+    Plane must be reachable and the real resolver in place so that the
+    actor genuinely resolves to a member email before the allow-list check
+    runs; otherwise this test would exercise the unresolvable-actor path
+    instead (the defect this test previously had, per NEXT-13).
+    """
+    monkeypatch.setattr(
+        "governance_controller.config.settings.plane_base_url",
+        "http://plane.example.com",
+    )
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_webhook_secret", "secret"
     )
@@ -469,14 +480,24 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
         "governance_controller.config.settings.plane_webhook_allowed_actors",
         "allowed@example.com",
     )
-    # With Plane disabled, resolver must return None so the unresolvable-actor
-    # guard rejects instead of silently approving.
-    async def _resolve_none(*args: Any, **kwargs: Any) -> str | None:
-        return None
+    # _auth_ok replaces _resolve_actor_email with a fake resolver; undo that
+    # so this test exercises the real allow-list check under test.
+    monkeypatch.setattr(
+        webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
+    )
+
+    # The default event's actor ("human@example.com") resolves to a real
+    # member, but that member is not on the allow-list.
+    async def _disallowed_member(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "results": [
+                {"email": "human@example.com", "display_name": "Human"},
+            ]
+        }
 
     monkeypatch.setattr(
-        "governance_controller.api.webhooks._resolve_actor_email",
-        _resolve_none,
+        "governance_controller.adapters.plane_client.PlaneClient.list_workspace_members",
+        _disallowed_member,
     )
     response = await async_client.post(
         "/webhooks/plane",
@@ -484,6 +505,7 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 403
+    assert response.json()["detail"] == "Actor not authorised"
 
 
 async def test_webhook_rejects_ambiguous_display_name_match(
@@ -515,7 +537,10 @@ async def test_webhook_rejects_ambiguous_display_name_match(
         webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
     )
 
+    member_lookup_calls: list[Any] = []
+
     async def _colliding_members(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        member_lookup_calls.append((args, kwargs))
         return {
             "results": [
                 {"email": "admin@example.com", "display_name": "Jane Doe"},
@@ -535,6 +560,14 @@ async def test_webhook_rejects_ambiguous_display_name_match(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 403
+    # Pins the ambiguous-match branch specifically: if the resolver restore
+    # above were dropped, `_auth_ok`'s fake resolver would return None for
+    # "Jane Doe" too, giving the same 403 *without* ever calling
+    # `list_workspace_members` or exercising the ambiguity logic. The detail
+    # string alone doesn't catch that (both paths produce "Unresolvable
+    # actor"), so assert the mock was actually invoked.
+    assert len(member_lookup_calls) == 1
+    assert response.json()["detail"] == "Unresolvable actor"
 
     refreshed = await seeded_db.scalar(
         select(Task).where(Task.id == "TASK-1")  # type: ignore[arg-type]
