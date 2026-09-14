@@ -21,6 +21,11 @@ def _nested_dict(depth: int) -> dict:
     return node
 
 
+def _oversized_dict() -> dict:
+    """A wide-but-shallow dict whose JSON serialization exceeds the 32KB bound."""
+    return {str(i): "x" * 100 for i in range(1000)}
+
+
 def test_task_contract_construction() -> None:
     contract = TaskContract(
         task_id="task-1",
@@ -187,5 +192,80 @@ def test_task_contract_oversized_verification_rejected() -> None:
             proposed_by="agent-1",
             objective="Reject oversized payload",
             acceptance=["Rejected before model_dump"],
-            verification={str(i): "x" * 100 for i in range(1000)},
+            verification=_oversized_dict(),
+        )
+
+
+def test_task_contract_oversized_opentasks_dag_rejected() -> None:
+    """#377: ``opentasks_dag`` shares the same unbounded-size shape."""
+    with pytest.raises(ValidationError, match="serialized size"):
+        TaskContract(
+            task_id="task-7",
+            project_id="project-1",
+            proposed_by="agent-1",
+            objective="Reject oversized payload",
+            acceptance=["Rejected before model_dump"],
+            opentasks_dag=_oversized_dict(),
+        )
+
+
+def test_project_profile_oversized_llm_rejected() -> None:
+    """#377: ``ProjectProfile.llm`` shares the same unbounded-size shape."""
+    with pytest.raises(ValidationError, match="serialized size"):
+        ProjectProfile(
+            project_id="project-1",
+            project_name="Test Project",
+            repository=RepositoryConfig(path="/repo"),
+            llm=_oversized_dict(),
+        )
+
+
+def test_project_profile_oversized_audit_rejected() -> None:
+    """#377: ``ProjectProfile.audit`` shares the same unbounded-size shape."""
+    with pytest.raises(ValidationError, match="serialized size"):
+        ProjectProfile(
+            project_id="project-1",
+            project_name="Test Project",
+            repository=RepositoryConfig(path="/repo"),
+            audit=_oversized_dict(),
+        )
+
+
+def test_task_contract_verification_depth_19_accepted() -> None:
+    """Boundary check for MAX_NESTING_DEPTH == 20: one below the limit."""
+    contract = TaskContract(
+        task_id="task-8",
+        project_id="project-1",
+        proposed_by="agent-1",
+        objective="Boundary: 19 levels",
+        acceptance=["Accepted"],
+        verification=_nested_dict(19),
+    )
+    assert contract.verification == _nested_dict(19)
+
+
+def test_task_contract_verification_depth_20_accepted() -> None:
+    """Boundary check for MAX_NESTING_DEPTH == 20: exactly at the documented
+    limit must be accepted, not rejected off by one (#380 review)."""
+    contract = TaskContract(
+        task_id="task-9",
+        project_id="project-1",
+        proposed_by="agent-1",
+        objective="Boundary: 20 levels",
+        acceptance=["Accepted"],
+        verification=_nested_dict(20),
+    )
+    assert contract.verification == _nested_dict(20)
+
+
+def test_task_contract_verification_depth_21_rejected() -> None:
+    """Boundary check for MAX_NESTING_DEPTH == 20: one past the limit."""
+    with pytest.raises(ValidationError, match="nesting depth"):
+        TaskContract(
+            task_id="task-10",
+            project_id="project-1",
+            proposed_by="agent-1",
+            objective="Boundary: 21 levels",
+            acceptance=["Rejected"],
+            verification=_nested_dict(21),
         )
