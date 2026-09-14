@@ -996,3 +996,60 @@ class TestApprovalServiceSelfApprovalPrevention:
                     actor=forbidden_actor,
                     idempotency_key=f"key-{forbidden_actor}",
                 )
+
+    async def test_ghost_proposer_cannot_bypass_self_approval_via_known_proposers(
+        self,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """Live-reproduces #376: proposed_by is a free-form, unauthenticated,
+        client-supplied string, so the exact-match self-approval guard is
+        trivially bypassed by proposing under any string that differs from
+        the actor who later approves. Here the same real actor ("admin")
+        proposes as "ghost-identity-nobody-owns" and then approves its own
+        task through both PLAN and EXECUTION.
+
+        Pre-fix, neither call raises and the task reaches RUNNING. Post-fix,
+        with a known-proposer allow-list configured, both are rejected before
+        any state change or macro-agent start.
+        """
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(
+                admins={"admin"}, known_proposers={"admin"}
+            ),
+        )
+        task = Task(
+            id="task-ghost",
+            project_id="proj-1",
+            state=TaskState.PROPOSED,
+            proposed_by="ghost-identity-nobody-owns",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        with pytest.raises(PolicyViolationError, match="not a recognized actor"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.PLAN,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-ghost-plan",
+            )
+        assert task.state == TaskState.PROPOSED
+
+        with pytest.raises(PolicyViolationError, match="not a recognized actor"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-ghost-exec",
+            )
+        assert task.state == TaskState.PROPOSED
+        fake_executor.start.assert_not_awaited()

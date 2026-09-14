@@ -153,6 +153,34 @@ class ApprovalService:
                 policy_violations=["actor cannot approve their own task"],
             )
 
+        # 0b. proposed_by is a free-form, unauthenticated, client-supplied
+        # string (#376) -- the check above only catches an approver who
+        # reuses the *exact* proposer string. When an operator has
+        # configured a closed set of legitimate proposer identities
+        # (GC_KNOWN_PROPOSERS), require proposed_by to be drawn from it so
+        # the self-approval guard has a real universe to compare against
+        # instead of an arbitrary string chosen specifically to differ from
+        # whatever actor approves next. Unconfigured (the default) makes
+        # this a no-op, matching today's behavior -- this Controller has no
+        # authenticated per-caller identity to bind proposed_by to, so full
+        # closure needs either that or an operator-maintained allow-list.
+        if not self.permission_service.is_recognized_proposer(task.proposed_by):
+            await self._log_rejection_and_raise(
+                event_type="approval_rejected",
+                task_id=task.id,
+                actor=actor,
+                source=source,
+                payload={
+                    "approval_type": approval_type.value,
+                    "reason": "unrecognized_proposer",
+                    "proposed_by": task.proposed_by,
+                },
+                message=(
+                    "Policy violation(s): task proposer is not a recognized actor"
+                ),
+                policy_violations=["task proposer is not a recognized actor"],
+            )
+
         permitted = await self.permission_service.may_approve(
             normalized_actor, task.id, approval_type
         )
