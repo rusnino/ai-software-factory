@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from governance_controller.utils.bounded_dict import bounded_dict_field
 from governance_controller.utils.paths import reject_root_prefixes
 
 SandboxMode = Literal["worktree", "docker", "firecracker", "kata"]
@@ -52,3 +53,5 @@ class ProjectProfile(BaseModel):
     execution: ProjectExecutionConfig = ProjectExecutionConfig()
     llm: dict[str, Any] = {}
     audit: dict[str, Any] = {}
+    _validate_llm_bounded = bounded_dict_field("llm")
+    _validate_audit_bounded = bounded_dict_field("audit")

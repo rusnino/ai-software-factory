@@ -4,6 +4,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 from governance_controller.schemas.completion_contract import CompletionContract
+from governance_controller.utils.bounded_dict import bounded_dict_field
 from governance_controller.utils.paths import reject_root_prefixes
 
 
@@ -45,6 +46,7 @@ class TaskContract(BaseModel):
     verification: dict[str, Any] = {}
     forbidden_paths: list[str] = Field(default=[], max_length=1000)
     _validate_forbidden_paths = reject_root_prefixes("forbidden_paths")
+    _validate_verification_bounded = bounded_dict_field("verification")
 
     @field_validator("task_id")
     @classmethod
@@ -101,3 +103,4 @@ class TaskContract(BaseModel):
     approval_required: bool = True
     completion_contract: CompletionContract | None = None
     opentasks_dag: dict[str, Any] | None = None
+    _validate_opentasks_dag_bounded = bounded_dict_field("opentasks_dag")
