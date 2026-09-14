@@ -16,6 +16,23 @@ def _configured_admins() -> set[str]:
     return {email.strip().lower() for email in raw.split(",") if email.strip()}
 
 
+def _configured_known_proposers() -> set[str]:
+    """Return the configured proposer allow-list from ``GC_KNOWN_PROPOSERS``.
+
+    Unlike ``admins``, empty configuration here means "no restriction" rather
+    than "deny": ``TaskContract.proposed_by`` is required for every task
+    today, and this Controller has no authenticated per-caller identity to
+    validate it against, so defaulting to fail-closed would reject all task
+    creation for every existing deployment. This allow-list is an opt-in
+    mitigation (#376) an operator can configure once real proposer identities
+    are known; leaving it unset preserves current behavior.
+    """
+    raw = settings.known_proposers
+    if not raw:
+        return set()
+    return {name.strip().lower() for name in raw.split(",") if name.strip()}
+
+
 class PermissionService:
     """Simple allow-list permission validator for approval requests.
 
@@ -25,8 +42,17 @@ class PermissionService:
     permitted to approve.
     """
 
-    def __init__(self, admins: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        admins: set[str] | None = None,
+        known_proposers: set[str] | None = None,
+    ) -> None:
         self.admins: set[str] = admins if admins is not None else _configured_admins()
+        self.known_proposers: set[str] = (
+            known_proposers
+            if known_proposers is not None
+            else _configured_known_proposers()
+        )
 
     @staticmethod
     def _normalize_actor(actor: str) -> str:
@@ -67,3 +93,19 @@ class PermissionService:
             return True
 
         return normalized in {a.strip().lower() for a in self.admins}
+
+    def is_recognized_proposer(self, proposed_by: str) -> bool:
+        """Return whether ``proposed_by`` is an acceptable task-proposer identity.
+
+        When ``known_proposers`` is unconfigured (the default), every value is
+        accepted -- ``proposed_by`` remains as unauthenticated as it is today.
+        Once configured, ``proposed_by`` must normalize to one of the
+        allow-listed identities, giving the self-approval guard (#376) a
+        closed universe to compare against instead of an arbitrary,
+        client-supplied string chosen to differ from whatever actor later
+        approves the task.
+        """
+        if not self.known_proposers:
+            return True
+        normalized = self._normalize_actor(proposed_by)
+        return normalized in {p.strip().lower() for p in self.known_proposers}

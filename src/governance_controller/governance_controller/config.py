@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     # sensitive approvals so the Controller fails closed.
     admins: str = ""
 
+    # Comma-separated allow-list of identities permitted to appear as
+    # TaskContract.proposed_by. Unlike `admins`, the empty default means "no
+    # restriction" (not "deny"): this Controller has no authenticated
+    # per-caller identity to bind proposed_by to, and proposed_by is required
+    # on every task, so failing closed here would reject all task creation by
+    # default. Configure this to give the self-approval guard a closed
+    # universe to compare `proposed_by` against instead of an arbitrary,
+    # unauthenticated client-supplied string (#376).
+    known_proposers: str = ""
+
     # Shared secret for authenticating sensitive Controller API mutations
     # (POST /tasks, POST /approvals, etc.). Callers must send the secret in the
     # X-Controller-Secret header. Leave empty ONLY in local dev where the API is

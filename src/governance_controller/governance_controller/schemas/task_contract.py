@@ -65,6 +65,21 @@ class TaskContract(BaseModel):
             raise ValueError("objective is empty or whitespace-only")
         return value
 
+    @field_validator("proposed_by")
+    @classmethod
+    def _validate_proposed_by(cls, value: str) -> str:
+        """Strip zero-width/control characters that could evade the
+        self-approval guard's actor comparison (#376), mirroring the
+        normalization ``PermissionService._normalize_actor`` already applies
+        to the approving actor. ``proposed_by`` otherwise remains a free-form,
+        unauthenticated identity -- see ``PermissionService.known_proposers``
+        for the closed-universe mitigation this Controller offers today.
+        """
+        cleaned = "".join(ch for ch in value if ch.isprintable() or ch.isspace())
+        if not cleaned.strip():
+            raise ValueError("proposed_by is empty or whitespace-only")
+        return cleaned
+
     @field_validator(
         "inputs",
         "dependencies",
