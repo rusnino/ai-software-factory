@@ -1,6 +1,91 @@
 # Next Steps
 
-## Current State (2026-09-13) — Round 29
+## Current State (2026-09-14) — Round 30
+
+**Multica closed all 4 of round 29's open issues (`#364`-`#367`) plus 2 test-quality follow-ups
+(`#370`, `#372`) it found and fixed itself. 4 of the 6 closes hold up as genuinely fixed. The other
+2 don't: one closed issue's fix is real but incomplete (a 4th recurrence of the same test-masking
+defect class, in the one test its own closing commit claimed to fix), and the other's fix doesn't
+match its own closing comment's claim when checked against the live GitHub API. A fresh-angle pass
+across areas no prior round had targeted as their own topic found one new HIGH (self-approval is
+live-reproducible today) and one new LOW (an unbounded-nesting 500).** Scope was `git log
+f3c1fc1..origin/main` (round 29's own doc commit to current `origin/main`, 9 commits: PRs #368/#369/
+#371/#373/#374).
+
+- **`#364` CONFIRMED genuinely fixed**: both `approval_service.py`'s and `verification_service.py`'s
+  `_try_recover_orphaned_run` now key the benign-race guard off the `Execution` row's own fresh state
+  (`!= FAILED`, via `populate_existing=True`) instead of requiring the winner's `Task.state ==
+  RUNNING` — correctly covers every state past RUNNING (`AGENT_REVIEW`, `BLOCKED`, `DONE`), not just
+  the one reported. Also fixed a companion RISK-16-shaped ordering bug in the same functions
+  (execution-state flush moved to after the Task CAS instead of before). Verified via worktree against
+  real Postgres: both new regression tests drive genuine concurrent sessions (one advances the task to
+  `AGENT_REVIEW` mid-recovery via `asyncio.Event`-held lookup), fail pre-fix with the exact predicted
+  clobbering sequence, pass post-fix.
+- **`#365` CONFIRMED genuinely fixed**: a new falsy sentinel (`ORPHAN_LOOKUP_INCONCLUSIVE`) lets both
+  recovery callers leave the task untouched on a lookup error instead of immediately failing it;
+  `StuckExecutionPoller` gets up to 3 bounded, backed-off retries via a new
+  `_orphan_lookup_recovery_status` helper before falling through to the pre-existing terminal-failure
+  path. Verified fail-pre/pass-post via worktree against real Postgres; retry-exhaustion behavior
+  checked directly (4th poll makes no further lookup call, task correctly still fails) — the original
+  single-error permanent-strand harm is closed, a disclosed, honest residual (a *persistent* outage
+  still eventually fails) is not a new gap.
+- **`#367` CONFIRMED genuinely fixed**: `_resolve_actor_email` now collects all case-insensitive
+  matches and fails closed (returns unresolvable) unless exactly one distinct email matches, replacing
+  the old first-match logic. Live-reproduced: the shipped test, run against the pre-fix commit, shows
+  the actual impersonation happening in the audit log (`actor=admin@example.com` attributed to an
+  attacker's request); against the fix, the same webhook gets 403 and the task is untouched. Single
+  call site codebase-wide, no duplicate unprotected logic found.
+- **`#370` CONFIRMED genuinely fixed**: `test_webhook_rejects_unresolvable_actor` now exercises the
+  real resolver and asserts the specific rejection detail, correctly distinguished from the
+  neighboring "not authorised" branch it used to conflate.
+- **`#372` REOPENED — fix incomplete.** The closing commit (928b915) correctly pinned two of the three
+  tests it targeted (added a `list_workspace_members`-was-called assertion so disabling the resolver
+  restore makes them fail as it should). But the third, `test_webhook_rejects_actor_not_in_allowed_list`
+  — the one test this same commit's message specifically claims to have restored — still isn't pinned:
+  disabling the resolver restore leaves it passing, because the `_auth_ok` fixture's fake resolver
+  happens to also produce an "actor not authorised" outcome by coincidence, without the real
+  resolution/ambiguity logic or `list_workspace_members` ever running. Same defect class as `#370`/
+  `#372` itself, 4th recurrence, live-reproduced by disabling the restore and rerunning the suite.
+- **`#366` REOPENED — closing comment doesn't match live state.** The close claimed branch protection
+  now requires "1 approving review, stale reviews dismissed." The live API right now
+  (`GET .../branches/main/protection/required_pull_request_reviews`, checked twice) shows
+  `required_approving_review_count: 0`. Everything else claimed does check out live (required status
+  checks, `enforce_admins: true`, force-push/deletion disabled) — but with 0 required approvals, a PR
+  can still merge to `main` with no one having approved it, which is exactly the gap this issue was
+  filed to close. (The repo's private→public flip, the mechanism used to unlock Free-plan branch
+  protection, was checked for secret-leak exposure in the same round: clean, no real credential ever
+  committed to history.)
+- **New finding — `#376` (HIGH)**: self-approval is live-reproducible today, via a path no prior round
+  had targeted as its own topic. The existing guard (`approval_service.py:139-140`) checks `actor ==
+  task.proposed_by`, but `proposed_by` is an unauthenticated, client-supplied free string accepted
+  as-is by `POST /tasks` — there is no authenticated per-caller identity at this layer at all (every
+  internal caller shares one `X-Controller-Secret`). Live-reproduced against the real
+  `ApprovalService`: one actor set an arbitrary `proposed_by`, then approved the same task through both
+  PLAN and EXECUTION with zero rejection. Distinct from prior spoofing fixes (#1/#227/#165/#186/#199/
+  #367), which all hardened the *approver*-side check, not the unauthenticated *proposer*-side value
+  it's compared against.
+- **New finding — `#377` (LOW)**: four untyped `dict[str, Any]` contract fields
+  (`TaskContract.verification`/`.opentasks_dag`, `ProjectProfile.llm`/`.audit`) have no depth/size
+  bound. A ~2.3KB authenticated request nested ~300 levels deep turns a should-be-422 into an
+  unhandled 500 (`task_service.py:53`'s `model_dump(mode="json")` hits pydantic-core's own recursion
+  guard). No lasting damage — `get_db()`'s rollback-on-exception means nothing durably commits.
+- **Fresh-angle passes that found nothing new**: the Controller-authoritative-over-Plane invariant
+  (CLAUDE.md: "Do not make Plane CE authoritative for approvals or workflow transitions") was checked
+  end-to-end — the webhook path converges on the exact same `ApprovalService.approve()` as the direct
+  API with identical checks, and all Controller/Plane writes are strictly one-directional
+  (Controller → Plane, never the reverse); docs (`SPEC-04`, `PROJECT_CONTEXT.md`) still match the
+  code. A full-history secrets scan of the now-public repo (env files, docker-compose, CI workflows,
+  test fixtures) found nothing real, only dev placeholders.
+
+**Total open: 5** — `#366` (HIGH), `#376` (HIGH), `#372` (MEDIUM), `#377` (LOW), plus `#375` (an
+unlabeled design question, not a bug: "Could the Governance Controller separate durable memory from
+audit logs?"). Zero CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 29 State
 
 **New engineering team ("Multica") took over via a PR/code-review workflow — a marked quality jump
 over the previous direct-to-main process. 3 PRs merged (#360, #361, #363) genuinely close `#301`
