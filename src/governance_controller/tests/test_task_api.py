@@ -139,6 +139,36 @@ class TestTaskApi:
         body = response.json()
         assert "project_id" in str(body.get("detail", "")).lower()
 
+    async def test_create_task_with_deeply_nested_opentasks_dag_returns_422(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """#377: a ~300-level-deep dict must be rejected at the schema (422),
+        not blow up pydantic-core's own recursion guard inside
+        ``TaskService.create``'s ``model_dump(mode="json")`` call (500)."""
+        node: dict = {}
+        for _ in range(300):
+            node = {"k": node}
+        poisoned_contract = sample_contract.model_copy(
+            update={"opentasks_dag": node}
+        )
+        payload = {
+            "task_contract": poisoned_contract.model_dump(),
+            "project_profile": sample_profile.model_dump(),
+        }
+
+        response = await async_client.post(
+            "/tasks",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert "nesting depth" in str(body.get("detail", "")).lower()
+
     async def test_execution_attempts_increments_on_retry(
         self,
         async_client: AsyncClient,

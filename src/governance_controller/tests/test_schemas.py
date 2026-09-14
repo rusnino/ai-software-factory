@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from governance_controller.schemas import (
     Check,
     CompletionContract,
@@ -8,6 +11,14 @@ from governance_controller.schemas import (
     ScopeCheck,
     TaskContract,
 )
+
+
+def _nested_dict(depth: int) -> dict:
+    """Build a dict nested *depth* levels deep: {"k": {"k": {...: {}}}}."""
+    node: dict = {}
+    for _ in range(depth):
+        node = {"k": node}
+    return node
 
 
 def test_task_contract_construction() -> None:
@@ -104,3 +115,77 @@ def test_task_contract_execution_defaults() -> None:
     assert contract.execution.harness == "opencode"
     assert contract.execution.timeout_minutes == 60
     assert contract.execution.max_retries == 2
+
+
+def test_task_contract_deeply_nested_opentasks_dag_rejected() -> None:
+    """#377: a deeply-nested dict must fail schema validation (422), not
+    crash pydantic-core's own recursion guard later in ``model_dump``."""
+    with pytest.raises(ValidationError, match="nesting depth"):
+        TaskContract(
+            task_id="task-3",
+            project_id="project-1",
+            proposed_by="agent-1",
+            objective="Reject deep nesting",
+            acceptance=["Rejected before model_dump"],
+            opentasks_dag=_nested_dict(300),
+        )
+
+
+def test_task_contract_deeply_nested_verification_rejected() -> None:
+    """#377: ``verification`` shares the same unbounded-dict shape."""
+    with pytest.raises(ValidationError, match="nesting depth"):
+        TaskContract(
+            task_id="task-4",
+            project_id="project-1",
+            proposed_by="agent-1",
+            objective="Reject deep nesting",
+            acceptance=["Rejected before model_dump"],
+            verification=_nested_dict(300),
+        )
+
+
+def test_task_contract_moderately_nested_opentasks_dag_accepted() -> None:
+    """A reasonable, real-world DAG shape is unaffected by the new bound."""
+    contract = TaskContract(
+        task_id="task-5",
+        project_id="project-1",
+        proposed_by="agent-1",
+        objective="Accept shallow nesting",
+        acceptance=["Still works"],
+        opentasks_dag=_nested_dict(5),
+    )
+    assert contract.opentasks_dag == _nested_dict(5)
+
+
+def test_project_profile_deeply_nested_llm_rejected() -> None:
+    """#377: ``ProjectProfile.llm``/``audit`` share the same unbounded shape."""
+    with pytest.raises(ValidationError, match="nesting depth"):
+        ProjectProfile(
+            project_id="project-1",
+            project_name="Test Project",
+            repository=RepositoryConfig(path="/repo"),
+            llm=_nested_dict(300),
+        )
+
+
+def test_project_profile_deeply_nested_audit_rejected() -> None:
+    with pytest.raises(ValidationError, match="nesting depth"):
+        ProjectProfile(
+            project_id="project-1",
+            project_name="Test Project",
+            repository=RepositoryConfig(path="/repo"),
+            audit=_nested_dict(300),
+        )
+
+
+def test_task_contract_oversized_verification_rejected() -> None:
+    """#377: a wide-but-shallow payload must be bounded by size too."""
+    with pytest.raises(ValidationError, match="serialized size"):
+        TaskContract(
+            task_id="task-6",
+            project_id="project-1",
+            proposed_by="agent-1",
+            objective="Reject oversized payload",
+            acceptance=["Rejected before model_dump"],
+            verification={str(i): "x" * 100 for i in range(1000)},
+        )
