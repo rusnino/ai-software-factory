@@ -1,6 +1,38 @@
 # Next Steps
 
-## Current State (2026-09-15) — Round 31
+## Current State (2026-09-15) — Round 32
+
+**Multica's lead reported everything done, but `git log dde7e4c..origin/main` shows zero new
+commits — `#376` (self-approval) remains open and completely unaddressed since round 31's reopen.**
+A fresh-angle review found one genuinely new MEDIUM finding elsewhere in the codebase.
+
+- **`#376` — still open, unaddressed.** No commits landed touching `approval_service.py`,
+  `permission_service.py`, or `config.py` since round 31. The lead's "done" report does not match
+  `git log`; nothing to re-verify this round because nothing changed.
+- **New finding — `#384` (MEDIUM)**: `ApprovalService._trigger_execution`'s opentasks-DAG
+  materialization failure path (`MaterializerError`) logs an audit event and re-raises, but never
+  transitions the task to `FAILED` — unlike the structurally identical `executor.start()` failure
+  path a few lines later in the same function, which does. Live-reproduced: a materialization failure
+  (Plane hiccup, dependency cycle, oversized DAG) leaves the task permanently stuck at `READY` with no
+  human-facing retry (`POST /approvals` for EXECUTION requires `EXEC_APPROVED`) — the only recovery is
+  `StuckExecutionPoller`, gated on a 2-hour default grace window, and that poller isn't wired into the
+  shipped `docker-compose.yml` at all, so a default deployment has no automatic recovery either. This
+  branch has never had its own regression test (the sibling `executor.start()` failure path does).
+- **This round's fresh-angle sweep otherwise came up clean**: systematic grep of every
+  `select(Task)`/`select(Execution)` call site across `EventBridge`, `CancellationService`, and
+  `StuckExecutionPoller` for RISK-16/19 siblings — all but two already correctly use
+  `populate_existing`, and those two are first-reads in fresh sessions, not staleness checks. The
+  audit-log hash chain, OPA fail-open behavior, Plane webhook actor-resolution/signature path, intake
+  rate-limiting, `RunStore`, `PermissionService`, and container/deployment config were all re-checked
+  and remain robustly hardened.
+
+**Total open: 2** — `#376` (HIGH, unaddressed since round 31), `#384` (MEDIUM, new). Zero CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 31 State
 
 **Multica closed all 5 of round 30's open issues (`#366`, `#372`, `#375`-`#377`). 4 of 5 hold up as
 genuinely fixed; the 5th — `#376`, the self-approval bypass — does not, and is reopened with new

@@ -57,23 +57,32 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-15): round 31 re-verified all 5 issues Multica closed since round 30. 4 hold up
-genuinely fixed (`#366`, `#372`, `#375`, `#377`). 1 doesn't: `#376`'s fix (an opt-in
-`GC_KNOWN_PROPOSERS` allow-list) is a no-op in every default deployment — confirmed directly that
+**Status (2026-09-15): round 32 — Multica's lead reported everything done, but `git log` shows
+zero new commits since round 31's reopen. `#376` (self-approval) remains completely unaddressed.**
+A fresh-angle review found one genuinely new MEDIUM: `#384` — `ApprovalService._trigger_execution`'s
+opentasks-DAG materialization failure path logs and re-raises without transitioning the task to
+`FAILED`, unlike the structurally identical `executor.start()` failure path a few lines later in the
+same function. Live-reproduced: a materialization failure leaves the task permanently stuck at
+`READY` with no human-facing retry path, and the only automatic recovery
+(`StuckExecutionPoller`, 2-hour default grace window) isn't wired into the shipped
+`docker-compose.yml` at all. A systematic sweep of every `select(Task)`/`select(Execution)` call
+site across `EventBridge`/`CancellationService`/`StuckExecutionPoller` for RISK-16/19 siblings, plus
+re-checks of the audit-log hash chain, OPA fail-open behavior, webhook actor resolution, intake
+rate-limiting, `RunStore`, and `PermissionService`, all came up clean. Phase 1/Phase 2 is still NOT
+gate-clean. Scope: `git log dde7e4c..origin/main` — 0 commits (nothing to re-verify; the entire round
+was a fresh-angle search).
+
+Full detail in `docs/NEXT_STEPS.md` round 32. Total open: 2 — `#376` (HIGH, unaddressed), `#384`
+(MEDIUM, new). Zero CRITICAL.
+
+Round 31 (superseded by the above): re-verified all 5 issues Multica closed since round 30. 4 held up
+genuinely fixed (`#366`, `#372`, `#375`, `#377`). `#376`'s fix (an opt-in `GC_KNOWN_PROPOSERS`
+allow-list) turned out to be a no-op in every default deployment — confirmed directly that
 `PermissionService.is_recognized_proposer()` returns `True` unconditionally when the setting is
 unset, which it is at both production call sites and in `.env.example`/`docker-compose.yml`. Even
-fully configured, it doesn't close the gap: the fix's own code comment admits the Controller has no
-authenticated per-caller identity to bind `proposed_by` to, so one caller holding the shared secret
-can still propose as one known name and approve as another. **This is a live, unresolved violation of
-CLAUDE.md's "Do not allow agents to approve their own work"** — reopened with new evidence. A
-fresh-angle pass tried 6+ angles (deep-nesting 500 at an unswept `EventIn` dict field, macro-agent
-service auth reachability, MERGE-path authorization, CLI command auth, recovery-path RISK-16/19
-sweep, OPA policy review) and found nothing new — the project's first fully-clean issue state made a
-genuine "nothing found" a plausible outcome. Phase 2/Phase 1 is still NOT gate-clean.** Scope: `git
-log 061bd5b..origin/main` (PRs for `#376`/`#377`/`#372`, 4 fix commits).
-
-Full detail in `docs/NEXT_STEPS.md` round 31. Total open: 1 — `#376` (HIGH, reopened). Zero
-CRITICAL/MEDIUM/LOW.
+fully configured, one caller holding the shared secret can still propose as one known name and
+approve as another — a live, unresolved violation of CLAUDE.md's "Do not allow agents to approve
+their own work." Reopened with new evidence.
 
 Round 30 (superseded by the above): Multica closed all 4 of round 29's open issues plus 2
 self-found test-quality follow-ups. 4 of 6 held up genuinely fixed; `#372` was incomplete (a 4th
