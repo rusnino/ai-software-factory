@@ -1,6 +1,62 @@
 # Next Steps
 
-## Current State (2026-09-14) — Round 30
+## Current State (2026-09-15) — Round 31
+
+**Multica closed all 5 of round 30's open issues (`#366`, `#372`, `#375`-`#377`). 4 of 5 hold up as
+genuinely fixed; the 5th — `#376`, the self-approval bypass — does not, and is reopened with new
+evidence showing the fix is a no-op in every default deployment.** Scope was `git log
+061bd5b..origin/main` (the docs commit that closed round 30, to `origin/main`) — 4 fix commits
+(`ad1ebf8` for `#376`, `65428a0`+`8011161` for `#377`, `3de9eed`/`928b915`/`e59e1b7` for `#372`) plus
+`#366`'s resolution (a deliberate, documented owner decision, not a code change).
+
+- **`#376` (HIGH) — REOPENED, not genuinely fixed.** The fix (`ad1ebf8`) adds an opt-in allow-list,
+  `GC_KNOWN_PROPOSERS` (default `""`). `PermissionService.is_recognized_proposer()` returns `True`
+  unconditionally whenever this is unset — confirmed directly: `PermissionService(admins={"admin"})`
+  (the exact way both production call sites, `api/approvals.py:27` and `api/webhooks.py:450`,
+  construct it) has `known_proposers: set()`, and `is_recognized_proposer("ghost-identity-nobody-owns")`
+  returns `True`. Neither `.env.example` nor `docker-compose.yml` sets `GC_KNOWN_PROPOSERS`. **Every
+  out-of-the-box deployment remains exactly as vulnerable as before this fix.** Live-reproduced two
+  ways against real Postgres: (1) default config, ghost proposer, single actor approves PLAN then
+  EXECUTION with zero rejections; (2) even with the allow-list fully configured as the fix's own commit
+  message intends ("agent proposes, human approves"), one caller proposing as a known name and
+  approving as another known name under the same shared secret also succeeds end-to-end — the fix's own
+  code comment admits the Controller has no authenticated per-caller identity to bind `proposed_by` to.
+  This is a live, unresolved violation of CLAUDE.md's "Do not allow agents to approve their own work."
+- **`#377` (LOW) CONFIRMED genuinely fixed**, including the documented off-by-one: verified the final
+  boundary is exactly correct (depth 20 accepted, depth 21 rejected) via three worktrees (pre-fix,
+  mid-fix-with-off-by-one, final) plus a from-scratch parametrized boundary test against the real
+  FastAPI app. 9 of 16 shipped regression tests fail pre-fix and pass post-fix — genuine
+  differentiation.
+- **`#372` CONFIRMED genuinely fixed** on its 3rd attempt: the final commit (`e59e1b7`) adds the
+  same `list_workspace_members`-was-called assertion to the one remaining unpinned test
+  (`test_webhook_rejects_actor_not_in_allowed_list`) that two prior attempts (`3de9eed`, `928b915`)
+  missed. Verified the assertion genuinely catches the regression (fails `0 == 1` with the resolver
+  restore removed).
+- **`#366` resolved by deliberate, documented owner decision, not a bug**: `required_approving_review_count`
+  is `0` because `rusnino` is the repo's only collaborator and GitHub structurally refuses self-approval
+  of PRs — with the count at 1, every future PR (including `#379`, the very fix for `#376`) becomes
+  permanently unmergeable with no second reviewer available. All other branch-protection settings
+  (required status checks with `strict:true`, `enforce_admins:true`, no force-push/deletion) remain in
+  place and independently re-verified live against the GitHub API.
+- **Fresh-angle pass found nothing new** after 6+ angles tried and the most promising one
+  (deep-nesting 500 at an unswept `EventIn.metadata`/`.payload` dict field, a plausible sibling of
+  `#377`) live-tested to depth 8000 with no crash — `middleware.py`'s global 64KB request-size cap
+  already bounds it well below any recursion risk. `macro_agent_service`'s fail-open dev auth
+  confirmed still unreachable in the shipped deployment config; OPA policy reviewed end-to-end with no
+  new gap; recently-touched recovery-path code from `#364`/`#365` re-checked with no sibling variant
+  found. This project's first fully-clean issue state (0 open, briefly, before this round's reopen)
+  made a genuine "nothing new found" a plausible honest outcome rather than under-searching.
+- **`specs/SPEC-10-phase-plan.md`'s `[^phase1-self-approval]` footnote was stale** (said `#376` was
+  "Not yet fixed" from round 30, when it had briefly been marked fixed and reopened again since) —
+  corrected in this round's docs update to reflect the reopened state with current evidence.
+
+**Total open: 1** — `#376` (HIGH, reopened). Zero CRITICAL/MEDIUM/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 30 State
 
 **Multica closed all 4 of round 29's open issues (`#364`-`#367`) plus 2 test-quality follow-ups
 (`#370`, `#372`) it found and fixed itself. 4 of the 6 closes hold up as genuinely fixed. The other
