@@ -48,7 +48,7 @@ Goal: prove Governance Controller can authorize and launch macro-agent with at l
 [^phase1-verification]: `VerificationService` is invoked by `EventBridge.handle()` on `landing:completed`, executes `required`/`optional` `Check` commands via real subprocess with real exit-code comparison, and gates `AGENT_REVIEW -> HUMAN_REVIEW` vs `FAILED` on the result. Both the failing and passing paths are covered by automated tests (GAP-006, GAP-021 closed). `GAP-058` (HIGH, commit-before-raise in `verify_and_advance()`) and `GAP-074` (HIGH, `TaskContract.forbidden_paths` silently dropped when a `CompletionContract` is attached) are both `CLOSED` per `reviews/GAPS.md` — `GAP-074`'s fix (`1cb5a44`/`d31ebd4`) was independently live-reproduced as a genuine union-of-both-sources fix in REVIEW-017, not just a diff read. REVIEW-019 found this checklist item's guarantee was threatened by `GAP-077`'s first fix attempt (a `FAILED -> RUNNING` edge added to `StateMachine`'s shared global transition table, letting 6 unrelated event types resurrect a terminally-`FAILED` task) and `GAP-085` (the "retry" never actually re-invoking the macro-agent). REVIEW-020 confirmed both are now genuinely fixed: the transition table no longer contains that edge at all, and the retry path genuinely restarts execution. `GAP-077`'s remaining residual (a replayed `landing:completed` event re-entering the retry path) was fixed and independently verified `CLOSED` in REVIEW-021. `GAP-097` (HIGH) was fixed by `85a1fd8` and tracked as GitHub issue #97; the dedup key for a retry `executor.start()` failure is now committed inside the `finally` block before the exception can propagate, so `get_db()`'s rollback does not discard it. Phase 1 gate is clear on this path.
 [^phase1-durability]: `get_db()` commits per-request sessions on success and rolls back on exception (GAP-022 closed). Audit rows for rejected approvals are committed before the rejection response is returned (GAP-044 closed). REVIEW-016 found every `datetime` column was `TIMESTAMP WITHOUT TIME ZONE` while every `utc_now()` call produced a timezone-aware value, which `asyncpg` rejects outright — live-reproduced as `POST /tasks` failing on its very first write against real Postgres. `GAP-078` (CRITICAL, storage didn't work against Postgres at all) and `GAP-079` (HIGH, TOCTOU race silently dropping a task) are both `CLOSED`, independently re-verified against a live Postgres container in REVIEW-017 — checked above on that basis. `GAP-080` (HIGH, a lock held across the live macro-agent call in `_trigger_execution`) went through two fix attempts and is `CLOSED` since REVIEW-020, independently verified with a real lock-timing measurement (0.02s vs. the original ~3.5s block). `GAP-095` (HIGH) was fixed by `85a1fd8` and tracked as GitHub issue #95: `EventBridge.handle()` now commits the `AGENT_REVIEW` transition before `verify_and_advance()`, and `_run_check()` enforces a hard timeout by killing the whole process group (`start_new_session=True` + `os.killpg`) so a shell-forked child cannot outlive the shell. Phase 1 gate is clear on this path.
 [^phase1-policy-bypass]: `GAP-057` (CRITICAL, forbidden-path traversal bypass) and `GAP-074` (HIGH, `TaskContract.forbidden_paths` never read by `PolicyEngine`) are both `CLOSED` per `reviews/GAPS.md` — see `[^phase1-verification]`.
-[^phase1-self-approval]: This checkbox covers that an approval step durably exists, not that its actor identity is trustworthy end-to-end. Round 30 (2026-09-14) found and live-reproduced `#376` (HIGH, OPEN): the self-approval guard in `approval_service.py` compares the approving actor against `TaskContract.proposed_by`, a free-form client-supplied field with no authenticated binding to the caller — so one party can set an arbitrary `proposed_by` and then approve its own task through both PLAN and EXECUTION with zero rejection, violating CLAUDE.md's "Do not allow agents to approve their own work" rule. Not yet fixed; requires either an authenticated proposer identity or constraining `proposed_by` to the same allow-listed actor set the approval side already checks against.
+[^phase1-self-approval]: This checkbox covers that an approval step durably exists, not that its actor identity is trustworthy end-to-end. Round 30 (2026-09-14) found and live-reproduced `#376` (HIGH): the self-approval guard in `approval_service.py` compares the approving actor against `TaskContract.proposed_by`, a free-form client-supplied field with no authenticated binding to the caller — so one party can set an arbitrary `proposed_by` and then approve its own task through both PLAN and EXECUTION with zero rejection, violating CLAUDE.md's "Do not allow agents to approve their own work" rule. A round-30 fix attempt (`ad1ebf8`, an opt-in `GC_KNOWN_PROPOSERS` allow-list) briefly closed this but was reopened in round 31 (2026-09-15) after live re-verification found it's a no-op in every default deployment — `PermissionService.is_recognized_proposer()` returns `True` unconditionally when the setting is unset, which it is at both production call sites and in `.env.example`/`docker-compose.yml`, and even fully configured the fix's own code comment admits the Controller has no authenticated per-caller identity to bind `proposed_by` to. **Still `OPEN` as of round 31**; requires either a genuinely authenticated proposer identity (e.g. per-agent API keys, mTLS, or a bearer token carrying a verifiable subject) or, at minimum, a non-empty-by-default allow-list with the residual risk made explicit in deployment docs.
 [^phase3-docker-sandbox]: Scoped (not started) at ~1.5-3 weeks solo-engineer effort for sandboxing `VerificationService`'s command execution specifically, distinct from macro-agent's own task-execution sandbox. The biggest open decision is the execution-backend architecture — Docker socket mounted into the Controller vs. a dedicated sandbox-executor sidecar vs. delegating to macro-agent's own sandbox — see `docs/research-verification-sandboxing-scope-2026-08-24.md`. Motivated by five consecutive Phase 1 review rounds (issues #107-#150) finding that `policy_engine.py`'s argv-string allowlist/denylist approach keeps discovering new bypasses on different allowlisted binaries; #147 documented this as an inherent limitation of argv-level command validation, not a fixable bug.
 
 ### Stop Condition
@@ -57,18 +57,28 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-14): round 30 re-verified all 6 issues Multica closed since round 29. 4 hold up
-genuinely fixed (`#364`, `#365`, `#367`, `#370`). 2 don't: `#372`'s fix is real but incomplete (a 4th
-recurrence of the same test-masking defect in the one test its own closing commit claimed to fix),
-and `#366`'s closing comment claims 1 required approving review but the live GitHub API shows 0 — a
-PR can still merge with no approval at all. A fresh-angle pass found one new HIGH (self-approval is
-live-reproducible: the guard compares against `proposed_by`, an unauthenticated client-supplied
-field) and one new LOW (unbounded-depth contract fields turn a 422 into a 500). Phase 2 is still NOT
-gate-clean.** Scope: `git log f3c1fc1..origin/main` (PRs #368/#369/#371/#373/#374, 9 commits).
+**Status (2026-09-15): round 31 re-verified all 5 issues Multica closed since round 30. 4 hold up
+genuinely fixed (`#366`, `#372`, `#375`, `#377`). 1 doesn't: `#376`'s fix (an opt-in
+`GC_KNOWN_PROPOSERS` allow-list) is a no-op in every default deployment — confirmed directly that
+`PermissionService.is_recognized_proposer()` returns `True` unconditionally when the setting is
+unset, which it is at both production call sites and in `.env.example`/`docker-compose.yml`. Even
+fully configured, it doesn't close the gap: the fix's own code comment admits the Controller has no
+authenticated per-caller identity to bind `proposed_by` to, so one caller holding the shared secret
+can still propose as one known name and approve as another. **This is a live, unresolved violation of
+CLAUDE.md's "Do not allow agents to approve their own work"** — reopened with new evidence. A
+fresh-angle pass tried 6+ angles (deep-nesting 500 at an unswept `EventIn` dict field, macro-agent
+service auth reachability, MERGE-path authorization, CLI command auth, recovery-path RISK-16/19
+sweep, OPA policy review) and found nothing new — the project's first fully-clean issue state made a
+genuine "nothing found" a plausible outcome. Phase 2/Phase 1 is still NOT gate-clean.** Scope: `git
+log 061bd5b..origin/main` (PRs for `#376`/`#377`/`#372`, 4 fix commits).
 
-Full detail in `docs/NEXT_STEPS.md` round 30. Total open: 5 — `#366` (HIGH), `#376` (HIGH, new,
-self-approval), `#372` (MEDIUM), `#377` (LOW, new, unbounded-nesting 500), plus `#375` (unlabeled
-design question, not a bug). Zero CRITICAL.
+Full detail in `docs/NEXT_STEPS.md` round 31. Total open: 1 — `#376` (HIGH, reopened). Zero
+CRITICAL/MEDIUM/LOW.
+
+Round 30 (superseded by the above): Multica closed all 4 of round 29's open issues plus 2
+self-found test-quality follow-ups. 4 of 6 held up genuinely fixed; `#372` was incomplete (a 4th
+recurrence of the same test-masking defect) and `#366`'s branch-protection claim didn't match the
+live API. Fresh-angle pass found `#376` (self-approval) and `#377` (unbounded-nesting 500).
 
 Round 29 (superseded by the above): a new engineering team ("Multica") took over via a PR/code-review
 workflow — a real quality jump — and genuinely closed the 8x-reopened `#301` saga plus `#359` across
