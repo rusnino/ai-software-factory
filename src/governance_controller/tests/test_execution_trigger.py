@@ -239,6 +239,59 @@ class TestExecutionTrigger:
         assert execution.state == TaskState.FAILED
         assert execution.ended_at is not None
 
+    async def test_materialization_failure_transitions_task_to_failed(
+        self,
+        db_session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#384: a MaterializerError must fail the task immediately, the same
+        way an executor.start() failure does, instead of leaving it stuck at
+        READY with no user-facing retry path."""
+        from governance_controller import config
+        from governance_controller.services import approval_service as module
+        from governance_controller.services.opentasks_materializer import (
+            MaterializerError,
+        )
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        materializer = AsyncMock()
+        materializer.materialize.side_effect = MaterializerError(
+            "dependency cycle detected"
+        )
+        monkeypatch.setattr(
+            module,
+            "OpentasksMaterializer",
+            lambda: materializer,
+        )
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        service = ApprovalService(db=db_session, executor=fake_executor)
+
+        task = await _make_task(db_session, TaskState.PLAN_APPROVED)
+        contract = _make_contract()
+        profile = _make_profile()
+
+        with pytest.raises(RuntimeError, match="Failed to materialize opentasks DAG"):
+            await service.approve(
+                task=task,
+                contract=contract,
+                profile=profile,
+                approval_type=ApprovalType.EXECUTION,
+                source="telegram",
+                actor="admin",
+                idempotency_key="key-materialize-fail",
+            )
+
+        fake_executor.start.assert_not_awaited()
+        assert task.state == TaskState.FAILED
+
+        execution = await db_session.scalar(
+            select(Execution).where(Execution.task_id == task.id)
+        )
+        assert execution is not None
+        assert execution.state == TaskState.FAILED
+        assert execution.ended_at is not None
+
     async def test_plan_approval_does_not_create_execution(
         self,
         db_session: AsyncSession,
