@@ -40,6 +40,7 @@ from governance_controller.constants import ApprovalType, TaskState
 from governance_controller.db import get_db
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.policy_engine import PolicyViolationError
 from governance_controller.services.task_service import TaskService
 
@@ -447,7 +448,15 @@ async def receive_plane_webhook(
     contract_data: dict[str, Any] = task.task_contract_json
     contract = TaskContract(**contract_data)
 
-    approval_service = ApprovalService(db=db)
+    # `actor_email` above was independently verified against a real Plane
+    # workspace member via `_resolve_actor_email` and `plane_webhook_allowed_actors`
+    # -- a genuinely distinct, human-backed channel from whatever credential
+    # created the task -- so this webhook path already satisfies the
+    # human-approval proof #376 requires for EXECUTION/MERGE.
+    approval_service = ApprovalService(
+        db=db,
+        permission_service=PermissionService(human_approval_verified=True),
+    )
 
     try:
         await approval_service.approve(

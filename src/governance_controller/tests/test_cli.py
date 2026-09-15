@@ -100,6 +100,9 @@ class TestCliApprove:
             **os.environ,
             "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "GC_CONTROLLER_API_SECRET": secret,
+            # #376: known_proposers now fails closed by default, so the
+            # live server needs the test's proposer identity allow-listed.
+            "GC_KNOWN_PROPOSERS": "agent-1",
         }
 
         server = subprocess.Popen(
@@ -231,6 +234,9 @@ class TestCliApprove:
             **os.environ,
             "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "GC_CONTROLLER_API_SECRET": secret,
+            # #376: known_proposers now fails closed by default, so the
+            # live server needs the test's proposer identity allow-listed.
+            "GC_KNOWN_PROPOSERS": "agent-1",
         }
 
         server = subprocess.Popen(

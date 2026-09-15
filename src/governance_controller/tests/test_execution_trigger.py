@@ -16,6 +16,7 @@ from governance_controller.schemas.opentasks import OpentasksDAG
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 
 
 async def _make_task(
@@ -107,7 +108,11 @@ class TestExecutionTrigger:
             staticmethod(_crash_before_running_commit),
         )
 
-        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
         with pytest.raises(asyncio.CancelledError):
             async with asynccontextmanager(get_db)() as db:
                 service.db = db
@@ -156,6 +161,7 @@ class TestExecutionTrigger:
             db=db_session,
             executor=executor,
             plane_projection=projection,
+            permission_service=PermissionService(human_approval_verified=True),
         )
         task = await _make_task(db_session, TaskState.PLAN_APPROVED, "controller-task")
         task.plane_issue_id = "plane-issue-uuid"
@@ -181,7 +187,11 @@ class TestExecutionTrigger:
     ) -> None:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         fake_executor.start.return_value = {"run_id": "run-abc-123"}
-        service = ApprovalService(db=db_session, executor=fake_executor)
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
@@ -213,7 +223,11 @@ class TestExecutionTrigger:
     ) -> None:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         fake_executor.start.side_effect = RuntimeError("macro-agent unavailable")
-        service = ApprovalService(db=db_session, executor=fake_executor)
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
@@ -265,7 +279,11 @@ class TestExecutionTrigger:
         )
 
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
-        service = ApprovalService(db=db_session, executor=fake_executor)
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
         task = await _make_task(db_session, TaskState.PLAN_APPROVED)
         contract = _make_contract()
@@ -297,7 +315,11 @@ class TestExecutionTrigger:
         db_session: AsyncSession,
     ) -> None:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
-        service = ApprovalService(db=db_session, executor=fake_executor)
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
         task = await _make_task(db_session, TaskState.PROPOSED)
         contract = _make_contract()

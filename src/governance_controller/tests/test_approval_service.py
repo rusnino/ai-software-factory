@@ -121,7 +121,9 @@ def service(
     return ApprovalService(
         db=db_session,
         executor=fake_executor,
-        permission_service=PermissionService(admins={"admin"}),
+        permission_service=PermissionService(
+            admins={"admin"}, human_approval_verified=True
+        ),
     )
 
 
@@ -593,7 +595,9 @@ class TestApprovalServiceIdempotency:
         service = ApprovalService(
             db=db_session,
             executor=AsyncMock(spec=MacroAgentExecutor),
-            permission_service=PermissionService(admins={"admin"}),
+            permission_service=PermissionService(
+                admins={"admin"}, human_approval_verified=True
+            ),
         )
         service.executor.start.return_value = {"run_id": "run-test"}
         service.executor.lookup.return_value = None
@@ -906,7 +910,9 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
             service_b = ApprovalService(
                 db=session_b,
                 executor=fake_executor,
-                permission_service=PermissionService(admins={"admin"}),
+                permission_service=PermissionService(
+                    admins={"admin"}, human_approval_verified=True
+                ),
             )
             task_b = await session_b.scalar(
                 sa_select(Task).where(Task.id == "task-concurrent")
@@ -927,7 +933,9 @@ class TestApprovalServiceRejectedApprovalsPersistAudit:
         service_a = ApprovalService(
             db=session_a,
             executor=fake_executor,
-            permission_service=PermissionService(admins={"admin"}),
+            permission_service=PermissionService(
+                admins={"admin"}, human_approval_verified=True
+            ),
         )
         with pytest.raises(ValueError, match="Concurrent modification"):
             await service_a.approve(
@@ -1052,4 +1060,117 @@ class TestApprovalServiceSelfApprovalPrevention:
                 idempotency_key="key-ghost-exec",
             )
         assert task.state == TaskState.PROPOSED
+        fake_executor.start.assert_not_awaited()
+
+    async def test_ghost_proposer_bypasses_default_unconfigured_allowlist(
+        self,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """GitHub-reopened #376 residual, scenario 1: the previous fix made
+
+        `GC_KNOWN_PROPOSERS` an *opt-in* allow-list -- unset (the real
+        out-of-the-box default for every existing deployment) meant "allow
+        any proposer", so a ghost `proposed_by` sailed through PLAN and
+        EXECUTION exactly as before the original fix. Post-fix, an empty/
+        unconfigured allow-list must mean DENY, matching `GC_ADMINS`'s
+        existing fail-closed default, so this must be rejected with zero
+        configuration required.
+        """
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(
+                admins={"admin"},
+                known_proposers=set(),  # unconfigured: the real-world default
+                human_approval_verified=True,
+            ),
+        )
+        task = Task(
+            id="task-ghost-default",
+            project_id="proj-1",
+            state=TaskState.PROPOSED,
+            proposed_by="ghost-identity-nobody-owns",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        with pytest.raises(PolicyViolationError, match="not a recognized actor"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.PLAN,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-ghost-default-plan",
+            )
+        assert task.state == TaskState.PROPOSED
+
+        with pytest.raises(PolicyViolationError, match="not a recognized actor"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-ghost-default-exec",
+            )
+        assert task.state == TaskState.PROPOSED
+        fake_executor.start.assert_not_awaited()
+
+    async def test_cross_known_name_propose_approve_bypass_rejected(
+        self,
+        db_session: AsyncSession,
+        fake_executor: MacroAgentExecutor,
+    ) -> None:
+        """GitHub-reopened #376 residual, scenario 2: even with
+
+        `known_proposers`/`admins` fully configured, a single caller could
+        still propose as one known name ("agent-1") and approve as another
+        known name ("admin") -- both names are recognized, so the exact-match
+        self-approval guard and the known-proposers check both pass, and
+        nothing else proved "admin" was a genuinely distinct, human-backed
+        approval channel from whoever created the task. Live-reproduced
+        end-to-end (task reached RUNNING) before this fix.
+
+        Post-fix, EXECUTION/MERGE approval additionally requires
+        `human_approval_verified` -- proof, independent of the name
+        allow-lists, that this specific request came through a real human
+        approval channel. Here it is deliberately absent (the default),
+        modelling a caller that only knows the recognized names, not a
+        distinct human-approval credential -- so the task must never reach
+        RUNNING.
+        """
+        service = ApprovalService(
+            db=db_session,
+            executor=fake_executor,
+            permission_service=PermissionService(
+                admins={"admin"},
+                known_proposers={"agent-1", "admin"},
+                # human_approval_verified defaults to False: no proof of a
+                # distinct human approval channel was presented.
+            ),
+        )
+        task = Task(
+            id="task-cross-known-name",
+            project_id="proj-1",
+            state=TaskState.PLAN_APPROVED,
+            proposed_by="agent-1",
+        )
+        db_session.add(task)
+        await db_session.flush()
+
+        with pytest.raises(PolicyViolationError, match="may not request"):
+            await service.approve(
+                task=task,
+                contract=_make_contract(),
+                profile=_make_profile(),
+                approval_type=ApprovalType.EXECUTION,
+                source="plane",
+                actor="admin",
+                idempotency_key="key-cross-known-name-exec",
+            )
+        assert task.state == TaskState.PLAN_APPROVED
         fake_executor.start.assert_not_awaited()
