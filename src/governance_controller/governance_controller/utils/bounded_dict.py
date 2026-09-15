@@ -23,17 +23,24 @@ MAX_SERIALIZED_BYTES = 32_768
 def _depth(value: Any, *, budget: int) -> int:
     """Return the nesting depth of *value*, stopping early past *budget*.
 
+    An empty dict/list or a non-container has depth 0; ``{"k": {}}`` has
+    depth 1; ``MAX_NESTING_DEPTH`` nested levels has depth
+    ``MAX_NESTING_DEPTH`` exactly, matching the documented limit at its
+    boundary rather than off by one.
+
     Recursion is bounded by *budget* (decremented each level), so this never
     recurses deeper than ``budget + 1`` regardless of how deep *value*
     actually nests -- a pathological input can't make the check itself slow
-    or blow the Python recursion limit.
+    or blow the Python recursion limit. The emptiness check runs before the
+    budget check so a genuine leaf reached exactly at the budget boundary is
+    still counted as depth 0, not folded into the "budget exceeded" case.
     """
-    if not isinstance(value, (dict, list)):
+    if not isinstance(value, (dict, list)) or not value:
         return 0
     if budget <= 0:
         return budget + 1
     children = value.values() if isinstance(value, dict) else value
-    return 1 + max((_depth(child, budget=budget - 1) for child in children), default=0)
+    return 1 + max(_depth(child, budget=budget - 1) for child in children)
 
 
 def _check_bounded_dict(value: dict[str, Any], *, field_name: str) -> dict[str, Any]:
