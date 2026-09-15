@@ -468,6 +468,16 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
     actor genuinely resolves to a member email before the allow-list check
     runs; otherwise this test would exercise the unresolvable-actor path
     instead (the defect this test previously had, per NEXT-13).
+
+    #372 (recurrence): the detail string alone doesn't pin this branch,
+    because ``_auth_ok``'s fake resolver hardcodes an allow-list of
+    ``{"human@example.com"}`` and returns that same email. That email is
+    coincidentally also not in this test's configured allow-list
+    (``"allowed@example.com"``), so if the ``_REAL_RESOLVE_ACTOR_EMAIL``
+    restore below were ever dropped, the fake resolver would produce the
+    same "Actor not authorised" 403 without ever calling
+    ``list_workspace_members`` or exercising the real resolver. Assert the
+    mock was actually invoked to close that gap.
     """
     monkeypatch.setattr(
         "governance_controller.config.settings.plane_base_url",
@@ -486,9 +496,12 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
         webhooks_module, "_resolve_actor_email", _REAL_RESOLVE_ACTOR_EMAIL
     )
 
+    member_lookup_calls: list[Any] = []
+
     # The default event's actor ("human@example.com") resolves to a real
     # member, but that member is not on the allow-list.
     async def _disallowed_member(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        member_lookup_calls.append((args, kwargs))
         return {
             "results": [
                 {"email": "human@example.com", "display_name": "Human"},
@@ -505,6 +518,12 @@ async def test_webhook_rejects_actor_not_in_allowed_list(
         headers={"X-Plane-Webhook-Secret": "secret"},
     )
     assert response.status_code == 403
+    # Pins the resolved-but-disallowed branch specifically: if the resolver
+    # restore above were dropped, `_auth_ok`'s fake resolver would return
+    # "human@example.com" without ever calling `list_workspace_members`,
+    # giving the same 403/detail. The detail string alone doesn't catch
+    # that, so assert the mock was actually invoked.
+    assert len(member_lookup_calls) == 1
     assert response.json()["detail"] == "Actor not authorised"
 
 
