@@ -757,6 +757,17 @@ class ApprovalService:
                 if dag.tasks:
                     opentasks_id = dag.tasks[0].id
             except MaterializerError as exc:
+                # Mirror the executor.start() failure handler below: this is
+                # the same "execution trigger failed before any macro-agent
+                # call was made" case, so it must reach FAILED immediately
+                # instead of leaving the task/execution stuck at READY with
+                # no user-facing retry path (#384).
+                transitioned = await StateMachine.atomic_transition(
+                    self.db, task, TaskState.FAILED
+                )
+                execution.state = TaskState.FAILED
+                execution.ended_at = datetime.now(UTC)
+                await self.db.flush()
                 await AuditService.log(
                     db=self.db,
                     event_type="opentasks_materialization_failed",
@@ -766,6 +777,20 @@ class ApprovalService:
                     execution_id=execution.id,
                     payload={"error": str(exc)},
                 )
+                if not transitioned:
+                    await AuditService.log(
+                        db=self.db,
+                        event_type="concurrent_modification",
+                        task_id=task.id,
+                        actor=actor,
+                        source=source,
+                        execution_id=execution.id,
+                        payload={
+                            "approval_type": ApprovalType.EXECUTION.value,
+                            "expected_state": TaskState.READY.value,
+                            "target_state": TaskState.FAILED.value,
+                        },
+                    )
                 await self.db.commit()
                 raise RuntimeError(
                     f"Failed to materialize opentasks DAG: {exc}"
