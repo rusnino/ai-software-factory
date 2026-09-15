@@ -18,6 +18,7 @@ from governance_controller.db import get_db
 from governance_controller.main import app
 from governance_controller.schemas import ProjectProfile, RepositoryConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 
 
 @pytest.fixture
@@ -51,7 +52,16 @@ async def async_client(client_db_session, mock_executor) -> AsyncClient:
         yield client_db_session
 
     def _override_get_approval_service(db=Depends(get_db)) -> ApprovalService:
-        return ApprovalService(db=db, executor=mock_executor)
+        # This endpoint test suite exercises state-machine/policy behavior via
+        # the real HTTP route, not the X-Human-Approval-Secret header itself
+        # (that is covered separately) -- assume the human-approval proof
+        # (#376) was already presented so these tests keep testing what they
+        # were written to test.
+        return ApprovalService(
+            db=db,
+            executor=mock_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_approval_service] = _override_get_approval_service
@@ -103,6 +113,64 @@ def _approval_payload(
         "actor": actor,
         "timestamp": "2026-08-18T12:00:00+00:00",
     }
+
+
+class TestGetApprovalServiceHumanApprovalSecret:
+    """#376: `get_approval_service` (api/approvals.py:27's construction site)
+
+    must derive `human_approval_verified` from a real per-request secret
+    comparison, not from mere presence of `admins`/`known_proposers`
+    configuration -- see PermissionService's own regression coverage for why
+    name allow-lists alone were insufficient (GitHub-reopened #376 residual).
+    """
+
+    def test_verified_false_when_secret_unconfigured(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "governance_controller.config.settings.human_approval_secret", ""
+        )
+        service = get_approval_service(
+            db=None,  # type: ignore[arg-type]
+            x_human_approval_secret="anything",
+        )
+        assert service.permission_service.human_approval_verified is False
+
+    def test_verified_false_when_header_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "governance_controller.config.settings.human_approval_secret",
+            "top-secret",
+        )
+        service = get_approval_service(db=None, x_human_approval_secret=None)  # type: ignore[arg-type]
+        assert service.permission_service.human_approval_verified is False
+
+    def test_verified_false_when_header_does_not_match(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "governance_controller.config.settings.human_approval_secret",
+            "top-secret",
+        )
+        service = get_approval_service(
+            db=None,  # type: ignore[arg-type]
+            x_human_approval_secret="wrong-secret",
+        )
+        assert service.permission_service.human_approval_verified is False
+
+    def test_verified_true_when_header_matches(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "governance_controller.config.settings.human_approval_secret",
+            "top-secret",
+        )
+        service = get_approval_service(
+            db=None,  # type: ignore[arg-type]
+            x_human_approval_secret="top-secret",
+        )
+        assert service.permission_service.human_approval_verified is True
 
 
 class TestApprovalEndpoint:

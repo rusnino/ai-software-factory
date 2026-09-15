@@ -68,6 +68,8 @@ Required in any production-like deployment:
 | `GC_CONTROLLER_API_SECRET` | Shared secret for sensitive Controller mutations (`X-Controller-Secret`) | Yes |
 | `GC_EVENT_BRIDGE_SECRET` | Shared secret for macro-agent event callbacks (`X-Event-Bridge-Secret`) | Yes |
 | `GC_EVENT_BRIDGE_HUMAN_SECRET` | Separate secret for `conflict:resolved` events that unblock a `BLOCKED` task (`X-Human-Admin-Secret`) | Yes |
+| `GC_HUMAN_APPROVAL_SECRET` | Separate secret, in addition to `GC_CONTROLLER_API_SECRET`, required to grant `EXECUTION`/`MERGE` approval via `POST /approvals` (`X-Human-Approval-Secret`). Issue only to the genuine human approval channel, never to whatever creates tasks (#376) | Yes |
+| `GC_KNOWN_PROPOSERS` | Comma-separated allow-list of identities permitted as `TaskContract.proposed_by`; empty denies all (#376) | Yes |
 
 Optional or context-dependent:
 

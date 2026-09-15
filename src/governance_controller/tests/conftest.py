@@ -25,14 +25,21 @@ def test_database_url() -> str:
 
 @pytest.fixture(autouse=True)
 def _test_admin_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Provide a non-empty admin list for tests that exercise EXECUTION/MERGE approvals.
+    """Provide a non-empty admin/known-proposer list for approval tests.
 
-    Production defaults to an empty list (fail-closed); tests opt into a test
-    admin so they can verify approval state transitions without hardcoding the
-    same skeleton key.
+    Production defaults to empty for both (fail-closed, #376); tests opt into
+    a fixed roster covering the proposer/actor names used across the suite so
+    they can verify approval state transitions without hardcoding the same
+    skeleton key. This does NOT cover the new `human_approval_verified` proof
+    (#376 residual): that is deliberately never settings-derived, so any test
+    exercising a successful EXECUTION/MERGE approval must still pass
+    `permission_service=PermissionService(human_approval_verified=True)`
+    explicitly.
     """
+    monkeypatch.setattr("governance_controller.config.settings.admins", "admin,human-1")
     monkeypatch.setattr(
-        "governance_controller.config.settings.admins", "admin"
+        "governance_controller.config.settings.known_proposers",
+        "agent-1,agent,test,tester,x,admin,human-1",
     )
 
 

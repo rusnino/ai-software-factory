@@ -94,6 +94,9 @@ class TestTelegramAdapter:
             "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "GC_CONTROLLER_API_SECRET": controller_secret,
             "GC_PLANE_BASE_URL": "",
+            # #376: known_proposers now fails closed by default, so the
+            # live server needs the test's proposer identity allow-listed.
+            "GC_KNOWN_PROPOSERS": "agent-1",
         }
         server = subprocess.Popen(
             [

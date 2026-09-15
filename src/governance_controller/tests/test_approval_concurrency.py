@@ -25,6 +25,7 @@ from governance_controller.models.task import Task
 from governance_controller.schemas.project_profile import ProjectProfile
 from governance_controller.schemas.task_contract import ExecutionConfig, TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.state_machine import StateMachine
 
 
@@ -81,7 +82,13 @@ class TestApprovalConcurrency:
         contract = _make_contract(task_id)
         profile = _make_profile()
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
-        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
 
         async def _cancel_before_start(*_args: object, **_kwargs: object) -> Task:
             raise asyncio.CancelledError
@@ -175,6 +182,9 @@ class TestApprovalConcurrency:
                 ApprovalService(
                     db=session_a,
                     plane_projection=projection,  # type: ignore[arg-type]
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
                 ).approve(
                     task=task_a,
                     contract=contract,
@@ -197,6 +207,9 @@ class TestApprovalConcurrency:
                         db=session_b,
                         executor=fake_executor,
                         plane_projection=projection,  # type: ignore[arg-type]
+                        permission_service=PermissionService(
+                            human_approval_verified=True
+                        ),
                     ).approve(
                         task=task_b,
                         contract=contract,
@@ -272,7 +285,13 @@ class TestApprovalConcurrency:
 
         # Session B approves and commits first.
         async with local_session() as session_b:
-            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            service_b = ApprovalService(
+                db=session_b,
+                executor=fake_executor,
+                permission_service=PermissionService(
+                    human_approval_verified=True
+                ),
+            )
             task_b = await session_b.scalar(select(Task).where(Task.id == "task-stale"))
             assert task_b is not None
             result = await service_b.approve(
@@ -288,7 +307,13 @@ class TestApprovalConcurrency:
             await session_b.commit()
 
         # Session A now tries to approve its stale copy.
-        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        service_a = ApprovalService(
+            db=session_a,
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
         with pytest.raises(ValueError, match="Concurrent modification detected"):
             await service_a.approve(
                 task=task_a,
@@ -360,7 +385,13 @@ class TestApprovalConcurrency:
             select(Task).where(Task.id == "task-duplicate-278")
         )
         assert task_a is not None
-        service_a = ApprovalService(db=session_a, executor=fake_executor)
+        service_a = ApprovalService(
+            db=session_a,
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
         first_result = await service_a.approve(
             task=task_a,
             contract=contract,
@@ -380,7 +411,13 @@ class TestApprovalConcurrency:
                 select(Task).where(Task.id == "task-duplicate-278")
             )
             assert task_b is not None
-            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            service_b = ApprovalService(
+                db=session_b,
+                executor=fake_executor,
+                permission_service=PermissionService(
+                    human_approval_verified=True
+                ),
+            )
             exec_result = await service_b.approve(
                 task=task_b,
                 contract=contract,
@@ -444,7 +481,13 @@ class TestApprovalConcurrency:
         fake_executor.start.side_effect = RuntimeError("boom")
 
         async with local_session() as db:
-            service = ApprovalService(db=db, executor=fake_executor)
+            service = ApprovalService(
+                db=db,
+                executor=fake_executor,
+                permission_service=PermissionService(
+                    human_approval_verified=True
+                ),
+            )
             task = await db.scalar(select(Task).where(Task.id == "task-exec-fail"))
             assert task is not None
             # Let the service raise and the session rollback naturally; do not
@@ -491,7 +534,13 @@ class TestApprovalConcurrency:
                 select(Task).where(Task.id == "task-malformed-start")
             )
             assert task is not None
-            service = ApprovalService(db=db, executor=fake_executor)
+            service = ApprovalService(
+                db=db,
+                executor=fake_executor,
+                permission_service=PermissionService(
+                    human_approval_verified=True
+                ),
+            )
             with pytest.raises(RuntimeError, match="macro-agent start failed"):
                 await service.approve(
                     task=task,
@@ -565,6 +614,9 @@ class TestApprovalConcurrency:
                 await ApprovalService(
                     db=db,
                     executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
                 ).approve(
                     task=task,
                     contract=contract,
@@ -624,7 +676,13 @@ class TestApprovalConcurrency:
             fake_executor.start.return_value = {"run_id": f"run-{idempotency_key}"}
 
             async with local_session() as db:
-                service = ApprovalService(db=db, executor=fake_executor)
+                service = ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                )
                 async with order_lock:
                     task = await db.scalar(
                         select(Task).where(Task.id == "task-concurrent")
@@ -701,7 +759,13 @@ class TestApprovalConcurrency:
         fake_executor = AsyncMock(spec=MacroAgentExecutor)
         fake_executor.start.side_effect = RuntimeError("boom")
 
-        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
 
         with pytest.raises(RuntimeError, match="macro-agent start failed"):
             async with asynccontextmanager(get_db)() as db:
@@ -778,7 +842,13 @@ class TestApprovalConcurrency:
 
         # Winner: session B completes the full EXECUTION approval first.
         async with local_session() as session_b:
-            service_b = ApprovalService(db=session_b, executor=fake_executor)
+            service_b = ApprovalService(
+                db=session_b,
+                executor=fake_executor,
+                permission_service=PermissionService(
+                    human_approval_verified=True
+                ),
+            )
             task_b = await session_b.scalar(
                 select(Task).where(Task.id == "task-ready-cas")
             )
@@ -795,7 +865,13 @@ class TestApprovalConcurrency:
             assert result.state == TaskState.RUNNING
             await session_b.commit()
 
-        service_a = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service_a = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
 
         try:
             with pytest.raises(ValueError, match="Concurrent modification detected"):
@@ -876,7 +952,13 @@ class TestApprovalConcurrency:
 
         monkeypatch.setattr(StateMachine, "atomic_transition", staticmethod(_patched))
 
-        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
 
         with pytest.raises(ValueError, match="Concurrent modification detected"):
             async with asynccontextmanager(get_db)() as db:
@@ -949,7 +1031,13 @@ class TestApprovalConcurrency:
 
         monkeypatch.setattr(StateMachine, "atomic_transition", staticmethod(_patched))
 
-        service = ApprovalService(db=None, executor=fake_executor)  # type: ignore[arg-type]
+        service = ApprovalService(
+            db=None,  # type: ignore[arg-type]
+            executor=fake_executor,
+            permission_service=PermissionService(
+                human_approval_verified=True
+            ),
+        )
 
         with pytest.raises(ValueError, match="Concurrent modification detected"):
             async with asynccontextmanager(get_db)() as db:
@@ -1386,7 +1474,13 @@ class TestApprovalConcurrency:
             task = await db.scalar(select(Task).where(Task.id == task_id))
             assert task is not None
             with pytest.raises(ValueError, match="Concurrent modification detected"):
-                await ApprovalService(db=db, executor=fake_executor).approve(
+                await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                ).approve(
                     task=task,
                     contract=contract,
                     profile=profile,
@@ -1480,7 +1574,13 @@ class TestApprovalConcurrency:
             task = await db.scalar(select(Task).where(Task.id == task_id))
             assert task is not None
             with pytest.raises(asyncio.CancelledError):
-                await ApprovalService(db=db, executor=fake_executor).approve(
+                await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                ).approve(
                     task=task,
                     contract=contract,
                     profile=profile,
@@ -1571,7 +1671,13 @@ class TestApprovalConcurrency:
             task = await db.scalar(select(Task).where(Task.id == task_id))
             assert task is not None
             with pytest.raises(RuntimeError, match="macro-agent start failed"):
-                await ApprovalService(db=db, executor=fake_executor).approve(
+                await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                ).approve(
                     task=task,
                     contract=contract,
                     profile=profile,
@@ -1689,7 +1795,13 @@ class TestApprovalConcurrency:
             async with local_session() as db:
                 task = await db.scalar(select(Task).where(Task.id == task_id))
                 assert task is not None
-                return await ApprovalService(db=db, executor=fake_executor).approve(
+                return await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                ).approve(
                     task=task,
                     contract=contract,
                     profile=profile,
@@ -1813,7 +1925,13 @@ class TestApprovalConcurrency:
             async with local_session() as db:
                 task = await db.scalar(select(Task).where(Task.id == task_id))
                 assert task is not None
-                return await ApprovalService(db=db, executor=fake_executor).approve(
+                return await ApprovalService(
+                    db=db,
+                    executor=fake_executor,
+                    permission_service=PermissionService(
+                        human_approval_verified=True
+                    ),
+                ).approve(
                     task=task,
                     contract=contract,
                     profile=profile,

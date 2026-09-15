@@ -1,5 +1,29 @@
 # Next Steps
 
+## `#376` fix attempt 3 (2026-09-16)
+
+New PR replacing the round-30 opt-in allow-list, addressing both residuals round 31 found:
+
+- `PermissionService.is_recognized_proposer()`/`_configured_known_proposers()` now fail closed:
+  an unconfigured/empty `GC_KNOWN_PROPOSERS` denies every proposer (matching `GC_ADMINS`'s existing
+  fail-closed default), instead of allowing every proposer through. `.env.example` and
+  `docker-compose.yml` now document/set the variable explicitly.
+- New `PermissionService.human_approval_verified` flag, required (in addition to `admins` membership)
+  for EXECUTION/MERGE approval in `may_approve()`. It is deliberately never settings-derived (a config
+  toggle proves nothing about who made a given request) — it is computed per-request: `api/approvals.py`
+  derives it from a new `X-Human-Approval-Secret` header compared against `GC_HUMAN_APPROVAL_SECRET`
+  (separate from `GC_CONTROLLER_API_SECRET`), and `api/webhooks.py`'s Plane-webhook path sets it `True`
+  unconditionally because that path already independently authenticates the actor via
+  `plane_webhook_secret` + `plane_webhook_allowed_actors`. This closes the round-31 cross-known-name
+  residual: knowing a recognized name (e.g. "admin") is no longer sufficient to approve EXECUTION/MERGE
+  without also holding the separate human-approval credential.
+- Two new regression tests in `test_approval_service.py`, run against real Postgres, reproducing both
+  round-31 scenarios: `test_ghost_proposer_bypasses_default_unconfigured_allowlist` (default config,
+  ghost `proposed_by`) and `test_cross_known_name_propose_approve_bypass_rejected` (fully configured
+  allow-list, `agent-1` proposes / `admin` approves). Both fail pre-fix and pass post-fix.
+- Not yet independently re-verified by a review round — leaving that verdict to Hermes / Infra & Network
+  Security review rather than asserting it here.
+
 ## Current State (2026-09-15) — Round 32
 
 **Multica's lead reported everything done, but `git log dde7e4c..origin/main` shows zero new

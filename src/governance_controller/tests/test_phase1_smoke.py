@@ -23,6 +23,7 @@ from governance_controller.schemas import (
     TaskContract,
 )
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 
 
 @pytest.fixture
@@ -67,7 +68,15 @@ async def async_client(client_db_session, mock_executor) -> AsyncClient:
         yield client_db_session
 
     def _override_get_approval_service(db=Depends(get_db)) -> ApprovalService:
-        return ApprovalService(db=db, executor=mock_executor)
+        # This smoke test exercises the Phase 1 state-machine path end-to-end,
+        # not the X-Human-Approval-Secret header itself (covered separately
+        # in test_approval_endpoint.py) -- assume the human-approval proof
+        # (#376) was already presented.
+        return ApprovalService(
+            db=db,
+            executor=mock_executor,
+            permission_service=PermissionService(human_approval_verified=True),
+        )
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_approval_service] = _override_get_approval_service
