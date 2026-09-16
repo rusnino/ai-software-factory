@@ -2321,6 +2321,10 @@ class TestApprovalConcurrency:
             assert "opentasks_materialization_failed" in event_types
             assert "concurrent_modification" in event_types
 
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="genuine CAS-race concurrency test requires PostgreSQL",
+    )
     async def test_start_failure_does_not_clobber_concurrent_winner(
         self,
         isolated_db: tuple,
