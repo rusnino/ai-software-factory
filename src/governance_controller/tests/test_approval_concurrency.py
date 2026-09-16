@@ -585,7 +585,14 @@ class TestApprovalConcurrency:
         self,
         isolated_db: tuple,
     ) -> None:
-        """A failed start must not leave a terminal task's execution active."""
+        """A failed start must not leave a terminal task's execution active.
+
+        The racer mirrors ``StuckExecutionPoller._mark_failed``, which always
+        pairs its Task CAS win with finalizing the *same* Execution row in
+        the same transaction (RISK-16, #397) -- a genuine concurrent winner
+        never moves the Task to FAILED without also finalizing the Execution
+        it owns.
+        """
         _engine, local_session = isolated_db
         task_id = "task-start-failure-terminal-race"
 
@@ -603,11 +610,17 @@ class TestApprovalConcurrency:
                 racing_task = await racer.scalar(
                     select(Task).where(Task.id == task_id)
                 )
+                racing_execution = await racer.scalar(
+                    select(Execution).where(Execution.task_id == task_id)
+                )
                 assert racing_task is not None
+                assert racing_execution is not None
                 won = await StateMachine.atomic_transition(
                     racer, racing_task, TaskState.FAILED
                 )
                 assert won is True
+                racing_execution.state = TaskState.FAILED
+                racing_execution.ended_at = datetime.now(UTC)
                 await racer.commit()
             raise RuntimeError("macro-agent unavailable")
 
@@ -2306,4 +2319,119 @@ class TestApprovalConcurrency:
             ).scalars().all()
             event_types = [row.event_type for row in audits]
             assert "opentasks_materialization_failed" in event_types
+            assert "concurrent_modification" in event_types
+
+    async def test_start_failure_does_not_clobber_concurrent_winner(
+        self,
+        isolated_db: tuple,
+    ) -> None:
+        """RISK-16 regression (#397): #396's sweep of this same file fixed the
+        MaterializerError handler's write-before-CAS-check shape but missed
+        the sibling ``executor.start()`` failure handler, which staged
+        ``execution.state``/``ended_at`` and flushed them *before* checking
+        whether its own Task-level CAS to FAILED actually won. When a
+        concurrent winner (e.g. ``StuckExecutionPoller._mark_failed``) had
+        already committed its own FAILED transition for the same Execution
+        row, the CAS-losing caller still overwrote that winner's real failure
+        timestamp. This must mirror ``_mark_failed``'s guard: only touch the
+        Execution row once the CAS is confirmed won.
+
+        Uses genuine interleaved PostgreSQL sessions (no mocked DB) per the
+        project's Regression Coverage Policy for CAS/concurrency bugs.
+        """
+        _engine, local_session = isolated_db
+        task_id = f"task-start-failure-race-{uuid4().hex[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.EXEC_APPROVED,
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+
+        proceed_to_start = asyncio.Event()
+        winner_committed = asyncio.Event()
+
+        async def _blocked_start(*_args: object, **_kwargs: object) -> object:
+            proceed_to_start.set()
+            await asyncio.wait_for(winner_committed.wait(), timeout=5)
+            raise RuntimeError("macro-agent unavailable")
+
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+        fake_executor.start.side_effect = _blocked_start
+
+        session_loser = local_session()
+
+        async def _run_loser() -> None:
+            task_row = await session_loser.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            assert task_row is not None
+            with pytest.raises(RuntimeError, match="macro-agent start failed"):
+                await ApprovalService(
+                    db=session_loser, executor=fake_executor
+                )._trigger_execution(
+                    task=task_row,
+                    contract=contract,
+                    profile=profile,
+                    actor="system",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+
+        loser_task = asyncio.create_task(_run_loser())
+        sentinel_ended_at = datetime(2020, 1, 1, tzinfo=UTC)
+        try:
+            await asyncio.wait_for(proceed_to_start.wait(), timeout=5)
+
+            # The concurrent winner (modeling StuckExecutionPoller._mark_failed)
+            # commits its own genuine FAILED transition for the same
+            # Task/Execution rows while the loser is still blocked inside
+            # executor.start(), i.e. before the loser's own CAS has run.
+            async with local_session() as winner:
+                winner_task = await winner.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                winner_execution = await winner.scalar(
+                    select(Execution).where(Execution.task_id == task_id)
+                )
+                assert winner_task is not None
+                assert winner_execution is not None
+                transitioned = await StateMachine.atomic_transition(
+                    winner, winner_task, TaskState.FAILED
+                )
+                assert transitioned
+                winner_execution.state = TaskState.FAILED
+                winner_execution.ended_at = sentinel_ended_at
+                await winner.commit()
+
+            winner_committed.set()
+            await asyncio.wait_for(loser_task, timeout=5)
+        finally:
+            await session_loser.close()
+
+        async with local_session() as check:
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            # The loser's own CAS lost, so it must not have clobbered the
+            # winner's real ended_at with its own current timestamp.
+            assert execution.ended_at == sentinel_ended_at
+
+            audits = (
+                await check.execute(
+                    select(AuditLog).where(AuditLog.task_id == task_id)
+                )
+            ).scalars().all()
+            event_types = [row.event_type for row in audits]
+            assert "execution_start_failed" in event_types
             assert "concurrent_modification" in event_types

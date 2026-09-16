@@ -888,10 +888,17 @@ class ApprovalService:
             transitioned = await StateMachine.atomic_transition(
                 self.db, task, TaskState.FAILED
             )
-            # The external start failed, so this local execution is terminal
-            # regardless of whether another writer won the task CAS.
-            execution.state = TaskState.FAILED
-            execution.ended_at = datetime.now(UTC)
+            # Only claim the Execution row once our own CAS actually won.
+            # Writing state/ended_at unconditionally here would clobber a
+            # concurrent winner's real failure timestamp/reason on this same
+            # row (RISK-16) -- mirror _mark_failed's guard.
+            if transitioned:
+                execution.state = TaskState.FAILED
+                execution.ended_at = datetime.now(UTC)
+            # terminal_run_id tracking must survive a CAS loss regardless
+            # (#262 exception pattern, mirrored from the RUNNING CAS-loss
+            # branch below): it only records this attempt's own run id and
+            # does not compete with a concurrent winner's state/ended_at.
             if terminal_run_id is not None:
                 execution.macro_agent_run_id = terminal_run_id
             await self.db.flush()
