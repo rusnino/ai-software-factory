@@ -1,6 +1,7 @@
 """Approval REST API endpoint."""
 
 import hashlib
+import hmac
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -11,20 +12,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from governance_controller.api.auth import (
     require_controller_secret,
 )
+from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
 from governance_controller.db import get_db
 from governance_controller.schemas.approval import ApprovalRequest, ApprovalResponse
 from governance_controller.schemas.task_contract import TaskContract
 from governance_controller.services.approval_service import ApprovalService
+from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.policy_engine import PolicyViolationError
 from governance_controller.services.task_service import TaskService
 
 router = APIRouter(tags=["approvals"])
 
 
-def get_approval_service(db: AsyncSession = Depends(get_db)) -> ApprovalService:
-    """Build the approval service; override in tests to inject mocks."""
-    return ApprovalService(db=db)
+def get_approval_service(
+    db: AsyncSession = Depends(get_db),
+    x_human_approval_secret: str | None = Header(
+        default=None, alias="X-Human-Approval-Secret"
+    ),
+) -> ApprovalService:
+    """Build the approval service; override in tests to inject mocks.
+
+    Resolves whether this specific request proves a genuinely distinct,
+    human-controlled approval channel (#376): `X-Human-Approval-Secret` must
+    be configured and match, independent of whatever secret authenticated
+    task creation. Without this, `known_proposers`/`admins` are just name
+    allow-lists that a single caller holding only `X-Controller-Secret`
+    could satisfy alone by proposing as one known name and approving as
+    another.
+    """
+    configured = settings.human_approval_secret
+    human_approval_verified = bool(configured) and hmac.compare_digest(
+        x_human_approval_secret or "", configured
+    )
+    return ApprovalService(
+        db=db,
+        permission_service=PermissionService(
+            human_approval_verified=human_approval_verified
+        ),
+    )
 
 
 def _make_idempotency_key(
@@ -61,7 +87,8 @@ async def submit_approval(
     key is derived from ``(task_id, approval_type, actor, timestamp)``.
 
     Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
-    configured.
+    configured. EXECUTION and MERGE approvals additionally require
+    ``X-Human-Approval-Secret`` to match ``GC_HUMAN_APPROVAL_SECRET`` (#376).
     """
     task_service = TaskService(db)
 

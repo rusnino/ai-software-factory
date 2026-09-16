@@ -36,6 +36,19 @@ services:
       # without it, the only documented recovery path returns 401.
       GC_EVENT_BRIDGE_HUMAN_SECRET: dev-event-bridge-human-secret-change-me
       GC_MACRO_AGENT_API_SECRET: dev-macro-agent-secret-change-me
+      # Required, in addition to GC_CONTROLLER_API_SECRET, to grant
+      # EXECUTION/MERGE approvals via POST /approvals (#376). Issue this ONLY
+      # to the genuine human approval channel, never to whatever creates
+      # tasks -- see GC_HUMAN_APPROVAL_SECRET docs in governance_controller/config.py.
+      GC_HUMAN_APPROVAL_SECRET: dev-human-approval-secret-change-me
+      # Required: allow-list of identities permitted to appear as
+      # TaskContract.proposed_by. Empty means DENY, not "no restriction"
+      # (#376) -- populate with the real proposer identities for this
+      # deployment (e.g. the agent/service names that create tasks).
+      GC_KNOWN_PROPOSERS: ""
+      # Human approvers for EXECUTION/MERGE approvals; empty denies all such
+      # approvals by default.
+      GC_ADMINS: ""
       # Optional service-to-service tokens. Leave empty when services are
       # reached via trusted paths or local sidecars.
       GC_OPA_API_TOKEN: ""

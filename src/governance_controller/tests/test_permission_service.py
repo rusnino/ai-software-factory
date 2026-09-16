@@ -43,14 +43,25 @@ class TestPermissionServiceExecutionApproval:
             ApprovalType.EXECUTION,
         )
 
-    async def test_admin_can_approve_execution(
+    async def test_admin_can_approve_execution(self) -> None:
+        service = PermissionService(admins={"admin"}, human_approval_verified=True)
+        assert await service.may_approve("admin", "task-1", ApprovalType.EXECUTION)
+
+    async def test_admin_without_human_approval_proof_cannot_approve_execution(
         self,
         service: PermissionService,
     ) -> None:
-        assert await service.may_approve("admin", "task-1", ApprovalType.EXECUTION)
+        """#376: admin-list membership alone must not be enough for EXECUTION/
+
+        MERGE. Without independent proof of a distinct human approval channel,
+        a caller who merely knows/claims a listed admin name (exactly what a
+        proposer sharing one secret with the approval endpoint could do) must
+        still be denied.
+        """
+        assert not await service.may_approve("admin", "task-1", ApprovalType.EXECUTION)
 
     async def test_custom_admin_can_approve_execution(self) -> None:
-        service = PermissionService(admins={"bob"})
+        service = PermissionService(admins={"bob"}, human_approval_verified=True)
         assert await service.may_approve("bob", "task-1", ApprovalType.EXECUTION)
 
     async def test_default_fails_closed_without_config(self) -> None:
@@ -59,7 +70,7 @@ class TestPermissionServiceExecutionApproval:
             PermissionService,
         )
 
-        service = PermissionService(admins=set())
+        service = PermissionService(admins=set(), human_approval_verified=True)
         assert not await service.may_approve(
             "admin",
             "task-1",
@@ -74,10 +85,8 @@ class TestPermissionServiceMergeApproval:
     ) -> None:
         assert not await service.may_approve("alice", "task-1", ApprovalType.MERGE)
 
-    async def test_admin_can_approve_merge(
-        self,
-        service: PermissionService,
-    ) -> None:
+    async def test_admin_can_approve_merge(self) -> None:
+        service = PermissionService(admins={"admin"}, human_approval_verified=True)
         assert await service.may_approve("admin", "task-1", ApprovalType.MERGE)
 
     async def test_default_fails_closed_without_config_for_merge(self) -> None:
@@ -86,7 +95,7 @@ class TestPermissionServiceMergeApproval:
             PermissionService,
         )
 
-        service = PermissionService(admins=set())
+        service = PermissionService(admins=set(), human_approval_verified=True)
         assert not await service.may_approve(
             "admin",
             "task-1",
@@ -157,7 +166,9 @@ class TestPermissionServiceSystemAndAgent:
         service: PermissionService,
     ) -> None:
         """#227: configured admins match case-insensitively after normalization."""
-        service = PermissionService(admins={"Alice@Example.com"})
+        service = PermissionService(
+            admins={"Alice@Example.com"}, human_approval_verified=True
+        )
         assert await service.may_approve(
             "alice@example.com",
             "task-1",

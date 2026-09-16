@@ -127,13 +127,13 @@ class Settings(BaseSettings):
     admins: str = ""
 
     # Comma-separated allow-list of identities permitted to appear as
-    # TaskContract.proposed_by. Unlike `admins`, the empty default means "no
-    # restriction" (not "deny"): this Controller has no authenticated
-    # per-caller identity to bind proposed_by to, and proposed_by is required
-    # on every task, so failing closed here would reject all task creation by
-    # default. Configure this to give the self-approval guard a closed
-    # universe to compare `proposed_by` against instead of an arbitrary,
-    # unauthenticated client-supplied string (#376).
+    # TaskContract.proposed_by. Like `admins`, empty configuration means DENY,
+    # not "no restriction": a prior version of this fix defaulted to
+    # allow-all when unset and a GitHub-reopened live reproduction (#376)
+    # showed every out-of-the-box deployment was exactly as vulnerable as
+    # before. `proposed_by` is unauthenticated free text with no per-caller
+    # identity behind it, so this allow-list must be explicitly populated
+    # with the real proposer identities before any task can be approved.
     known_proposers: str = ""
 
     # Shared secret for authenticating sensitive Controller API mutations
@@ -141,6 +141,23 @@ class Settings(BaseSettings):
     # X-Controller-Secret header. Leave empty ONLY in local dev where the API is
     # not exposed.
     controller_api_secret: str = ""
+
+    # Separate human-scoped secret required, in addition to
+    # `controller_api_secret`, to grant EXECUTION or MERGE approval via the
+    # generic POST /approvals endpoint. Callers must send it in the
+    # X-Human-Approval-Secret header. This exists because `known_proposers`/
+    # `admins` are just name allow-lists: without this, a single caller who
+    # only holds `controller_api_secret` could propose a task as one known
+    # name (e.g. "agent-1") and then approve it as another known name (e.g.
+    # "admin") -- both "known", but nothing proves they are different real
+    # parties (#376). This secret should be issued only to the genuine human
+    # approval channel (e.g. an admin console or approval bot), never to
+    # whatever creates tasks. Leave empty ONLY in local dev where the API is
+    # not exposed; if unset in production, EXECUTION/MERGE approvals via
+    # POST /approvals are rejected (Plane-webhook-originated approvals are
+    # authenticated separately via `plane_webhook_secret` +
+    # `plane_webhook_allowed_actors` and do not need this secret).
+    human_approval_secret: str = ""
 
     # Runtime DAG materialization limits. These bound the work an agent can be
     # handed in a single execution and prevent unbounded Plane API fan-out.

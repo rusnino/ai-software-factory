@@ -155,15 +155,16 @@ class ApprovalService:
 
         # 0b. proposed_by is a free-form, unauthenticated, client-supplied
         # string (#376) -- the check above only catches an approver who
-        # reuses the *exact* proposer string. When an operator has
-        # configured a closed set of legitimate proposer identities
-        # (GC_KNOWN_PROPOSERS), require proposed_by to be drawn from it so
-        # the self-approval guard has a real universe to compare against
+        # reuses the *exact* proposer string. proposed_by must be drawn from
+        # the closed set of legitimate proposer identities (GC_KNOWN_PROPOSERS)
+        # so the self-approval guard has a real universe to compare against
         # instead of an arbitrary string chosen specifically to differ from
-        # whatever actor approves next. Unconfigured (the default) makes
-        # this a no-op, matching today's behavior -- this Controller has no
-        # authenticated per-caller identity to bind proposed_by to, so full
-        # closure needs either that or an operator-maintained allow-list.
+        # whatever actor approves next. Unconfigured (the default) fails
+        # closed -- is_recognized_proposer() rejects every proposed_by, so no
+        # approval can be granted until an operator explicitly populates the
+        # allow-list. This is deliberate: this Controller has no
+        # authenticated per-caller identity to bind proposed_by to, so an
+        # empty allow-list must not be silently treated as "trust everyone".
         if not self.permission_service.is_recognized_proposer(task.proposed_by):
             await self._log_rejection_and_raise(
                 event_type="approval_rejected",
