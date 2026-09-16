@@ -57,27 +57,32 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-16): round 33 — `#376`'s 3rd fix attempt genuinely closes it, the first time this
-issue has held up under live end-to-end re-verification.** `PermissionService`'s `GC_ADMINS`/
-`GC_KNOWN_PROPOSERS` now fail closed by default, and EXECUTION/MERGE approval requires a new,
-genuinely independent `GC_HUMAN_APPROVAL_SECRET` (via `X-Human-Approval-Secret`) that is never
-settings-derived and distinct from the general controller secret. Independently reproduced both
-round-31 bypass scenarios through the real HTTP API: pre-fix both succeeded, post-fix both correctly
-403. `#384`'s materialization-failure fix is also confirmed genuine (task now reaches `FAILED`
-instead of stuck `READY`). Three new findings from this round: `#390` (HIGH) — the CLI's `gc approve`
-was never updated to send the new human-approval header, so its default EXECUTION type now
-permanently 403s in every deployment; `#391` (MEDIUM) — the startup warning added specifically to
-diagnose fail-closed permission config doesn't check the one variable its own motivating PR
-introduced; `#392` (MEDIUM) — `#384`'s own fix has a RISK-16-shaped write-before-CAS-check bug that
-can corrupt the audit trail's failure timestamp on a concurrent race (though not the terminal state
-itself). Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log 6ae0dd6..origin/main` — 3 commits.
+**Status (2026-09-16): round 34 — all 3 round-33 issues (`#390`/`#391`/`#392`) confirmed genuinely
+fixed, each personally re-verified live.** `#390`: `gc approve`'s default EXECUTION type now correctly
+sends `X-Human-Approval-Secret` and passes authorization. `#391`: the startup warning now correctly
+flags an empty `GC_HUMAN_APPROVAL_SECRET`. `#392`: the materialization-failure handler's `Execution`
+write is now correctly gated on its own CAS result, verified via worktree and an independent live
+concurrent-Postgres reproduction. But `#396`'s own commit message claimed a sweep of
+`approval_service.py` found no other write-before-CAS-check instance besides one deliberately
+unconditional exception — that claim doesn't hold: `#397` (MEDIUM) — the `executor.start()` failure
+handler's own `except Exception` block (a *different* branch than the deliberately-unconditional one
+the sweep checked) has the identical unguarded shape, live-reproduced to clobber a concurrent poller
+winner's failure timestamp the same way `#392` did. A fresh-angle sweep of every remaining
+`atomic_transition` call site, plus `cancellation_service.py`/`reconciliation_service.py`/
+`idea_ingestion_service.py`/the rate limiter, found nothing else new. Phase 1/Phase 2 is still NOT
+gate-clean. Scope: `git log b989501..origin/main` — 3 commits.
 
-Full detail in `docs/NEXT_STEPS.md` round 33. Total open: 3 — `#390` (HIGH), `#391`/`#392` (MEDIUM).
-Zero CRITICAL.
+Full detail in `docs/NEXT_STEPS.md` round 34. Total open: 1 — `#397` (MEDIUM). Zero CRITICAL/HIGH.
+
+Round 33 (superseded by the above): `#376`'s 3rd fix attempt genuinely closed it, the first time this
+issue held up under live end-to-end re-verification, via a genuinely independent
+`GC_HUMAN_APPROVAL_SECRET` credential rather than another name-based allow-list. `#384`'s
+materialization-failure fix also confirmed genuine. Found `#390` (HIGH, CLI regression), `#391`/`#392`
+(MEDIUM).
 
 Round 32 (superseded by the above): Multica's lead reported everything done, but `git log` showed
 zero new commits since round 31's reopen — `#376` remained completely unaddressed. A fresh-angle
-review found `#384` (MEDIUM, the materialization-failure stuck-at-READY bug fixed this round).
+review found `#384` (MEDIUM, the materialization-failure stuck-at-READY bug fixed round 33).
 
 Round 31 (superseded by the above): re-verified all 5 issues Multica closed since round 30. 4 held up
 genuinely fixed (`#366`, `#372`, `#375`, `#377`). `#376`'s fix (an opt-in `GC_KNOWN_PROPOSERS`

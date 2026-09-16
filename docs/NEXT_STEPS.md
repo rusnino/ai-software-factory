@@ -1,6 +1,48 @@
 # Next Steps
 
-## Current State (2026-09-16) — Round 33
+## Current State (2026-09-16) — Round 34
+
+**All 3 issues from round 33 (`#390`, `#391`, `#392`) confirmed genuinely fixed. But `#396`'s own fix
+for `#392` claimed a sweep of `approval_service.py` found no other instance of the write-before-CAS
+pattern — that claim is false: a sibling instance was found live, unguarded, in the immediately
+adjacent `executor.start()` failure handler.** Scope was `git log b989501..origin/main` (3 commits:
+`d3bddd8` for `#390`, `b989501` for `#391`, `2199192` for `#392`).
+
+- **`#390` CONFIRMED genuinely fixed** — personally verified live: `gc approve <task_id>` (default
+  EXECUTION type, no flags) now correctly passes authorization when `GC_HUMAN_APPROVAL_SECRET` is set
+  via the new `--human-approval-secret`/env-var option, reaching a 503 from unreachable macro-agent
+  infra instead of the old unconditional 403 — confirmed via server logs showing the approval/state
+  transition audit entries actually landed before the macro-agent call failed.
+- **`#391` CONFIRMED genuinely fixed** — personally verified: `warn_if_permission_allowlists_empty()`
+  now correctly emits `empty_settings=['GC_HUMAN_APPROVAL_SECRET']` when only that variable is unset.
+- **`#392` CONFIRMED genuinely fixed** for its own scope — the `MaterializerError` handler's `Execution`
+  write is now correctly gated behind `if transitioned:`. Verified via worktree (real pre-fail/post-pass
+  differentiation) and an independent live reproduction against real concurrent Postgres sessions: a
+  concurrent winner's `ended_at` sentinel now survives untouched.
+- **New finding — `#397` (MEDIUM)**: `#396`'s own commit message claimed its sweep of
+  `approval_service.py` found only one other write-before-CAS-check instance (the `executor.start()`
+  CAS-loss branch, deliberately unconditional per `#262` to preserve a real external run) and left it
+  untouched. That justification covers a *different* branch than the one that actually needed checking:
+  the `except Exception` handler for `executor.start()` itself (lines 888-897) writes
+  `execution.state`/`execution.ended_at` unconditionally, with no `if transitioned:` guard, for any
+  non-ambiguous failure classification (`never_sent`/`rejected`/`unknown` — the ambiguous classes
+  already have the `#362`-guarded recovery path). Live-reproduced against real concurrent Postgres
+  sessions: a poller-committed `ended_at` sentinel gets clobbered by this handler's later, stale write —
+  the identical RISK-16 shape `#392` was just fixed for, one branch over.
+- **Fresh-angle pass**: swept every `atomic_transition`/`atomic_transition_from_failed_to_running` call
+  site in the codebase — all others correctly guarded. Re-reviewed `cancellation_service.py`,
+  `reconciliation_service.py`, `idea_ingestion_service.py`, and the rate limiter — all remain
+  well-hardened. The one RISK-19 `session.get()`-shaped call site (`cli.py:245`) is not exploitable
+  (single-process CLI batch, no concurrent writer window). No other genuinely new finding after real
+  effort.
+
+**Total open: 1** — `#397` (MEDIUM). Zero CRITICAL/HIGH.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 33 State
 
 **Multica's 3rd fix attempt for `#376` (self-approval) genuinely closes it — the first time in this
 project's history this issue has actually held.** `#384` (materialization failure) is also genuinely
