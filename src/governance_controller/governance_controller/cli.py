@@ -57,6 +57,15 @@ def approve(
         envvar="GC_CONTROLLER_API_SECRET",
         help="X-Controller-Secret value for authenticated endpoints.",
     ),
+    human_approval_secret: str = typer.Option(
+        settings.human_approval_secret,
+        "--human-approval-secret",
+        envvar="GC_HUMAN_APPROVAL_SECRET",
+        help=(
+            "X-Human-Approval-Secret value required for EXECUTION/MERGE "
+            "approvals (#376)."
+        ),
+    ),
     idempotency_key: str | None = typer.Option(
         None,
         "--idempotency-key",
@@ -80,6 +89,8 @@ def approve(
     )
 
     headers = {"X-Controller-Secret": secret}
+    if human_approval_secret:
+        headers["X-Human-Approval-Secret"] = human_approval_secret
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
     try:
