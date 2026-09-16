@@ -1,9 +1,13 @@
 """Tests for the PermissionService stub."""
 
 import pytest
+import structlog
 
 from governance_controller.constants import ApprovalType
-from governance_controller.services.permission_service import PermissionService
+from governance_controller.services.permission_service import (
+    PermissionService,
+    warn_if_permission_allowlists_empty,
+)
 
 
 @pytest.fixture
@@ -173,4 +177,89 @@ class TestPermissionServiceSystemAndAgent:
             "alice@example.com",
             "task-1",
             ApprovalType.EXECUTION,
+        )
+
+
+class TestWarnIfPermissionAllowlistsEmpty:
+    """#388: empty GC_ADMINS/GC_KNOWN_PROPOSERS must not fail silently."""
+
+    @staticmethod
+    def _configure_structlog_for_caplog() -> None:
+        # Route structlog through stdlib logging so caplog can see it.
+        structlog.configure(
+            processors=[
+                structlog.stdlib.filter_by_level,
+                structlog.stdlib.add_logger_name,
+                structlog.stdlib.add_log_level,
+                structlog.processors.format_exc_info,
+                structlog.processors.UnicodeDecoder(),
+                structlog.stdlib.render_to_log_kwargs,
+            ],
+            context_class=dict,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            cache_logger_on_first_use=False,
+        )
+
+    def test_warns_when_both_are_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from governance_controller.config import settings
+
+        monkeypatch.setattr(settings, "admins", "")
+        monkeypatch.setattr(settings, "known_proposers", "")
+        self._configure_structlog_for_caplog()
+
+        with caplog.at_level("WARNING"):
+            warn_if_permission_allowlists_empty()
+
+        matching = [
+            r
+            for r in caplog.records
+            if "permission_allowlist_empty_fail_closed" in r.message
+        ]
+        assert matching, "expected a startup warning when both allow-lists are empty"
+        assert matching[0].empty_settings == ["GC_ADMINS", "GC_KNOWN_PROPOSERS"]
+
+    def test_warns_when_only_admins_is_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from governance_controller.config import settings
+
+        monkeypatch.setattr(settings, "admins", "")
+        monkeypatch.setattr(settings, "known_proposers", "agent-1")
+        self._configure_structlog_for_caplog()
+
+        with caplog.at_level("WARNING"):
+            warn_if_permission_allowlists_empty()
+
+        matching = [
+            r
+            for r in caplog.records
+            if "permission_allowlist_empty_fail_closed" in r.message
+        ]
+        assert matching
+        assert matching[0].empty_settings == ["GC_ADMINS"]
+
+    def test_no_warning_when_both_are_configured(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from governance_controller.config import settings
+
+        monkeypatch.setattr(settings, "admins", "admin@example.com")
+        monkeypatch.setattr(settings, "known_proposers", "agent-1")
+        self._configure_structlog_for_caplog()
+
+        with caplog.at_level("WARNING"):
+            warn_if_permission_allowlists_empty()
+
+        assert not any(
+            "permission_allowlist_empty_fail_closed" in r.message
+            for r in caplog.records
         )

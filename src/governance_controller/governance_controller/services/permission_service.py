@@ -1,7 +1,11 @@
 """Minimal permission service stub for the Governance Controller."""
 
+import structlog
+
 from governance_controller.config import settings
 from governance_controller.constants import ApprovalType
+
+logger = structlog.get_logger("governance_controller.permission_service")
 
 
 def _configured_admins() -> set[str]:
@@ -31,6 +35,29 @@ def _configured_known_proposers() -> set[str]:
     if not raw:
         return set()
     return {name.strip().lower() for name in raw.split(",") if name.strip()}
+
+
+def warn_if_permission_allowlists_empty() -> None:
+    """Emit a startup warning when ``GC_ADMINS``/``GC_KNOWN_PROPOSERS`` are empty.
+
+    Both resolve to a fail-closed deny-all when unconfigured (#376), which is
+    the correct security posture but gives no explicit signal to an operator
+    who deploys with defaults: every task proposal/approval is silently
+    rejected with nothing in the startup log explaining why (#388). Call this
+    once at application startup so the cause is visible instead of only
+    discoverable via a stuck pipeline.
+    """
+    empty_settings = []
+    if not _configured_admins():
+        empty_settings.append("GC_ADMINS")
+    if not _configured_known_proposers():
+        empty_settings.append("GC_KNOWN_PROPOSERS")
+
+    if empty_settings:
+        logger.warning(
+            "permission_allowlist_empty_fail_closed",
+            empty_settings=empty_settings,
+        )
 
 
 class PermissionService:
