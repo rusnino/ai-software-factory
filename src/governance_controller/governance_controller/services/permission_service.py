@@ -38,20 +38,23 @@ def _configured_known_proposers() -> set[str]:
 
 
 def warn_if_permission_allowlists_empty() -> None:
-    """Emit a startup warning when ``GC_ADMINS``/``GC_KNOWN_PROPOSERS`` are empty.
+    """Emit a startup warning when a fail-closed permission setting is empty.
 
-    Both resolve to a fail-closed deny-all when unconfigured (#376), which is
+    ``GC_ADMINS``/``GC_KNOWN_PROPOSERS``/``GC_HUMAN_APPROVAL_SECRET`` all
+    resolve to a fail-closed deny-all when unconfigured (#376, #391), which is
     the correct security posture but gives no explicit signal to an operator
-    who deploys with defaults: every task proposal/approval is silently
-    rejected with nothing in the startup log explaining why (#388). Call this
-    once at application startup so the cause is visible instead of only
-    discoverable via a stuck pipeline.
+    who deploys with defaults: every EXECUTION/MERGE task proposal/approval is
+    silently rejected with nothing in the startup log explaining why (#388).
+    Call this once at application startup so the cause is visible instead of
+    only discoverable via a stuck pipeline.
     """
     empty_settings = []
     if not _configured_admins():
         empty_settings.append("GC_ADMINS")
     if not _configured_known_proposers():
         empty_settings.append("GC_KNOWN_PROPOSERS")
+    if not settings.human_approval_secret:
+        empty_settings.append("GC_HUMAN_APPROVAL_SECRET")
 
     if empty_settings:
         logger.warning(

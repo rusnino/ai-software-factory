@@ -1,6 +1,8 @@
 """Tests for the governance_controller CLI commands."""
 
 import asyncio
+import http.server
+import json
 import os
 import socket
 import subprocess
@@ -28,6 +30,30 @@ from governance_controller.services.audit_service import AuditService
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+class _StubMacroAgentHandler(http.server.BaseHTTPRequestHandler):
+    """Minimal stand-in for the macro-agent service's ``POST /runs``.
+
+    Just enough to let an EXECUTION approval's ``executor.start()`` call
+    succeed against a real HTTP server, so a live-server CLI test can drive
+    the default EXECUTION path to completion instead of stopping at 403.
+    """
+
+    def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        body = json.dumps({"run_id": "stub-run-390", "status": "queued"}).encode(
+            "utf-8"
+        )
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        """Silence default request logging to keep test output clean."""
 
 
 class TestCliApprove:
@@ -335,6 +361,177 @@ class TestCliApprove:
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait(timeout=5)
+
+    def test_approve_default_execution_type_succeeds_with_human_approval_secret(
+        self, tmp_path
+    ) -> None:
+        """#390: the two live-server tests above pass ``--type plan``, so
+        neither ever exercised ``gc approve``'s actual default path
+        (``--type`` omitted, defaulting to EXECUTION). After #376 started
+        requiring ``X-Human-Approval-Secret`` for EXECUTION/MERGE approvals,
+        the CLI had no flag or env var to send it at all, so this exact
+        invocation -- the CLI's single most common one -- failed with a 403
+        for every correctly configured deployment. This drives ``gc approve
+        <task_id>`` with no ``--type`` flag against a live server configured
+        with ``GC_HUMAN_APPROVAL_SECRET``/``GC_ADMINS`` and asserts success.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            macro_agent_port = sock.getsockname()[1]
+
+        db_path = tmp_path / "live_cli_execution_default.db"
+        secret = "live-cli-secret-execution-default"
+        human_approval_secret = "live-cli-human-approval-secret-390"
+        admin_actor = "admin@example.com"
+        base_url = f"http://127.0.0.1:{port}"
+        macro_agent_base_url = f"http://127.0.0.1:{macro_agent_port}"
+        server_env = {
+            **os.environ,
+            "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+            "GC_CONTROLLER_API_SECRET": secret,
+            "GC_KNOWN_PROPOSERS": "agent-1",
+            "GC_ADMINS": admin_actor,
+            "GC_HUMAN_APPROVAL_SECRET": human_approval_secret,
+            # EXECUTION approval synchronously calls the macro-agent's
+            # POST /runs; point it at a stub server so the approval can run
+            # to completion instead of failing with an unrelated 503 once
+            # the header/permission gate under test is passed.
+            "GC_MACRO_AGENT_BASE_URL": macro_agent_base_url,
+        }
+
+        macro_agent_server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", macro_agent_port), _StubMacroAgentHandler
+        )
+        macro_agent_thread = threading.Thread(
+            target=macro_agent_server.serve_forever, daemon=True
+        )
+        macro_agent_thread.start()
+
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "governance_controller.main:app",
+                "--port",
+                str(port),
+            ],
+            env=server_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            ready = False
+            while time.monotonic() < deadline:
+                if server.poll() is not None:
+                    pytest.fail(
+                        "Controller server exited early:\n"
+                        + (server.stdout.read() if server.stdout else "")
+                    )
+                try:
+                    resp = httpx.get(f"{base_url}/health", timeout=0.5)
+                    if resp.status_code == 200:
+                        ready = True
+                        break
+                except httpx.HTTPError:
+                    pass
+                time.sleep(0.2)
+            if not ready:
+                pytest.fail("Controller server did not become ready in time")
+
+            task_id = "live-cli-execution-default-390"
+            create_payload = {
+                "task_contract": {
+                    "task_id": task_id,
+                    "project_id": "live-cli-proj-390",
+                    "proposed_by": "agent-1",
+                    "objective": "Live CLI default-EXECUTION regression test for #390",
+                    "acceptance": [
+                        "gc approve with no --type flag succeeds against a "
+                        "live server with GC_HUMAN_APPROVAL_SECRET configured"
+                    ],
+                },
+                "project_profile": {
+                    "project_id": "live-cli-proj-390",
+                    "project_name": "Live CLI Project",
+                    "repository": {"path": "/tmp/repo"},
+                },
+            }
+            create_resp = httpx.post(
+                f"{base_url}/tasks",
+                json=create_payload,
+                headers={"X-Controller-Secret": secret},
+                timeout=5,
+            )
+            assert create_resp.status_code == 201, create_resp.text
+
+            # PLAN approval doesn't require human_approval_verified; advance
+            # the task there first so EXECUTION is a valid next transition.
+            plan_resp = httpx.post(
+                f"{base_url}/approvals",
+                json={
+                    "task_id": task_id,
+                    "approval_type": "plan",
+                    "source": "cli",
+                    "actor": admin_actor,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+                headers={"X-Controller-Secret": secret},
+                timeout=5,
+            )
+            assert plan_resp.status_code == 200, plan_resp.text
+
+            cli_env = {
+                **os.environ,
+                "GC_CONTROLLER_API_SECRET": secret,
+                "GC_HUMAN_APPROVAL_SECRET": human_approval_secret,
+            }
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "governance_controller.cli",
+                    "approve",
+                    task_id,
+                    "--actor",
+                    admin_actor,
+                    "--base-url",
+                    base_url,
+                ],
+                env=cli_env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+
+            assert result.returncode == 0, result.stdout + result.stderr
+            # EXECUTION approval synchronously advances READY -> RUNNING once
+            # the macro-agent run starts; RUNNING is the real terminal state
+            # of a successful default `gc approve` call, not EXEC_APPROVED.
+            assert f"Approved {task_id}: RUNNING" in result.stdout
+
+            get_resp = httpx.get(
+                f"{base_url}/tasks/{task_id}",
+                headers={"X-Controller-Secret": secret},
+                timeout=5,
+            )
+            assert get_resp.status_code == 200
+            assert get_resp.json()["state"] == "RUNNING"
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+            macro_agent_server.shutdown()
+            macro_agent_server.server_close()
 
     @pytest.mark.parametrize("idempotency_key", ["", " ", "\t\n"])
     def test_approve_rejects_blank_idempotency_key_before_request(
