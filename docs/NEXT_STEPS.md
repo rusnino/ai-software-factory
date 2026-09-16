@@ -1,5 +1,52 @@
 # Next Steps
 
+## Current State (2026-09-16) — Round 33
+
+**Multica's 3rd fix attempt for `#376` (self-approval) genuinely closes it — the first time in this
+project's history this issue has actually held.** `#384` (materialization failure) is also genuinely
+fixed. But live verification found one real functional regression the fix itself introduced, one
+diagnosability gap in its own startup-warning follow-up, and one RISK-16-shaped audit-integrity bug in
+`#384`'s own fix. Scope was `git log 6ae0dd6..origin/main` (3 commits: `3267642` for `#384`, `65af15f`
+for `#376`, `88b7f91` for `#388`/NEXT-17).
+
+- **`#376` CONFIRMED genuinely and fully fixed** — the strongest of 3 fix attempts. Verified via
+  worktree (`65af15f^`/`65af15f`) that both new regression tests fail pre-fix on real behavioral
+  grounds (not just a `TypeError` from a new method signature) and pass post-fix. Independently
+  reproduced both round-31 bypass scenarios end-to-end through the real HTTP API (`POST /approvals`,
+  real Postgres, no test doubles): pre-fix, a cross-known-name propose/approve bypass got past
+  authorization (reaching a 503 from unreachable macro-agent infra, not a 403); pre-fix, an
+  unconfigured-allow-list ghost proposer got a clean 200. Both are now 403 post-fix with the correct
+  rejection reason. Swept every `PermissionService`/`ApprovalService` construction site in the
+  codebase (webhooks, approvals endpoint, stuck-execution poller) for a residual bypass — none found;
+  no secret-reuse footgun in `.env.example`/`docker-compose.yml`; MERGE and EXECUTION gated identically.
+- **`#384` CONFIRMED genuinely fixed for its primary scenario** — task/execution now reach `FAILED`
+  (not stuck `READY`) on a materialization failure, verified via worktree and live HTTP reproduction:
+  a subsequent retry now gets a clear `409 Invalid transition: FAILED -> EXEC_APPROVED` instead of the
+  old opaque, silently-stuck `READY` state.
+- **New finding — `#390` (HIGH), found by direct code reading, not a subagent**: `#376`'s fix requires
+  a new `X-Human-Approval-Secret` header for EXECUTION/MERGE approvals, but the CLI's `gc approve`
+  command was never updated to send it — and `EXECUTION` is the CLI's *default* `--type`. Live-reproduced:
+  `gc approve <task>` with no flags now unconditionally 403s in every correctly-configured deployment,
+  with no CLI option to supply the new secret at all. Neither of the two live-server CLI tests the PR
+  touched exercises this — both explicitly pass `--type plan` to route around the new requirement.
+- **New finding — `#391` (MEDIUM)**: the startup warning added in the very next commit (`#388`/NEXT-17,
+  specifically to diagnose "why are approvals silently stuck") checks `GC_ADMINS`/`GC_KNOWN_PROPOSERS`
+  but not `GC_HUMAN_APPROVAL_SECRET` — the variable introduced by the PR that motivated writing the
+  warning in the first place. Live-reproduced: a deployment with everything else configured correctly
+  gets zero startup signal that the missing secret is why every EXECUTION/MERGE approval 403s.
+- **New finding — `#392` (MEDIUM)**: `#384`'s own fix has a RISK-16-shaped bug — it writes
+  `execution.state`/`execution.ended_at` before checking whether its own CAS to `FAILED` actually won,
+  unlike `StuckExecutionPoller._mark_failed`'s correct guard-then-write ordering. Live-reproduced
+  against real concurrent Postgres sessions: a concurrent winner's `ended_at` gets silently overwritten
+  by the losing caller's stale data, corrupting the audit trail's recorded failure reason/timestamp
+  (though both agree on the terminal state, so this isn't a `#364`-style mis-cancellation).
+
+**Total open: 3** — `#390` (HIGH), `#391`/`#392` (MEDIUM). Zero CRITICAL.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
 ## `#376` fix attempt 3 (2026-09-16)
 
 New PR replacing the round-30 opt-in allow-list, addressing both residuals round 31 found:
@@ -24,7 +71,7 @@ New PR replacing the round-30 opt-in allow-list, addressing both residuals round
 - Not yet independently re-verified by a review round — leaving that verdict to Hermes / Infra & Network
   Security review rather than asserting it here.
 
-## Current State (2026-09-15) — Round 32
+## Historical Round 32 State
 
 **Multica's lead reported everything done, but `git log dde7e4c..origin/main` shows zero new
 commits — `#376` (self-approval) remains open and completely unaddressed since round 31's reopen.**
