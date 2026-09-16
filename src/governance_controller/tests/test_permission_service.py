@@ -181,7 +181,8 @@ class TestPermissionServiceSystemAndAgent:
 
 
 class TestWarnIfPermissionAllowlistsEmpty:
-    """#388: empty GC_ADMINS/GC_KNOWN_PROPOSERS must not fail silently."""
+    """#388/#391: empty GC_ADMINS/GC_KNOWN_PROPOSERS/GC_HUMAN_APPROVAL_SECRET
+    must not fail silently."""
 
     @staticmethod
     def _configure_structlog_for_caplog() -> None:
@@ -210,6 +211,7 @@ class TestWarnIfPermissionAllowlistsEmpty:
 
         monkeypatch.setattr(settings, "admins", "")
         monkeypatch.setattr(settings, "known_proposers", "")
+        monkeypatch.setattr(settings, "human_approval_secret", "secret")
         self._configure_structlog_for_caplog()
 
         with caplog.at_level("WARNING"):
@@ -232,6 +234,7 @@ class TestWarnIfPermissionAllowlistsEmpty:
 
         monkeypatch.setattr(settings, "admins", "")
         monkeypatch.setattr(settings, "known_proposers", "agent-1")
+        monkeypatch.setattr(settings, "human_approval_secret", "secret")
         self._configure_structlog_for_caplog()
 
         with caplog.at_level("WARNING"):
@@ -245,7 +248,35 @@ class TestWarnIfPermissionAllowlistsEmpty:
         assert matching
         assert matching[0].empty_settings == ["GC_ADMINS"]
 
-    def test_no_warning_when_both_are_configured(
+    def test_warns_when_only_human_approval_secret_is_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """#391: GC_HUMAN_APPROVAL_SECRET must warn on its own, same as the
+        other two fail-closed settings -- it is the one that #388/NEXT-17
+        forgot to check."""
+        from governance_controller.config import settings
+
+        monkeypatch.setattr(settings, "admins", "admin@example.com")
+        monkeypatch.setattr(settings, "known_proposers", "agent-1")
+        monkeypatch.setattr(settings, "human_approval_secret", "")
+        self._configure_structlog_for_caplog()
+
+        with caplog.at_level("WARNING"):
+            warn_if_permission_allowlists_empty()
+
+        matching = [
+            r
+            for r in caplog.records
+            if "permission_allowlist_empty_fail_closed" in r.message
+        ]
+        assert matching, (
+            "expected a startup warning when GC_HUMAN_APPROVAL_SECRET is empty"
+        )
+        assert matching[0].empty_settings == ["GC_HUMAN_APPROVAL_SECRET"]
+
+    def test_no_warning_when_all_are_configured(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
@@ -254,6 +285,7 @@ class TestWarnIfPermissionAllowlistsEmpty:
 
         monkeypatch.setattr(settings, "admins", "admin@example.com")
         monkeypatch.setattr(settings, "known_proposers", "agent-1")
+        monkeypatch.setattr(settings, "human_approval_secret", "secret")
         self._configure_structlog_for_caplog()
 
         with caplog.at_level("WARNING"):
