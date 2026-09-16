@@ -766,9 +766,14 @@ class ApprovalService:
                 transitioned = await StateMachine.atomic_transition(
                     self.db, task, TaskState.FAILED
                 )
-                execution.state = TaskState.FAILED
-                execution.ended_at = datetime.now(UTC)
-                await self.db.flush()
+                # Only claim the Execution row once our own CAS actually won.
+                # Writing state/ended_at unconditionally here would clobber a
+                # concurrent winner's real failure timestamp/reason on this
+                # same row (RISK-16) -- mirror _mark_failed's guard.
+                if transitioned:
+                    execution.state = TaskState.FAILED
+                    execution.ended_at = datetime.now(UTC)
+                    await self.db.flush()
                 await AuditService.log(
                     db=self.db,
                     event_type="opentasks_materialization_failed",

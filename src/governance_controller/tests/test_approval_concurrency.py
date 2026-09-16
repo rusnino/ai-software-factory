@@ -9,7 +9,9 @@ production guard without requiring true interleaved concurrency.
 import asyncio
 import os
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, select, update
@@ -27,6 +29,10 @@ from governance_controller.schemas.task_contract import ExecutionConfig, TaskCon
 from governance_controller.services.approval_service import ApprovalService
 from governance_controller.services.permission_service import PermissionService
 from governance_controller.services.state_machine import StateMachine
+
+
+def _is_postgres(url: str) -> bool:
+    return url.startswith("postgresql")
 
 
 def _make_contract(task_id: str = "task-concurrent") -> TaskContract:
@@ -2169,3 +2175,135 @@ class TestApprovalConcurrency:
             )
             assert execution is not None
             assert execution.cancellation_pending is True
+
+    @pytest.mark.skipif(
+        not _is_postgres(os.environ.get("GC_TEST_DATABASE_URL", "")),
+        reason="genuine CAS-race concurrency test requires PostgreSQL",
+    )
+    async def test_materialization_failure_does_not_clobber_concurrent_winner(
+        self,
+        isolated_db: tuple,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """RISK-16 regression (#392): #384's MaterializerError handler in
+        ``_trigger_execution`` staged ``execution.state``/``ended_at`` and
+        flushed/committed them *before* checking whether its own Task-level
+        CAS to FAILED actually won. When a concurrent winner (e.g.
+        ``StuckExecutionPoller._mark_failed``) had already committed its own
+        FAILED transition for the same Execution row, the CAS-losing caller
+        still overwrote that winner's real failure timestamp. This must
+        instead mirror ``_mark_failed``'s guard: only touch the Execution row
+        once the CAS is confirmed won.
+
+        Uses genuine interleaved PostgreSQL sessions (no mocked DB) per the
+        project's Regression Coverage Policy for CAS/concurrency bugs.
+        """
+        from governance_controller import config
+        from governance_controller.services.opentasks_materializer import (
+            MaterializerError,
+        )
+
+        monkeypatch.setattr(config.settings, "plane_base_url", "http://plane.test")
+        _engine, local_session = isolated_db
+        task_id = f"task-materialize-race-{uuid4().hex[:8]}"
+
+        async with local_session() as seed:
+            seed.add(
+                Task(
+                    id=task_id,
+                    project_id="proj-1",
+                    proposed_by="agent-1",
+                    state=TaskState.EXEC_APPROVED,
+                )
+            )
+            await seed.commit()
+
+        contract = _make_contract(task_id)
+        profile = _make_profile()
+
+        proceed_to_materialize = asyncio.Event()
+        winner_committed = asyncio.Event()
+
+        async def _blocked_materialize(*_args: object, **_kwargs: object) -> object:
+            proceed_to_materialize.set()
+            await asyncio.wait_for(winner_committed.wait(), timeout=5)
+            raise MaterializerError("dependency cycle detected")
+
+        materializer = AsyncMock()
+        materializer.materialize.side_effect = _blocked_materialize
+        monkeypatch.setattr(
+            "governance_controller.services.approval_service.OpentasksMaterializer",
+            lambda: materializer,
+        )
+
+        session_loser = local_session()
+        fake_executor = AsyncMock(spec=MacroAgentExecutor)
+
+        async def _run_loser() -> None:
+            task_row = await session_loser.scalar(
+                select(Task).where(Task.id == task_id)
+            )
+            assert task_row is not None
+            with pytest.raises(
+                RuntimeError, match="Failed to materialize opentasks DAG"
+            ):
+                await ApprovalService(
+                    db=session_loser, executor=fake_executor
+                )._trigger_execution(
+                    task=task_row,
+                    contract=contract,
+                    profile=profile,
+                    actor="system",
+                    source="test",
+                    previous_state=TaskState.EXEC_APPROVED,
+                )
+
+        loser_task = asyncio.create_task(_run_loser())
+        sentinel_ended_at = datetime(2020, 1, 1, tzinfo=UTC)
+        try:
+            await asyncio.wait_for(proceed_to_materialize.wait(), timeout=5)
+
+            # The concurrent winner (modeling StuckExecutionPoller._mark_failed)
+            # commits its own genuine FAILED transition for the same
+            # Task/Execution rows while the loser is still blocked inside the
+            # materializer call, i.e. before the loser's own CAS has run.
+            async with local_session() as winner:
+                winner_task = await winner.scalar(
+                    select(Task).where(Task.id == task_id)
+                )
+                winner_execution = await winner.scalar(
+                    select(Execution).where(Execution.task_id == task_id)
+                )
+                assert winner_task is not None
+                assert winner_execution is not None
+                transitioned = await StateMachine.atomic_transition(
+                    winner, winner_task, TaskState.FAILED
+                )
+                assert transitioned
+                winner_execution.state = TaskState.FAILED
+                winner_execution.ended_at = sentinel_ended_at
+                await winner.commit()
+
+            winner_committed.set()
+            await asyncio.wait_for(loser_task, timeout=5)
+        finally:
+            await session_loser.close()
+
+        async with local_session() as check:
+            execution = await check.scalar(
+                select(Execution).where(Execution.task_id == task_id)
+            )
+            assert execution is not None
+            assert execution.state == TaskState.FAILED
+            # The loser's own CAS lost, so it must not have clobbered the
+            # winner's real ended_at with its own current timestamp.
+            assert execution.ended_at == sentinel_ended_at
+
+            audits = (
+                await check.execute(
+                    select(AuditLog).where(AuditLog.task_id == task_id)
+                )
+            ).scalars().all()
+            event_types = [row.event_type for row in audits]
+            assert "opentasks_materialization_failed" in event_types
+            assert "concurrent_modification" in event_types
