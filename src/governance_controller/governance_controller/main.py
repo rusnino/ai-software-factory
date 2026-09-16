@@ -26,6 +26,9 @@ from governance_controller.middleware import (
     InMemoryRateLimitMiddleware,
     WriteBodySizeLimitMiddleware,
 )
+from governance_controller.services.permission_service import (
+    warn_if_permission_allowlists_empty,
+)
 
 
 @asynccontextmanager
@@ -37,6 +40,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     production Controller deployments. SQLite-backed dev/test deployments only
     run ``create_all()`` via ``ensure_sqlite_tables()``.
     """
+    warn_if_permission_allowlists_empty()
     if settings.database_url.startswith("postgresql"):
         await init_db()
     yield
