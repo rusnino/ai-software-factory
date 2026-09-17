@@ -1,6 +1,45 @@
 # Next Steps
 
-## Current State (2026-09-16) — Round 34
+## Current State (2026-09-18) — Round 35
+
+**`#397` (the last open issue) confirmed genuinely fixed. A fresh-angle review found one new HIGH:
+the Telegram adapter has the exact same `X-Human-Approval-Secret` gap `#390` fixed in the CLI —
+still unfixed here.** Scope was `git log 3811323..origin/main` (1 commit: `dfaa025` for `#397`).
+
+- **`#397` CONFIRMED genuinely fixed** — personally verified via ephemeral worktree at `dfaa025^`
+  (real pre-fail: the shipped regression test genuinely fails on the parent commit, reproducing the
+  exact clobbering the issue described) and at `dfaa025` (passes). `execution.state`/`execution.ended_at`
+  in the `executor.start()` failure handler are now correctly gated behind `if transitioned:`,
+  matching `StuckExecutionPoller._mark_failed`'s guard and `#396`'s sibling fix. `terminal_run_id`
+  tracking correctly stays unconditional (the documented `#262` exception).
+- **New finding — `#400` (HIGH)**: `TelegramAdapter.process_update()` (`adapters/telegram.py:114-135`)
+  never sends `X-Human-Approval-Secret` — it only ever sends `X-Controller-Secret`. `ApprovalType
+  .EXECUTION` is the default type for a bare `/approve <task_id>` command, same as the CLI's default
+  that made `#390` a live footgun. In a correctly-configured secure deployment (`GC_ADMINS` +
+  `GC_HUMAN_APPROVAL_SECRET` both set, exactly the posture `#376`/`#391` require), a legitimate admin
+  sending `/approve <task_id>` via Telegram — the normal way to grant EXECUTION approval through this
+  channel — unconditionally gets 403'd. Live-reproduced against a real running server: PLAN approval
+  (no header required) succeeds, the same task's EXECUTION approval via Telegram fails with `may not
+  request execution approval` despite a correctly admin-listed actor. This is the third recurrence of
+  the same "adapter forgot a header `/approvals` now requires" pattern (`#277`→`#284` originally for
+  `X-Controller-Secret`, `#390` for the CLI's `X-Human-Approval-Secret`, now this one) — `#396`'s
+  commit message claimed a sweep of every `/approvals` caller but only actually checked the CLI.
+- **Fresh-angle pass otherwise came up clean** after substantial effort: `VerificationService`'s full
+  retry/finalize/orphan-recovery chain, `EventBridge.handle()`'s dedup/staleness guards,
+  `macro_agent_service`'s `RunStore`/`main.py` (no true concurrency window), `PlaneClient` (controller-
+  as-caller direction — errors, pagination, secret handling all correct), `PlaneProjectionService
+  .ensure_plane_issue`'s TOCTOU (real in isolation, but every caller correctly wraps it in
+  `acquire_plane_projection_lock`), `opentasks_materializer.py`'s BFS/cycle-detection, `middleware.py`'s
+  rate limiting, and CI/branch-protection config (no drift between required status checks and actual
+  job names) were all re-checked and found solid.
+
+**Total open: 1** — `#400` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 34 State
 
 **All 3 issues from round 33 (`#390`, `#391`, `#392`) confirmed genuinely fixed. But `#396`'s own fix
 for `#392` claimed a sweep of `approval_service.py` found no other instance of the write-before-CAS

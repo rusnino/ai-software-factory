@@ -57,22 +57,26 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-16): round 34 — all 3 round-33 issues (`#390`/`#391`/`#392`) confirmed genuinely
-fixed, each personally re-verified live.** `#390`: `gc approve`'s default EXECUTION type now correctly
-sends `X-Human-Approval-Secret` and passes authorization. `#391`: the startup warning now correctly
-flags an empty `GC_HUMAN_APPROVAL_SECRET`. `#392`: the materialization-failure handler's `Execution`
-write is now correctly gated on its own CAS result, verified via worktree and an independent live
-concurrent-Postgres reproduction. But `#396`'s own commit message claimed a sweep of
-`approval_service.py` found no other write-before-CAS-check instance besides one deliberately
-unconditional exception — that claim doesn't hold: `#397` (MEDIUM) — the `executor.start()` failure
-handler's own `except Exception` block (a *different* branch than the deliberately-unconditional one
-the sweep checked) has the identical unguarded shape, live-reproduced to clobber a concurrent poller
-winner's failure timestamp the same way `#392` did. A fresh-angle sweep of every remaining
-`atomic_transition` call site, plus `cancellation_service.py`/`reconciliation_service.py`/
-`idea_ingestion_service.py`/the rate limiter, found nothing else new. Phase 1/Phase 2 is still NOT
-gate-clean. Scope: `git log b989501..origin/main` — 3 commits.
+**Status (2026-09-18): round 35 — `#397` confirmed genuinely fixed, the last of the RISK-16
+write-before-CAS-check sweep in `approval_service.py`.** Personally verified via worktree: the
+shipped regression test genuinely fails on the parent commit and passes post-fix. But a fresh-angle
+review found `#400` (HIGH): the Telegram adapter never sends `X-Human-Approval-Secret` — the exact
+same gap `#390` fixed in the CLI, unfixed in the *other* documented `/approvals` caller.
+`ApprovalType.EXECUTION` is the Telegram command's default type too, so a legitimate admin's bare
+`/approve <task_id>` unconditionally 403s in any correctly-configured secure deployment.
+Live-reproduced against a real running server. This is the third recurrence of "an adapter forgot a
+header `/approvals` now requires" (`#277`→`#284`, `#390`, now this one) — `#396`'s commit message
+claimed a sweep of every `/approvals` caller but only actually checked the CLI. A broad fresh-angle
+pass (`VerificationService`'s full retry chain, `EventBridge`, `macro_agent_service` internals,
+`PlaneClient`'s controller-as-caller direction, `opentasks_materializer.py`, rate limiting, CI/branch-
+protection drift) found nothing else new. Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log
+3811323..origin/main` — 1 commit.
 
-Full detail in `docs/NEXT_STEPS.md` round 34. Total open: 1 — `#397` (MEDIUM). Zero CRITICAL/HIGH.
+Full detail in `docs/NEXT_STEPS.md` round 35. Total open: 1 — `#400` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+Round 34 (superseded by the above): all 3 round-33 issues (`#390`/`#391`/`#392`) confirmed genuinely
+fixed, each personally re-verified live. Found `#397` (MEDIUM, a sibling RISK-16 instance `#396`'s own
+sweep claim missed — fixed this round).
 
 Round 33 (superseded by the above): `#376`'s 3rd fix attempt genuinely closed it, the first time this
 issue held up under live end-to-end re-verification, via a genuinely independent
