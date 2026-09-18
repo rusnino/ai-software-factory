@@ -127,11 +127,18 @@ class TelegramAdapter:
             timestamp=datetime.now(UTC).isoformat(),
         )
 
+        headers = {"X-Controller-Secret": settings.controller_api_secret}
+        if (
+            approval_type in (ApprovalType.EXECUTION, ApprovalType.MERGE)
+            and settings.human_approval_secret
+        ):
+            headers["X-Human-Approval-Secret"] = settings.human_approval_secret
+
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/approvals",
                 json=payload.model_dump(mode="json"),
-                headers={"X-Controller-Secret": settings.controller_api_secret},
+                headers=headers,
             )
             response.raise_for_status()
 
