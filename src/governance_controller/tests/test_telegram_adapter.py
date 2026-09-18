@@ -59,6 +59,21 @@ def adapter_with_secret(monkeypatch: pytest.MonkeyPatch) -> TelegramAdapter:
     return TelegramAdapter(base_url="http://localhost:8000", secret_token="s3cr3t")
 
 
+@pytest.fixture
+def adapter_with_human_approval_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> TelegramAdapter:
+    monkeypatch.setattr(
+        "governance_controller.config.settings.controller_api_secret",
+        "controller-secret",
+    )
+    monkeypatch.setattr(
+        "governance_controller.config.settings.human_approval_secret",
+        "human-approval-secret",
+    )
+    return TelegramAdapter(base_url="http://localhost:8000", secret_token="s3cr3t")
+
+
 class TestTelegramAdapter:
     async def test_process_update_approve_command_sends_request(
         self,
@@ -102,6 +117,56 @@ class TestTelegramAdapter:
             headers={"X-Controller-Secret": "controller-secret"},
         )
         assert result == {"status": "ok"}
+
+    @pytest.mark.parametrize(
+        ("approval_type", "expect_human_approval_secret"),
+        [
+            ("plan", False),
+            ("execution", True),
+            ("merge", True),
+        ],
+    )
+    async def test_process_update_scopes_human_approval_secret_to_execution_and_merge(
+        self,
+        adapter_with_human_approval_secret: TelegramAdapter,
+        approval_type: str,
+        expect_human_approval_secret: bool,
+    ) -> None:
+        """#400 follow-up: PLAN never needs -- and must never send --
+        ``X-Human-Approval-Secret``. Sending it unconditionally for every
+        approval type (the initial #400 fix) leaks the credential over the
+        wire on requests that don't require it, widening exposure to any
+        HTTP/logging proxy the request happens to transit. Only
+        EXECUTION/MERGE -- the types ``api/approvals.py:44-47`` actually
+        checks the header for -- may include it.
+        """
+        update = {
+            "message": {
+                "text": f"/approve TASK-1 {approval_type}",
+                "chat": {"id": 12345},
+                "from": {"id": 111, "username": "alice"},
+            }
+        }
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+
+        with patch(
+            "governance_controller.adapters.telegram.httpx.AsyncClient"
+        ) as mock_cls:
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            result = await adapter_with_human_approval_secret.process_update(
+                update, secret_token_header="s3cr3t"
+            )
+
+        assert result == {"status": "ok"}
+        sent_headers = mock_client.post.call_args.kwargs["headers"]
+        if expect_human_approval_secret:
+            assert sent_headers["X-Human-Approval-Secret"] == "human-approval-secret"
+        else:
+            assert "X-Human-Approval-Secret" not in sent_headers
 
     async def test_approve_authenticates_against_real_running_server(
         self,

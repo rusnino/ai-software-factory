@@ -128,7 +128,10 @@ class TelegramAdapter:
         )
 
         headers = {"X-Controller-Secret": settings.controller_api_secret}
-        if settings.human_approval_secret:
+        if (
+            approval_type in (ApprovalType.EXECUTION, ApprovalType.MERGE)
+            and settings.human_approval_secret
+        ):
             headers["X-Human-Approval-Secret"] = settings.human_approval_secret
 
         async with httpx.AsyncClient() as client:
