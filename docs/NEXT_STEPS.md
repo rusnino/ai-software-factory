@@ -1,6 +1,53 @@
 # Next Steps
 
-## Current State (2026-09-18) — Round 35
+## Current State (2026-09-21) — Round 36
+
+**`#400` confirmed genuinely fixed, correctly scoped to EXECUTION/MERGE only (their own internal
+security review caught and self-corrected an over-broad first pass within the same PR). A fresh-angle
+review found one new HIGH: `LocalMacroAgentService` spawns the macro-agent subprocess with the
+Controller's full environment, leaking `GC_HUMAN_APPROVAL_SECRET`/`GC_CONTROLLER_API_SECRET`/
+`GC_DATABASE_URL` into a process tree whose whole purpose is running less-trusted, agent-directed
+work.** Scope was `git log 80326cb..origin/main` (1 commit: `5c33108` for `#400`).
+
+- **`#400` CONFIRMED genuinely fixed** — personally verified via ephemeral worktree at the parent
+  commit: `test_process_update_scopes_human_approval_secret_to_execution_and_merge` and
+  `test_approve_default_execution_type_sends_human_approval_secret` both genuinely fail there (real
+  403s, matching the issue exactly) and pass post-fix. Notably, the PR itself shows a real internal
+  review catch: the first commit sent the new header unconditionally, including for PLAN (which never
+  needs it and never checks it server-side); a second commit within the same PR, prompted by their own
+  "Application Security Reviewer" finding, correctly scoped it to `approval_type in (EXECUTION,
+  MERGE)` only, with a parametrized regression test proving PLAN never carries the credential.
+- **Header-propagation sweep completed**: grepped every construction site of `ApprovalRequest`/caller
+  of `POST /approvals` in the codebase — `cli.py` (`#390`), `adapters/telegram.py` (`#400`),
+  `api/webhooks.py` (independently authenticated, by design), and `api/approvals.py` itself. No other
+  caller exists. This specific pattern (an adapter missing a required header) is now genuinely
+  exhausted after 3 confirmed instances (`#277`→`#284`, `#390`, `#400`).
+- **New finding — `#403` (HIGH)**: `LocalMacroAgentService.__aenter__` (`adapters/macro_agent
+  /local_service.py:143`) spawns the macro-agent subprocess with `env = os.environ.copy()` — the
+  Controller's complete, unfiltered environment — only overlaying 3 `MACRO_AGENT_SERVICE_*` keys.
+  Gated on `settings.macro_agent_start_local` (default `False`, but not restricted to dev/test in code
+  or docs — a real convenience setting for this project's stated self-hosted single-operator
+  audience). Live-reproduced: read `/proc/<pid>/environ` for the real spawned process tree and
+  confirmed `GC_HUMAN_APPROVAL_SECRET`, `GC_CONTROLLER_API_SECRET`, and `GC_DATABASE_URL` all present
+  on both the `uv` wrapper and its `python` child. Since `macro_agent_service`'s entire design premise
+  is running less-trusted, agent-directed shell commands, this completely undermines the exact
+  self-approval defense rounds 30-36 spent six rounds building — an agent inside that process tree can
+  read its own environment and directly call `POST /approvals` with both leaked headers to self-approve,
+  or connect straight to Postgres and bypass the state machine/audit log entirely with the leaked
+  `GC_DATABASE_URL`.
+- **Other angles checked and found clean**: MERGE approval's end-to-end behavior (confirmed
+  intentional — it's a governance sign-off on macro-agent's own already-completed git landing, not a
+  trigger for a new merge action, consistent with CLAUDE.md's "do not reimplement macro-agent
+  internals"); the audit log's read path (gated like every other endpoint); `EventBridge`'s full
+  9-event dispatch table (all present per SPEC-05 §5); admin/health/debug endpoints (no gap).
+
+**Total open: 1** — `#403` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 35 State
 
 **`#397` (the last open issue) confirmed genuinely fixed. A fresh-angle review found one new HIGH:
 the Telegram adapter has the exact same `X-Human-Approval-Secret` gap `#390` fixed in the CLI —
