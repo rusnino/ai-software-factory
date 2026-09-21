@@ -57,26 +57,34 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-18): round 35 — `#397` confirmed genuinely fixed, the last of the RISK-16
-write-before-CAS-check sweep in `approval_service.py`.** Personally verified via worktree: the
-shipped regression test genuinely fails on the parent commit and passes post-fix. But a fresh-angle
-review found `#400` (HIGH): the Telegram adapter never sends `X-Human-Approval-Secret` — the exact
-same gap `#390` fixed in the CLI, unfixed in the *other* documented `/approvals` caller.
-`ApprovalType.EXECUTION` is the Telegram command's default type too, so a legitimate admin's bare
-`/approve <task_id>` unconditionally 403s in any correctly-configured secure deployment.
-Live-reproduced against a real running server. This is the third recurrence of "an adapter forgot a
-header `/approvals` now requires" (`#277`→`#284`, `#390`, now this one) — `#396`'s commit message
-claimed a sweep of every `/approvals` caller but only actually checked the CLI. A broad fresh-angle
-pass (`VerificationService`'s full retry chain, `EventBridge`, `macro_agent_service` internals,
-`PlaneClient`'s controller-as-caller direction, `opentasks_materializer.py`, rate limiting, CI/branch-
-protection drift) found nothing else new. Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log
-3811323..origin/main` — 1 commit.
+**Status (2026-09-21): round 36 — `#400` confirmed genuinely fixed, correctly scoped to
+EXECUTION/MERGE only after Multica's own internal security review caught an over-broad first pass and
+self-corrected within the same PR.** A grep sweep of every `POST /approvals` caller confirms the
+"adapter missing a required header" pattern is now genuinely exhausted (3 confirmed instances:
+`#277`→`#284`, `#390`, `#400`; no 4th exists). A fresh-angle review found `#403` (HIGH):
+`LocalMacroAgentService` spawns the macro-agent subprocess with the Controller's *entire*
+environment — `env = os.environ.copy()`, only 3 keys overlaid — leaking `GC_HUMAN_APPROVAL_SECRET`,
+`GC_CONTROLLER_API_SECRET`, and `GC_DATABASE_URL` into a process tree whose entire design premise is
+running less-trusted, agent-directed shell commands. Live-reproduced via `/proc/<pid>/environ` on the
+real spawned process tree, both the `uv` wrapper and its `python` child. This directly defeats the
+self-approval defense six review rounds (`#376`'s 3rd attempt through `#400`) were spent building — an
+agent inside that process tree can read the leaked secrets and self-approve directly, or bypass the
+state machine and audit log entirely via the leaked database credentials. Gated on
+`macro_agent_start_local=True`, a real, non-dev-restricted setting for this project's stated
+self-hosted single-operator audience. A broad fresh-angle pass (MERGE approval's downstream behavior,
+confirmed intentional as a governance sign-off rather than a stub; audit-log read authorization;
+`EventBridge`'s full event dispatch table; admin/health endpoints) found nothing else new. Phase
+1/Phase 2 is still NOT gate-clean. Scope: `git log 80326cb..origin/main` — 1 commit.
 
-Full detail in `docs/NEXT_STEPS.md` round 35. Total open: 1 — `#400` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+Full detail in `docs/NEXT_STEPS.md` round 36. Total open: 1 — `#403` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+Round 35 (superseded by the above): `#397` confirmed genuinely fixed, closing the RISK-16
+write-before-CAS-check sweep of `approval_service.py`. Found `#400` (HIGH, Telegram adapter missing
+the human-approval header — fixed this round).
 
 Round 34 (superseded by the above): all 3 round-33 issues (`#390`/`#391`/`#392`) confirmed genuinely
 fixed, each personally re-verified live. Found `#397` (MEDIUM, a sibling RISK-16 instance `#396`'s own
-sweep claim missed — fixed this round).
+sweep claim missed — fixed round 35).
 
 Round 33 (superseded by the above): `#376`'s 3rd fix attempt genuinely closed it, the first time this
 issue held up under live end-to-end re-verification, via a genuinely independent
