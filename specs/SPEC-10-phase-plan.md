@@ -57,26 +57,32 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-21): round 36 — `#400` confirmed genuinely fixed, correctly scoped to
-EXECUTION/MERGE only after Multica's own internal security review caught an over-broad first pass and
-self-corrected within the same PR.** A grep sweep of every `POST /approvals` caller confirms the
-"adapter missing a required header" pattern is now genuinely exhausted (3 confirmed instances:
-`#277`→`#284`, `#390`, `#400`; no 4th exists). A fresh-angle review found `#403` (HIGH):
-`LocalMacroAgentService` spawns the macro-agent subprocess with the Controller's *entire*
-environment — `env = os.environ.copy()`, only 3 keys overlaid — leaking `GC_HUMAN_APPROVAL_SECRET`,
-`GC_CONTROLLER_API_SECRET`, and `GC_DATABASE_URL` into a process tree whose entire design premise is
-running less-trusted, agent-directed shell commands. Live-reproduced via `/proc/<pid>/environ` on the
-real spawned process tree, both the `uv` wrapper and its `python` child. This directly defeats the
-self-approval defense six review rounds (`#376`'s 3rd attempt through `#400`) were spent building — an
-agent inside that process tree can read the leaked secrets and self-approve directly, or bypass the
-state machine and audit log entirely via the leaked database credentials. Gated on
-`macro_agent_start_local=True`, a real, non-dev-restricted setting for this project's stated
-self-hosted single-operator audience. A broad fresh-angle pass (MERGE approval's downstream behavior,
-confirmed intentional as a governance sign-off rather than a stub; audit-log read authorization;
-`EventBridge`'s full event dispatch table; admin/health endpoints) found nothing else new. Phase
-1/Phase 2 is still NOT gate-clean. Scope: `git log 80326cb..origin/main` — 1 commit.
+**Status (2026-09-22): round 37 — `#403` confirmed genuinely fixed via an explicit `_SAFE_ENV_KEYS`
+allow-list, verified via worktree and confirmed not to break legitimate service startup (full
+`test_macro_agent_local_service.py` suite green).** A sweep confirms no sibling subprocess-env-leak
+instance exists — only two subprocess-spawning call sites exist in the repo, and both now correctly
+scope their environment. A fresh-angle review found `#406` (HIGH, arguably CRITICAL by this project's
+own `GAP-057` precedent): `VerificationService.verify_execution()`'s `scope_check`/
+`forbidden_path_check` — specified in SPEC-03 §3.7 as "Verify agent did not modify files outside
+allowed scope" — never inspects the actual filesystem/git state of the executed worktree. Its entire
+"touched paths" set comes from `TaskContract.inputs`/`deliverables` (declared before the agent runs)
+plus path-like substrings regex-extracted from check-command text — never a real `git diff`/`git
+status`. Live-reproduced against real git, following SPEC-03's own worked example verbatim: a
+modification to `.github/workflows/ci.yml` (the spec's own forbidden-path example) is completely
+invisible to both checks when the check commands are ordinary (`uv run pytest`, etc.) and the path
+isn't pre-declared — both report `"status": "passed"`, feeding directly into the
+`AGENT_REVIEW → HUMAN_REVIEW` CAS transition and the audit entry a human later trusts to MERGE-approve.
+Other angles (`_SAFE_ENV_KEYS` completeness, macro-agent-service's own logging, Dockerfile/
+`.dockerignore` build-time leaks, secret-bearing log calls, `#403`'s own fix for a RISK-16/19 shape)
+found nothing else new. Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log 0940053..origin/main`
+— 1 commit.
 
-Full detail in `docs/NEXT_STEPS.md` round 36. Total open: 1 — `#403` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+Full detail in `docs/NEXT_STEPS.md` round 37. Total open: 1 — `#406` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+Round 36 (superseded by the above): `#400` confirmed genuinely fixed, correctly scoped to
+EXECUTION/MERGE only after Multica's own internal security review caught an over-broad first pass.
+Found `#403` (HIGH, `LocalMacroAgentService` leaking the Controller's full environment into the
+macro-agent subprocess — fixed this round).
 
 Round 35 (superseded by the above): `#397` confirmed genuinely fixed, closing the RISK-16
 write-before-CAS-check sweep of `approval_service.py`. Found `#400` (HIGH, Telegram adapter missing
