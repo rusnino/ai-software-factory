@@ -181,7 +181,12 @@ async def test_forbidden_path_fails_verification() -> None:
     assert ".env" in forbidden["detail"]
 
 
-async def test_completion_contract_executes_required_checks() -> None:
+async def test_completion_contract_executes_required_checks(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("placeholder\n")
+    _init_git_repo(repo)
+
     contract = TaskContract(
         task_id="task-003",
         project_id="project-001",
@@ -204,7 +209,11 @@ async def test_completion_contract_executes_required_checks() -> None:
         ),
     )
 
-    result = await VerificationService.verify_execution(contract)
+    # #410: a scope allowlist requires real worktree inspection to trust, so
+    # this test now supplies one (a clean repo -- no untracked git changes)
+    # to isolate what it actually exercises: the declared /etc/passwd input
+    # still falls within the /etc/ allowlist entry.
+    result = await VerificationService.verify_execution(contract, cwd=str(repo))
 
     assert result["contract_id"] == "task-003"
     assert result["passed"] is False
@@ -1065,6 +1074,71 @@ async def test_verify_and_advance_passes_default_branch_as_base_ref(
     mocked_verify_execution.assert_awaited_once_with(
         contract, cwd=None, base_ref="trunk"
     )
+
+
+async def test_verify_execution_cwd_none_fails_closed_with_forbidden_paths() -> None:
+    """#410: verify_execution(contract, cwd=None) must not silently skip
+    forbidden/scope inspection when the contract declares those restrictions.
+
+    Before the fix, a missing cwd meant `_git_worktree_touched_paths` was
+    never called at all, so `touched_paths` fell back to self-declared
+    inputs/deliverables and command-text heuristics only -- an out-of-scope
+    on-disk change with no trace in those sources (e.g. an agent editing
+    `.github/workflows/ci.yml` while its only declared check is a generic
+    `true`) was invisible and verification reported `passed: True`.
+    """
+    contract = TaskContract(
+        task_id="task-410",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        completion_contract=CompletionContract(
+            task_id="task-410",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/"],
+                forbidden_paths=[".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=None)
+
+    assert result["passed"] is False
+    inspection = next(
+        c for c in result["checks"] if c["name"] == "git_worktree_inspection"
+    )
+    assert inspection["status"] == "failed"
+
+
+async def test_verify_execution_cwd_none_unrestricted_still_passes() -> None:
+    """A contract with no forbidden/scope restrictions has nothing an
+    uninspectable (cwd=None) worktree could violate, so it is unaffected by
+    the #410 fail-closed path and keeps passing as before."""
+    contract = TaskContract(
+        task_id="task-410-unaffected",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Do something with no scope restrictions",
+        acceptance=["It works"],
+        completion_contract=CompletionContract(
+            task_id="task-410-unaffected",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(
+                description="No restrictions", allowed_paths=[], forbidden_paths=[]
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=None)
+
+    assert result["passed"] is True
+    checks = {c["name"]: c for c in result["checks"]}
+    assert "git_worktree_inspection" not in checks
 
 
 async def test_verification_commands_merge_with_completion_contract() -> None:
