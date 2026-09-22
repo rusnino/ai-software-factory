@@ -1,6 +1,53 @@
 # Next Steps
 
-## Current State (2026-09-21) — Round 36
+## Current State (2026-09-22) — Round 37
+
+**`#403` confirmed genuinely fixed with a correctly-scoped explicit allow-list, and no sibling
+subprocess-env-leak instance exists elsewhere in the codebase. A fresh-angle review found one new
+HIGH (arguably CRITICAL by this project's own precedent): `CompletionContract`'s `scope_check`/
+`forbidden_path_check` never actually inspects the files an execution touched on disk — only
+self-declared pre-execution strings and command-text substrings.** Scope was `git log
+0940053..origin/main` (1 commit: `ee5c1d0` for `#403`).
+
+- **`#403` CONFIRMED genuinely fixed** — personally verified via ephemeral worktree at the parent
+  commit: the shipped `/proc/<pid>/environ`-based regression test genuinely fails there (the exact
+  same leak reproduced live in round 36) and passes post-fix. The fix replaces `os.environ.copy()`
+  with an explicit `_SAFE_ENV_KEYS` allow-list (`PATH`, `HOME`, locale vars, `TERM`, `TMPDIR`, `USER`,
+  `LOGNAME`, `SHELL`) plus the pre-existing `MACRO_AGENT_SERVICE_*` overlay. Ran the full
+  `test_macro_agent_local_service.py` suite (6 tests) to confirm the trimmed environment doesn't break
+  legitimate service startup — all pass.
+- **Sibling subprocess-env sweep**: only two call sites in the entire repo construct a subprocess
+  environment — the just-fixed `local_service.py` and `VerificationService`'s own separate, already-
+  correct (and even tighter-scoped) allow-list. No `os.environ.copy()` remains anywhere. This defect
+  class is genuinely exhausted.
+- **New finding — `#406` (HIGH)**: `VerificationService.verify_execution()`'s `scope_check`/
+  `forbidden_path_check` — specified in SPEC-03 §3.7 as "Verify agent did not modify files outside
+  allowed scope" — builds its entire "touched paths" set from `TaskContract.inputs`/`deliverables`
+  (declared *before* the agent runs) plus regex-extracted path-like substrings from check-command
+  *text*. It never runs `git diff`/`git status` or inspects the actual worktree. Live-reproduced
+  against real git, following SPEC-03's own worked example verbatim: a task with `inputs=["src/"]`,
+  `deliverables=["src/app.py"]`, and `scope_check.forbidden_paths=[".github/workflows/"]` — a real
+  modification to `.github/workflows/ci.yml` on disk is completely invisible to both checks, both
+  report `"status": "passed"`. This feeds directly into `verify_and_advance()`'s
+  `AGENT_REVIEW → HUMAN_REVIEW` CAS transition and the `verification_passed` audit entry a human later
+  trusts to MERGE-approve. `GAP-057` (a narrower, crafted-payload bypass of this same mechanism) was
+  rated CRITICAL — this is a complete non-implementation triggered by ordinary agent behavior with no
+  crafted payload needed.
+- **Other angles checked and found clean**: `_SAFE_ENV_KEYS` completeness (no secrets present; some
+  proxy/`UV_CACHE_DIR` vars absent — a plausible functional, not security, gap, environment-dependent
+  and unconfirmed); macro-agent-service's own logging (zero `logging`/`print` calls anywhere in that
+  package — nothing to leak its own secret through); `Dockerfile`/`.dockerignore` for build-time secret
+  baking (clean multi-stage build, no `.env` copied, non-root runtime); every `logger.*` call across
+  the controller for secret-bearing content (zero hits); `#403`'s own fix for a RISK-16/19 shape
+  (none — no new DB read/write pattern introduced).
+
+**Total open: 1** — `#406` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 36 State
 
 **`#400` confirmed genuinely fixed, correctly scoped to EXECUTION/MERGE only (their own internal
 security review caught and self-corrected an over-broad first pass within the same PR). A fresh-angle
