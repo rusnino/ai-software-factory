@@ -43,6 +43,7 @@ from governance_controller.services.plane_projection import (
     acquire_plane_projection_lock,
 )
 from governance_controller.services.policy_engine import (
+    _UNPARSEABLE_COMMAND_PATH,
     _extract_command_paths,
     _forbidden_path_conflicts,
 )
@@ -50,6 +51,11 @@ from governance_controller.services.state_machine import StateMachine
 from governance_controller.utils.paths import normalize_path
 
 _MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
+# Timeout for the `git status` call used to discover actual on-disk changes in
+# the execution worktree (#406). Kept short: this is a local, offline
+# filesystem/index scan with no network I/O.
+_GIT_STATUS_TIMEOUT_SECONDS = 30.0
 
 
 class _OrphanLookupInconclusive:
@@ -305,6 +311,68 @@ class VerificationService:
                 )
         return converted
 
+    @staticmethod
+    async def _git_worktree_touched_paths(cwd: str) -> set[str] | None:
+        """Return paths actually changed on disk in the *cwd* git worktree.
+
+        Reads `git status --porcelain=v1 --untracked-files=all -z`, which
+        covers staged, unstaged, and untracked changes relative to HEAD -- the
+        real change set an execution left behind, as opposed to the
+        self-declared `TaskContract.inputs`/`deliverables` strings or paths
+        parsed out of check command text (#406). Returns ``None`` when the
+        change set could not be determined (git missing, *cwd* not a git
+        worktree, the call timed out, etc.) so the caller can fail closed
+        instead of silently treating an uninspectable worktree as untouched.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "-z",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+        except OSError:
+            return None
+
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_GIT_STATUS_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        # `-z` NUL-terminates each record and leaves paths unquoted/unescaped.
+        # A rename/copy record ("R"/"C" in the two-letter status code) is
+        # followed by a second NUL-terminated record holding the original
+        # path, which counts as touched too.
+        tokens = [
+            token for token in stdout.decode(errors="replace").split("\0") if token
+        ]
+        paths: set[str] = set()
+        index = 0
+        while index < len(tokens):
+            entry = tokens[index]
+            index += 1
+            if len(entry) <= 3:
+                continue
+            status_code, path = entry[:2], entry[3:]
+            paths.add(path)
+            if ("R" in status_code or "C" in status_code) and index < len(tokens):
+                paths.add(tokens[index])
+                index += 1
+        return paths
+
     @classmethod
     async def verify_execution(
         cls,
@@ -415,6 +483,31 @@ class VerificationService:
             for check in list(completion.required) + list(completion.optional):
                 command_paths |= _extract_command_paths(check.command)
         touched_paths |= command_paths
+
+        # Ground touched_paths in what the execution actually changed on disk,
+        # not just self-declared inputs/deliverables and command-text
+        # heuristics (#406). Only attempted when a real worktree cwd is
+        # available; a missing cwd is already surfaced separately via the
+        # `verification_cwd_fallback` audit event in verify_and_advance.
+        if cwd is not None:
+            git_touched_paths = await cls._git_worktree_touched_paths(cwd)
+            if git_touched_paths is None:
+                # Fail closed: an uninspectable worktree must not be treated
+                # as "nothing changed" by the checks below.
+                touched_paths.add(_UNPARSEABLE_COMMAND_PATH)
+                checks.append(
+                    {
+                        "name": "git_worktree_inspection",
+                        "status": "failed",
+                        "detail": (
+                            "unable to determine the execution's actual "
+                            "on-disk changes via git status"
+                        ),
+                    }
+                )
+                passed = False
+            else:
+                touched_paths |= git_touched_paths
 
         forbidden_touches = set(
             _forbidden_path_conflicts(touched_paths, forbidden_paths)
