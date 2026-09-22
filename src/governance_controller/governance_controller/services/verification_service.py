@@ -548,9 +548,7 @@ class VerificationService:
 
         # Ground touched_paths in what the execution actually changed on disk,
         # not just self-declared inputs/deliverables and command-text
-        # heuristics (#406). Only attempted when a real worktree cwd is
-        # available; a missing cwd is already surfaced separately via the
-        # `verification_cwd_fallback` audit event in verify_and_advance.
+        # heuristics (#406).
         if cwd is not None:
             git_touched_paths = await cls._git_worktree_touched_paths(cwd)
             if git_touched_paths is None:
@@ -598,6 +596,37 @@ class VerificationService:
                     passed = False
                 else:
                     touched_paths |= committed_touched_paths
+        elif forbidden_paths or (
+            completion is not None
+            and (
+                completion.scope_check.forbidden_paths
+                or completion.scope_check.allowed_paths
+            )
+        ):
+            # #410: no worktree cwd is available (already surfaced separately
+            # via the `verification_cwd_fallback` audit event in
+            # verify_and_advance), so on-disk changes cannot be inspected at
+            # all -- neither the git-status nor the committed-diff check above
+            # can run without a worktree to run `git` in, regardless of
+            # base_ref. Since this contract declares forbidden/scope
+            # restrictions, silently falling back to self-declared
+            # inputs/deliverables would let an unobserved forbidden change
+            # pass. Fail closed the same way an inspectable-but-broken
+            # worktree does above. Contracts with no forbidden/scope
+            # restrictions have nothing an uninspectable worktree could
+            # violate, so they are unaffected.
+            touched_paths.add(_UNPARSEABLE_COMMAND_PATH)
+            checks.append(
+                {
+                    "name": "git_worktree_inspection",
+                    "status": "failed",
+                    "detail": (
+                        "no execution worktree available to inspect "
+                        "on-disk changes against declared forbidden/scope paths"
+                    ),
+                }
+            )
+            passed = False
 
         forbidden_touches = set(
             _forbidden_path_conflicts(touched_paths, forbidden_paths)
