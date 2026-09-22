@@ -84,7 +84,10 @@ async def submit_approval(
 
     Validates policy, advances state, and records the approval. Supports an
     optional ``Idempotency-Key`` header; when absent, a deterministic fallback
-    key is derived from ``(task_id, approval_type, actor, timestamp)``.
+    key is derived from ``(task_id, approval_type, actor, timestamp)``. That
+    fallback key is always computed (even when the header is present) so a
+    later retry that adds an explicit key still correlates to a prior
+    fallback-keyed request for the same logical approval (FR-23a).
 
     Requires ``X-Controller-Secret`` when ``GC_CONTROLLER_API_SECRET`` is
     configured. EXECUTION and MERGE approvals additionally require
@@ -115,19 +118,26 @@ async def submit_approval(
             detail=f"Stored task contract is invalid: {exc}",
         ) from exc
 
+    # Always derive the deterministic fallback key, even when the caller sent
+    # an explicit header: a retry that adds `Idempotency-Key` after an initial
+    # request went out without one must still correlate to that request's
+    # stored fallback key (FR-23a / SPEC-03 §3.3), or the retry misreads a
+    # already-succeeded approval as a fresh, conflicting transition (409).
+    try:
+        fallback_idempotency_key = _make_idempotency_key(
+            payload.task_id,
+            payload.approval_type,
+            payload.actor,
+            payload.timestamp,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
     if idempotency_key is None:
-        try:
-            idempotency_key = _make_idempotency_key(
-                payload.task_id,
-                payload.approval_type,
-                payload.actor,
-                payload.timestamp,
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(exc),
-            ) from exc
+        idempotency_key = fallback_idempotency_key
 
     try:
         updated_task = await approval_service.approve(
@@ -138,6 +148,7 @@ async def submit_approval(
             source=payload.source,
             actor=payload.actor,
             idempotency_key=idempotency_key,
+            fallback_idempotency_key=fallback_idempotency_key,
             comment=payload.comment,
         )
     except PolicyViolationError as exc:
