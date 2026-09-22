@@ -756,6 +756,317 @@ async def test_git_inspection_failure_fails_closed(tmp_path) -> None:
     assert inspection["status"] == "failed"
 
 
+def _default_branch_name(repo_dir) -> str:
+    """Return the branch `_init_git_repo` committed to in *repo_dir*."""
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+async def test_committed_forbidden_change_bypasses_git_status_without_base_ref(
+    tmp_path,
+) -> None:
+    """#409: `git status` alone is clean once a forbidden edit is committed.
+
+    Reproduces the bypass this issue reports: the execution modifies a
+    forbidden path and commits it, moving HEAD along with the change, so
+    `_git_worktree_touched_paths` (#406/PR #408) sees a clean working tree
+    and both checks pass despite the forbidden file having actually changed.
+    This asserts the *pre-existing* gap still exists when no `base_ref` is
+    supplied, to document why the next test's `base_ref` parameter is load
+    bearing rather than redundant with the #406 fix.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    ci_path = repo / ".github" / "workflows" / "ci.yml"
+    ci_path.write_text("name: CI\n")
+    _init_git_repo(repo)
+
+    ci_path.write_text("name: CI\non: [push]\n")
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "sneaky forbidden edit"],
+        cwd=repo,
+        check=True,
+        env=env,
+    )
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+
+    contract = TaskContract(
+        task_id="task-409-no-base-ref",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-409-no-base-ref",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(repo))
+
+    assert result["passed"] is True
+
+
+async def test_committed_forbidden_change_detected_against_base_branch(
+    tmp_path,
+) -> None:
+    """#409: a committed forbidden-path change must be caught via `base_ref`.
+
+    Same scenario as the previous test, but with the execution's branch
+    diverging from a named base branch (mirroring `ProjectProfile.repository
+    .default_branch`, passed through by `verify_and_advance`). The committed
+    diff against that base branch must surface the forbidden change even
+    though `git status` against the moved HEAD stays clean.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    ci_path = repo / ".github" / "workflows" / "ci.yml"
+    ci_path.write_text("name: CI\n")
+    _init_git_repo(repo)
+    default_branch = _default_branch_name(repo)
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "agent-execution"],
+        cwd=repo,
+        check=True,
+        env=env,
+    )
+
+    # Simulate a completed agent execution that modified a forbidden path
+    # and committed the change, so it never shows up in `git status`.
+    ci_path.write_text("name: CI\non: [push]\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "sneaky forbidden edit"],
+        cwd=repo,
+        check=True,
+        env=env,
+    )
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert status.stdout == ""
+
+    contract = TaskContract(
+        task_id="task-409",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-409",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(
+        contract, cwd=str(repo), base_ref=default_branch
+    )
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    scope = next(c for c in result["checks"] if c["name"] == "scope")
+    assert forbidden["status"] == "failed"
+    assert scope["status"] == "failed"
+    assert any(".github/workflows" in path for path in forbidden["detail"])
+    assert any(".github/workflows" in path for path in scope["detail"])
+
+
+async def test_scope_check_passes_when_committed_change_stays_in_scope(
+    tmp_path,
+) -> None:
+    """Committed-diff detection must not flag in-scope committed changes."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    _init_git_repo(repo)
+    default_branch = _default_branch_name(repo)
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "agent-execution"],
+        cwd=repo,
+        check=True,
+        env=env,
+    )
+    (repo / "src" / "app.py").write_text("print('hello world')\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "in-scope change"],
+        cwd=repo,
+        check=True,
+        env=env,
+    )
+
+    contract = TaskContract(
+        task_id="task-409-ok",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-409-ok",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(
+        contract, cwd=str(repo), base_ref=default_branch
+    )
+
+    assert result["passed"] is True
+    checks = {c["name"]: c for c in result["checks"]}
+    assert checks["forbidden_paths"]["status"] == "passed"
+    assert checks["scope"]["status"] == "passed"
+
+
+async def test_git_committed_diff_inspection_failure_fails_closed(tmp_path) -> None:
+    """An unresolvable `base_ref` must not be treated as "nothing changed"."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("hello\n")
+    _init_git_repo(repo)
+
+    contract = TaskContract(
+        task_id="task-409-noinspect",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Unresolvable base ref",
+        acceptance=["It works"],
+        completion_contract=CompletionContract(
+            task_id="task-409-noinspect",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(description="n/a"),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(
+        contract, cwd=str(repo), base_ref="does-not-exist"
+    )
+
+    assert result["passed"] is False
+    inspection = next(
+        c for c in result["checks"] if c["name"] == "git_committed_diff_inspection"
+    )
+    assert inspection["status"] == "failed"
+
+
+async def test_verify_and_advance_passes_default_branch_as_base_ref(
+    db_session: AsyncSession,
+) -> None:
+    """#409: `verify_and_advance` must thread the profile's default branch
+    through to `verify_execution` as `base_ref`, so the committed-diff
+    inspection can run for real macro-agent worktrees."""
+    from unittest.mock import AsyncMock
+
+    from governance_controller.schemas.project_profile import ProjectProfile
+
+    task = Task(
+        id="task-409-base-ref-wiring",
+        project_id="proj-1",
+        state=TaskState.AGENT_REVIEW,
+        proposed_by="agent-1",
+        task_contract_json=TaskContract(
+            task_id="task-409-base-ref-wiring",
+            project_id="proj-1",
+            proposed_by="agent-1",
+            objective="Verify base_ref wiring",
+            acceptance=["base_ref reaches verify_execution"],
+        ).model_dump(mode="json"),
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    profile = ProjectProfile(
+        project_id="proj-1",
+        repository={"path": "/nonexistent/repo/path", "default_branch": "trunk"},
+        execution={"allowed_harnesses": ["opencode"]},
+    )
+    contract = TaskContract(**task.task_contract_json)
+
+    with patch.object(
+        VerificationService,
+        "verify_execution",
+        AsyncMock(return_value={"contract_id": task.id, "passed": True, "checks": []}),
+    ) as mocked_verify_execution:
+        await VerificationService.verify_and_advance(
+            db_session, task, contract, profile=profile
+        )
+
+    mocked_verify_execution.assert_awaited_once_with(
+        contract, cwd=None, base_ref="trunk"
+    )
+
+
 async def test_verification_commands_merge_with_completion_contract() -> None:
     contract = TaskContract(
         task_id="task-008",
