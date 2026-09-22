@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -602,6 +603,157 @@ async def test_sed_file_io_path_is_rejected_before_subprocess(tmp_path) -> None:
 
     assert result["passed"] is False
     assert marker.exists() is False
+
+
+def _init_git_repo(repo_dir) -> None:
+    """Initialize a minimal git repo with one commit, for git-inspection tests."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    subprocess.run(["git", "init", "-q"], cwd=repo_dir, check=True, env=env)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo_dir,
+        check=True,
+        env=env,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "test"], cwd=repo_dir, check=True, env=env
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, env=env)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "init"], cwd=repo_dir, check=True, env=env
+    )
+
+
+async def test_scope_and_forbidden_checks_detect_actual_git_modified_forbidden_path(
+    tmp_path,
+) -> None:
+    """#406: verify_execution must inspect the real worktree, not just
+    self-declared inputs/deliverables and command-text heuristics.
+
+    Reproduces SPEC-03 §3.7's own worked example: `.github/workflows/` is
+    forbidden, but the only `required` check is generic (`true`) and never
+    mentions it, and it is never declared as an input/deliverable either.
+    Before the fix, a forbidden-path modification like this was invisible to
+    verify_execution and both `forbidden_paths`/`scope` reported "passed"
+    despite the forbidden file having actually changed on disk.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    (repo / ".github" / "workflows").mkdir(parents=True)
+    ci_path = repo / ".github" / "workflows" / "ci.yml"
+    ci_path.write_text("name: CI\n")
+    _init_git_repo(repo)
+
+    # Simulate a completed agent execution that modified a forbidden file
+    # never declared as an input/deliverable and never mentioned in any
+    # check command's literal text.
+    ci_path.write_text("name: CI\non: [push]\n")
+
+    contract = TaskContract(
+        task_id="task-406",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-406",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(repo))
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    scope = next(c for c in result["checks"] if c["name"] == "scope")
+    assert forbidden["status"] == "failed"
+    assert scope["status"] == "failed"
+    assert any(".github/workflows" in path for path in forbidden["detail"])
+    assert any(".github/workflows" in path for path in scope["detail"])
+
+
+async def test_scope_check_passes_when_git_modifications_stay_in_scope(
+    tmp_path,
+) -> None:
+    """Git-based touched-path detection must not flag in-scope changes."""
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    _init_git_repo(repo)
+
+    (repo / "src" / "app.py").write_text("print('hello world')\n")
+
+    contract = TaskContract(
+        task_id="task-406-ok",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-406-ok",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[".github/workflows/"]),
+            scope_check=ScopeCheck(
+                description="SPEC-03 worked example",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["pyproject.toml", ".github/workflows/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(repo))
+
+    assert result["passed"] is True
+    checks = {c["name"]: c for c in result["checks"]}
+    assert checks["forbidden_paths"]["status"] == "passed"
+    assert checks["scope"]["status"] == "passed"
+
+
+async def test_git_inspection_failure_fails_closed(tmp_path) -> None:
+    """A worktree that cannot be git-inspected must not be treated as unchanged."""
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+
+    contract = TaskContract(
+        task_id="task-406-noinspect",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Uninspectable worktree",
+        acceptance=["It works"],
+        completion_contract=CompletionContract(
+            task_id="task-406-noinspect",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=[]),
+            scope_check=ScopeCheck(description="n/a"),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(
+        contract, cwd=str(not_a_repo)
+    )
+
+    assert result["passed"] is False
+    inspection = next(
+        c for c in result["checks"] if c["name"] == "git_worktree_inspection"
+    )
+    assert inspection["status"] == "failed"
 
 
 async def test_verification_commands_merge_with_completion_contract() -> None:
