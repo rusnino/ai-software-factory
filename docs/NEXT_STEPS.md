@@ -1,6 +1,59 @@
 # Next Steps
 
-## Current State (2026-09-22) — Round 37
+## Current State (2026-09-22) — Round 38
+
+**`#406`, `#409`, `#410` all confirmed genuinely fixed via independent live reproduction (not just
+re-running shipped tests) — a genuine self-correcting sequence where Multica found and fixed two
+residual gaps in their own `#406` fix before this review round even started. But the same fresh-angle
+hunt found a real 4th gap in the identical mechanism (`.gitignore`), plus an unrelated spec-vs-
+implementation gap in idempotency handling.** Scope was `git log d387723..origin/main` (3 commits:
+`586e146` for `#406`, `8bf0c92` for `#409`, `5cfe85e` for `#410`).
+
+- **`#406` CONFIRMED genuinely fixed** — independently reproduced (real git repo, uncommitted edit to
+  an undeclared forbidden path): post-fix correctly fails both `forbidden_paths`/`scope` checks;
+  confirmed via worktree at the parent commit that the identical scenario silently passed pre-fix.
+- **`#409` CONFIRMED genuinely fixed** — independently reproduced the exact bypass the issue
+  describes: a *committed* forbidden-path edit (so `git status` is clean) was invisible to `#406`'s
+  fix alone (confirmed via worktree between `#406` and `#409`); with `base_ref` correctly supplied
+  it's now caught. Confirmed `verify_and_advance()` genuinely threads `profile.repository
+  .default_branch` through in the real event-delivery path (`event_bridge.py`), not just in tests —
+  `RepositoryConfig.default_branch` is non-optional, so this is always a real string when a profile
+  exists.
+- **`#410` CONFIRMED genuinely fixed, no overcorrection** — independently reproduced: a contract with
+  `forbidden_paths` set and `cwd=None` now correctly fails closed (confirmed via worktree it passed
+  pre-fix); a control case (no forbidden/scope restrictions, `cwd=None`) correctly still passes both
+  pre- and post-fix, confirming unrestricted contracts aren't penalized.
+- **New finding — `#413` (HIGH)**: `_git_worktree_touched_paths()`'s `git status` call has no
+  `--ignored` flag — git's default behavior never reports ignored files, even as untracked. A new file
+  under a forbidden path that also matches `.gitignore` (a very plausible overlap — `secrets/`,
+  `.env`, `credentials/` are exactly the kind of path both lists name for the same reason) is
+  completely invisible to both `#406`'s and `#409`'s fixes — never shown by `git status`, never
+  committed (git refuses to commit gitignored paths without `-f`). Live-reproduced: personally
+  confirmed the exact flag combination the code uses returns nothing for a gitignored forbidden file,
+  while adding `--ignored` correctly surfaces it. A silent, complete, zero-audit-signal bypass of the
+  same mechanism just built across 3 rounds.
+- **New finding — `#414` (MEDIUM)**: a fresh-angle pass cross-referencing SPEC-01 through SPEC-09's
+  documented guarantees against their actual implementation (rather than hunting bugs code-first)
+  found FR-23a (SPEC-03 §3.3: "a request with `Idempotency-Key` after a fallback-key request for the
+  same logical approval... returns the stored result") is not implemented — `api/approvals.py` only
+  computes the synthetic fallback key when the header is *absent*; no code path correlates a
+  client-supplied key with a previously-stored fallback key. Live-reproduced against a real running
+  server: a headerless approval succeeds, then retrying the identical logical approval with an
+  explicit `Idempotency-Key` gets a misleading `409 Invalid transition` instead of the stored result —
+  no state corruption, but a real broken reliability contract.
+- **Other angles checked and found clean**: audit-log tamper-evidence, reconciliation's auto-correct
+  scope, every `ProjectProfile` security field (`docker_socket`/`force_push`/`signed_commits`/etc. —
+  all genuinely enforced, not just documented), the CLI's other commands, `macro_agent_service`'s
+  `RunStore`, and a further OPA/policy-engine shell-allowlist pass (already visibly exhausted from
+  ~20+ prior rounds).
+
+**Total open: 2** — `#413` (HIGH), `#414` (MEDIUM). Zero CRITICAL/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 37 State
 
 **`#403` confirmed genuinely fixed with a correctly-scoped explicit allow-list, and no sibling
 subprocess-env-leak instance exists elsewhere in the codebase. A fresh-angle review found one new

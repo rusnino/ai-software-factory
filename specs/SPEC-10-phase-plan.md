@@ -57,27 +57,31 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-22): round 37 — `#403` confirmed genuinely fixed via an explicit `_SAFE_ENV_KEYS`
-allow-list, verified via worktree and confirmed not to break legitimate service startup (full
-`test_macro_agent_local_service.py` suite green).** A sweep confirms no sibling subprocess-env-leak
-instance exists — only two subprocess-spawning call sites exist in the repo, and both now correctly
-scope their environment. A fresh-angle review found `#406` (HIGH, arguably CRITICAL by this project's
-own `GAP-057` precedent): `VerificationService.verify_execution()`'s `scope_check`/
-`forbidden_path_check` — specified in SPEC-03 §3.7 as "Verify agent did not modify files outside
-allowed scope" — never inspects the actual filesystem/git state of the executed worktree. Its entire
-"touched paths" set comes from `TaskContract.inputs`/`deliverables` (declared before the agent runs)
-plus path-like substrings regex-extracted from check-command text — never a real `git diff`/`git
-status`. Live-reproduced against real git, following SPEC-03's own worked example verbatim: a
-modification to `.github/workflows/ci.yml` (the spec's own forbidden-path example) is completely
-invisible to both checks when the check commands are ordinary (`uv run pytest`, etc.) and the path
-isn't pre-declared — both report `"status": "passed"`, feeding directly into the
-`AGENT_REVIEW → HUMAN_REVIEW` CAS transition and the audit entry a human later trusts to MERGE-approve.
-Other angles (`_SAFE_ENV_KEYS` completeness, macro-agent-service's own logging, Dockerfile/
-`.dockerignore` build-time leaks, secret-bearing log calls, `#403`'s own fix for a RISK-16/19 shape)
-found nothing else new. Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log 0940053..origin/main`
-— 1 commit.
+**Status (2026-09-22): round 38 — `#406`, `#409`, `#410` all confirmed genuinely fixed via independent
+live reproduction, a genuine self-correcting sequence where Multica found and fixed two residual gaps
+in their own `#406` fix before this review round started.** `#406` added real `git status` inspection;
+`#409` (self-found) closed the gap where a *committed* forbidden-path edit was invisible to `git
+status` alone, by diffing against `ProjectProfile.repository.default_branch`; `#410` (self-found)
+closed the gap where a missing execution worktree silently skipped inspection entirely instead of
+failing closed. All three independently re-verified with real git repos, not just shipped tests. But
+the same fresh-angle hunt for a 4th gap in this identical mechanism found one: `#413` (HIGH) — the
+`git status` call has no `--ignored` flag, so a new file under a forbidden path that also matches
+`.gitignore` (a very plausible overlap — `secrets/`, `.env`, `credentials/` are exactly the kind of
+path both lists name for the same reason) is completely invisible to both `#406`'s and `#409`'s
+fixes — never shown by `git status`, never committed. Live-reproduced directly. Separately, a
+spec-vs-implementation audit (cross-referencing SPEC-01 through SPEC-09's documented guarantees
+against actual code, rather than hunting bugs code-first) found `#414` (MEDIUM): FR-23a's
+fallback-idempotency-key correlation is not implemented — a retry with an explicit `Idempotency-Key`
+after a headerless request for the same logical approval gets a misleading `409`, not the stored
+result the spec promises. Live-reproduced against a real running server. Phase 1/Phase 2 is still NOT
+gate-clean. Scope: `git log d387723..origin/main` — 3 commits.
 
-Full detail in `docs/NEXT_STEPS.md` round 37. Total open: 1 — `#406` (HIGH). Zero CRITICAL/MEDIUM/LOW.
+Full detail in `docs/NEXT_STEPS.md` round 38. Total open: 2 — `#413` (HIGH), `#414` (MEDIUM). Zero
+CRITICAL/LOW.
+
+Round 37 (superseded by the above): `#403` confirmed genuinely fixed via an explicit `_SAFE_ENV_KEYS`
+allow-list. Found `#406` (HIGH, `CompletionContract`'s scope enforcement never inspected real
+filesystem state — fix landed and was itself further hardened across rounds 38's `#409`/`#410`).
 
 Round 36 (superseded by the above): `#400` confirmed genuinely fixed, correctly scoped to
 EXECUTION/MERGE only after Multica's own internal security review caught an over-broad first pass.
