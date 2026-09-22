@@ -373,11 +373,63 @@ class VerificationService:
                 index += 1
         return paths
 
+    @staticmethod
+    async def _git_committed_touched_paths(cwd: str, base_ref: str) -> set[str] | None:
+        """Return paths committed on top of *base_ref* in the *cwd* worktree.
+
+        ``_git_worktree_touched_paths`` reads `git status`, which is scoped to
+        changes relative to the worktree's *current* HEAD. An execution that
+        commits a forbidden-path edit moves HEAD along with it, so the
+        working tree looks clean and that check reports nothing (#409). This
+        inspects the other half of the same signal: every path a commit
+        introduced since the execution's branch diverged from *base_ref*, via
+        `git diff --no-renames --name-only -z <base_ref>...HEAD`. The
+        triple-dot form diffs against the merge-base rather than *base_ref*'s
+        tip, so it stays correct even if unrelated commits land on *base_ref*
+        after the execution's branch was cut. `--no-renames` reports a
+        renamed forbidden path as a delete-and-add pair (both paths) instead
+        of collapsing it into a single new-path rename record, matching how
+        `_git_worktree_touched_paths` treats renames. Returns ``None`` when
+        the diff could not be computed (ref unresolvable, git missing, the
+        call timed out, etc.) so the caller can fail closed.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                f"{base_ref}...HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+            )
+        except OSError:
+            return None
+
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_GIT_STATUS_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                proc.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            return None
+
+        if proc.returncode != 0:
+            return None
+
+        return {token for token in stdout.decode(errors="replace").split("\0") if token}
+
     @classmethod
     async def verify_execution(
         cls,
         contract: TaskContract,
         cwd: str | None = None,
+        base_ref: str | None = None,
     ) -> dict[str, object]:
         """Run all verification checks for *contract* and return a report.
 
@@ -393,6 +445,16 @@ class VerificationService:
             contract: The task contract to verify.
             cwd: Working directory for verification subprocesses. ``None``
                 uses the Controller process's current working directory.
+            base_ref: The project's default branch (e.g. ``"main"``) that the
+                execution's worktree branched from. When given, paths touched
+                by commits the execution made on top of this ref are folded
+                into the touched-path set too (#409) -- ``git status``
+                (``_git_worktree_touched_paths``) only sees changes relative
+                to the worktree's *current* HEAD, so a forbidden-path edit
+                that the execution committed moves HEAD along with it and
+                disappears from that check. ``None`` skips this half of the
+                inspection (e.g. no ``ProjectProfile`` was available to name
+                a default branch).
 
         Returns:
             ``{"contract_id": ..., "passed": bool, "checks": [...]}``
@@ -509,6 +571,34 @@ class VerificationService:
             else:
                 touched_paths |= git_touched_paths
 
+            # Ground touched_paths in committed changes too, not just the
+            # working-tree status above -- a forbidden-path edit that the
+            # execution committed moves HEAD along with it and is invisible
+            # to `git status` (#409). Only attempted when a base branch is
+            # known (e.g. from `ProjectProfile.repository.default_branch`).
+            if base_ref is not None:
+                committed_touched_paths = await cls._git_committed_touched_paths(
+                    cwd, base_ref
+                )
+                if committed_touched_paths is None:
+                    # Fail closed, same rationale as the git-status branch
+                    # above: an uninspectable commit history must not be
+                    # treated as "nothing changed".
+                    touched_paths.add(_UNPARSEABLE_COMMAND_PATH)
+                    checks.append(
+                        {
+                            "name": "git_committed_diff_inspection",
+                            "status": "failed",
+                            "detail": (
+                                "unable to determine commits since "
+                                f"{base_ref!r} via git diff"
+                            ),
+                        }
+                    )
+                    passed = False
+                else:
+                    touched_paths |= committed_touched_paths
+
         forbidden_touches = set(
             _forbidden_path_conflicts(touched_paths, forbidden_paths)
         )
@@ -618,7 +708,10 @@ class VerificationService:
                 else:
                     fallback_to_cwd = True
 
-        report = await service.verify_execution(contract, cwd=worktree_path)
+        base_ref = profile.repository.default_branch if profile is not None else None
+        report = await service.verify_execution(
+            contract, cwd=worktree_path, base_ref=base_ref
+        )
 
         # SPEC-03 §3.8: record when verification silently degrades to the
         # Controller's own cwd because the guessed worktree is missing.
