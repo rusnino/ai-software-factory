@@ -144,3 +144,46 @@ async def test_local_service_propagates_controller_secret_to_child(
 
     environment = popen.call_args.kwargs["env"]
     assert environment["MACRO_AGENT_SERVICE_API_SECRET"] == "shared-secret"
+
+
+async def test_local_service_does_not_leak_controller_secrets_to_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#403: the Controller's own secrets must not reach the child's real env.
+
+    This is a live reproduction, not a mock: it sets marker secrets in the
+    Controller's own environment, starts the real subprocess tree (the ``uv``
+    wrapper and its ``python`` child), and reads each process's actual
+    environment from ``/proc/<pid>/environ`` -- the same vector the reporter
+    used to demonstrate the leak.
+    """
+    import psutil
+
+    monkeypatch.setenv("GC_HUMAN_APPROVAL_SECRET", "marker-approval-secret")
+    monkeypatch.setenv("GC_CONTROLLER_API_SECRET", "marker-controller-secret")
+    monkeypatch.setenv(
+        "GC_DATABASE_URL",
+        "postgresql+asyncpg://marker-user:marker-pass@localhost/marker-db",
+    )
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    def read_environ(pid: int) -> str:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return f.read().decode("utf-8", errors="replace")
+
+    async with LocalMacroAgentService(host="127.0.0.1", port=port) as service:
+        assert service._proc is not None
+        root_process = psutil.Process(service._proc.pid)
+        processes = [root_process, *root_process.children(recursive=True)]
+
+        for process in processes:
+            environ_text = read_environ(process.pid)
+            assert "marker-approval-secret" not in environ_text
+            assert "marker-controller-secret" not in environ_text
+            assert "marker-pass" not in environ_text
+            assert "GC_HUMAN_APPROVAL_SECRET" not in environ_text
+            assert "GC_CONTROLLER_API_SECRET" not in environ_text
+            assert "GC_DATABASE_URL" not in environ_text
