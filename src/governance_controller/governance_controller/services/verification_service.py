@@ -315,14 +315,20 @@ class VerificationService:
     async def _git_worktree_touched_paths(cwd: str) -> set[str] | None:
         """Return paths actually changed on disk in the *cwd* git worktree.
 
-        Reads `git status --porcelain=v1 --untracked-files=all -z`, which
-        covers staged, unstaged, and untracked changes relative to HEAD -- the
-        real change set an execution left behind, as opposed to the
-        self-declared `TaskContract.inputs`/`deliverables` strings or paths
-        parsed out of check command text (#406). Returns ``None`` when the
-        change set could not be determined (git missing, *cwd* not a git
-        worktree, the call timed out, etc.) so the caller can fail closed
-        instead of silently treating an uninspectable worktree as untouched.
+        Reads `git status --porcelain=v1 --untracked-files=all --ignored -z`,
+        which covers staged, unstaged, untracked, *and* gitignored changes
+        relative to HEAD -- the real change set an execution left behind, as
+        opposed to the self-declared `TaskContract.inputs`/`deliverables`
+        strings or paths parsed out of check command text (#406). Without
+        `--ignored`, git silently omits gitignored paths from its output --
+        including a newly-created file under a forbidden path that also
+        matches a `.gitignore` pattern (#413) -- even though such a file is
+        untracked and would never appear in `_git_committed_touched_paths`
+        either, since `git add`/`git commit` refuse gitignored paths without
+        `-f`. Returns ``None`` when the change set could not be determined
+        (git missing, *cwd* not a git worktree, the call timed out, etc.) so
+        the caller can fail closed instead of silently treating an
+        uninspectable worktree as untouched.
         """
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -330,6 +336,7 @@ class VerificationService:
                 "status",
                 "--porcelain=v1",
                 "--untracked-files=all",
+                "--ignored",
                 "-z",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
