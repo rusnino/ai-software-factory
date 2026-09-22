@@ -27,6 +27,29 @@ class LocalMacroAgentService:
     this source tree and starts it with ``uv run``.
     """
 
+    # The child process runs less-trusted, agent-directed work (it is the
+    # process tree that executes TaskContract shell/network steps), so it
+    # must NOT inherit the Controller's full environment — that would leak
+    # every ``GC_``-prefixed secret (human-approval secret, controller API
+    # secret, the authoritative database URL, ...) to code an agent can
+    # influence. Only pass through what a local ``uv run`` invocation needs
+    # to resolve the interpreter and its own venv/cache.
+    _SAFE_ENV_KEYS: frozenset[str] = frozenset(
+        {
+            "PATH",
+            "HOME",
+            "LANG",
+            "LANGUAGE",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "TMPDIR",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+        }
+    )
+
     def __init__(
         self,
         host: str | None = None,
@@ -140,7 +163,11 @@ class LocalMacroAgentService:
         if not os.path.isdir(service_root):
             raise RuntimeError(f"Local macro-agent service not found at {service_root}")
 
-        env = os.environ.copy()
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in self._SAFE_ENV_KEYS
+        }
         env["MACRO_AGENT_SERVICE_PORT"] = str(self.port)
         env["MACRO_AGENT_SERVICE_HOST"] = self.host
         env["MACRO_AGENT_SERVICE_API_SECRET"] = settings.macro_agent_api_secret
