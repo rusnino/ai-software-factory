@@ -1,6 +1,61 @@
 # Next Steps
 
-## Current State (2026-09-22) — Round 38
+## Current State (2026-09-24) — Round 39
+
+**`#413` and `#414` both confirmed genuinely fixed. A fresh-angle review found the most severe
+finding in this project's history: a git-argument-injection vulnerability, exploitable by the
+lowest trust tier in the system, that both bypasses the entire `#406`→`#409`→`#410`→`#413`
+scope-enforcement saga AND grants arbitrary file write on the Controller host. A second, unrelated
+finding closes the last gap in the `Idempotency-Key` saga.** Scope was `git log 81cc7c5..origin/main`
+(2 commits: `b97d0bd` for `#413`, `30d5c4e` for `#414`).
+
+- **`#413` CONFIRMED genuinely fixed** — personally verified via ephemeral worktree: the shipped
+  `.gitignore`-blind-spot regression test genuinely fails on the parent commit and passes post-fix.
+  `--ignored` correctly added to the `git status` invocation.
+- **`#414` CONFIRMED genuinely fixed** — personally verified via ephemeral worktree: the shipped
+  regression test reproduces the exact `409` I found manually last round and genuinely fails pre-fix,
+  passes post-fix. Confirmed the Plane webhook relay's own stable-key behavior is unaffected — it
+  never passes the new `fallback_idempotency_key` parameter, so its `candidate_keys` set is
+  unchanged.
+- **New finding — `#418` (CRITICAL)**: `VerificationService._git_committed_touched_paths` passes
+  `ProjectProfile.repository.default_branch` unsanitized into a `git diff` argv token
+  (`f"{base_ref}...HEAD"`), with no `--` separator. `default_branch` has only length validation — no
+  git-ref-format check — and is settable via ordinary `POST /tasks` (the lowest trust tier, no
+  `X-Human-Approval-Secret` needed). A value like `--output=/some/path` is parsed by git as its own
+  `--output=` flag instead of a revision: `git diff` writes its output to that attacker-chosen file
+  (arbitrary file write, confirmed with real diff content, not just an empty file) and exits `0` with
+  empty stdout — so `_git_committed_touched_paths` returns `set()`, not `None`, silently bypassing the
+  fail-closed check and completely hiding a real committed forbidden-path file. Live-reproduced
+  directly against the real, unmodified production async method (not simulated): control returns the
+  correct `{'secrets/leak.txt'}`, attack returns `set()` while creating the attacker-chosen file on
+  disk. This reopens the entire scope-enforcement saga through a structurally new vector — not a
+  coverage gap in a git invocation, but an injection into one — and independently grants a file-write
+  primitive unrelated to the scope check's own purpose.
+- **New finding — `#419` (HIGH)**: `TelegramAdapter.process_update` never sends `Idempotency-Key`,
+  violating SPEC-03 §3.3's explicit "Plane webhook relay and Intake Adapter must always provide a
+  stable `Idempotency-Key`" — it relies entirely on `#414`'s server-side fallback key, which is keyed
+  off a `timestamp` the adapter regenerates on every call, defeating the correlation `#414` just
+  implemented. Live-reproduced end-to-end through the real HTTP intake route: a genuine Telegram
+  redelivery of an identical `/approve` update (a common, well-documented Telegram behavior, not
+  contrived) gets an unhandled `500 Internal Server Error` instead of the idempotent stored result —
+  `telegram_intake` has no exception handling around the internal `POST /approvals` call, and no
+  global handler exists for the resulting `httpx.HTTPStatusError`.
+- **Other angles checked and found clean**: `EventBridge`'s dedup mechanism (sound, no new RISK-19
+  shape); `macro_agent_service`'s own API surface (deliberately minimal in-memory stub, no
+  path/SSRF/auth sinks reachable); the remaining FR-/NFR- spec items not yet cross-checked (Plane-
+  downtime queuing, periodic reconciliation, reconciliation never auto-correcting `Task.state`, shell
+  commands always logged, policy violations always surfacing to a human — all genuinely delivered);
+  `#414`'s own fallback-key collision risk under genuine concurrency (not practically reachable —
+  each `approval_type` can only be granted once per task, so no legitimate same-second collision path
+  exists beyond the retry case `#419` covers).
+
+**Total open: 2** — `#418` (CRITICAL), `#419` (HIGH). Zero MEDIUM/LOW.
+
+```bash
+gh issue list --repo rusnino/ai-software-factory --state open
+```
+
+## Historical Round 38 State
 
 **`#406`, `#409`, `#410` all confirmed genuinely fixed via independent live reproduction (not just
 re-running shipped tests) — a genuine self-correcting sequence where Multica found and fixed two
