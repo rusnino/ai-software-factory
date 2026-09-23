@@ -696,6 +696,64 @@ async def test_scope_and_forbidden_checks_detect_actual_git_modified_forbidden_p
     assert any(".github/workflows" in path for path in scope["detail"])
 
 
+async def test_scope_and_forbidden_checks_detect_gitignored_forbidden_path(
+    tmp_path,
+) -> None:
+    """#413: a newly-created file under a forbidden path that also matches a
+    `.gitignore` pattern must still be detected.
+
+    Without `--ignored`, `git status` silently omits gitignored paths from
+    its output. A new, uncommitted file under a forbidden directory that is
+    also gitignored (as forbidden paths like `secrets/`, `.env`,
+    `credentials/` routinely are, by design) was therefore invisible to both
+    `_git_worktree_touched_paths` (never committed, never shown by plain
+    `git status`) and `_git_committed_touched_paths` (`git add`/`git commit`
+    refuse gitignored paths without `-f`) -- a silent, complete bypass of the
+    forbidden-path control.
+    """
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "app.py").write_text("print('hello')\n")
+    (repo / ".gitignore").write_text("secrets/\n")
+    _init_git_repo(repo)
+
+    # Simulate a completed agent execution that created a new, gitignored
+    # file under a forbidden path -- never committed, never surfaced by
+    # plain `git status`.
+    (repo / "secrets").mkdir()
+    (repo / "secrets" / "creds.txt").write_text("leak\n")
+
+    contract = TaskContract(
+        task_id="task-413",
+        project_id="project-001",
+        proposed_by="agent-1",
+        objective="Modify src/app.py only",
+        acceptance=["It works"],
+        inputs=["src/"],
+        deliverables=["src/app.py"],
+        completion_contract=CompletionContract(
+            task_id="task-413",
+            required=[Check(type="tests", command="true")],
+            forbidden_path_check=ForbiddenPathCheck(paths=["secrets/"]),
+            scope_check=ScopeCheck(
+                description="gitignored forbidden path must still be caught",
+                allowed_paths=["src/", "tests/"],
+                forbidden_paths=["secrets/"],
+            ),
+        ),
+    )
+
+    result = await VerificationService.verify_execution(contract, cwd=str(repo))
+
+    assert result["passed"] is False
+    forbidden = next(c for c in result["checks"] if c["name"] == "forbidden_paths")
+    scope = next(c for c in result["checks"] if c["name"] == "scope")
+    assert forbidden["status"] == "failed"
+    assert scope["status"] == "failed"
+    assert any("secrets" in path for path in forbidden["detail"])
+    assert any("secrets" in path for path in scope["detail"])
+
+
 async def test_scope_check_passes_when_git_modifications_stay_in_scope(
     tmp_path,
 ) -> None:
