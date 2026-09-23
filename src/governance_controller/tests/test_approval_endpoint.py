@@ -438,6 +438,47 @@ class TestApprovalEndpoint:
         assert len(key1) == 64
         assert len(key2) == 64
 
+    async def test_explicit_idempotency_key_correlates_with_prior_fallback_request(
+        self,
+        async_client: AsyncClient,
+        sample_contract: TaskContract,
+        sample_profile: ProjectProfile,
+    ) -> None:
+        """FR-23a / NEXT-36: a retry that adds an explicit ``Idempotency-Key``
+        after the original request went out without one must be treated as
+        the same operation and return the stored result -- not a fresh,
+        already-conflicting transition attempt.
+
+        Reproduces the live failure from the issue: without the fix, this
+        retry gets a misleading 409 ("Invalid transition: X -> X") even
+        though the approval already succeeded.
+        """
+        await _create_task(async_client, sample_contract, sample_profile)
+        payload = _approval_payload("approval-task-1", ApprovalType.PLAN)
+
+        first = await async_client.post(
+            "/approvals",
+            json=payload,
+            headers={"X-Controller-Secret": _CONTROLLER_SECRET},
+        )
+        assert first.status_code == 200
+        assert first.json()["state"] == TaskState.PLAN_APPROVED.value
+
+        retry = await async_client.post(
+            "/approvals",
+            json=payload,
+            headers={
+                "X-Controller-Secret": _CONTROLLER_SECRET,
+                "Idempotency-Key": "client-retry-key-1",
+            },
+        )
+
+        assert retry.status_code == 200
+        body = retry.json()
+        assert body["task_id"] == "approval-task-1"
+        assert body["state"] == TaskState.PLAN_APPROVED.value
+        assert body["approved"] is True
+
     async def test_approval_commits_ready_before_macro_agent_start(
         self,
         async_client: AsyncClient,

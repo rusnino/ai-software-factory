@@ -112,6 +112,7 @@ class ApprovalService:
         source: str,
         actor: str,
         idempotency_key: str,
+        fallback_idempotency_key: str | None = None,
         comment: str | None = None,
     ) -> Task:
         """Request an approval, enforce policy, and advance task state.
@@ -124,6 +125,15 @@ class ApprovalService:
             source: The source of the approval (e.g., "plane", "telegram").
             actor: The human actor approving.
             idempotency_key: A unique key for idempotent approval creation.
+            fallback_idempotency_key: The deterministic
+                ``(task_id, approval_type, actor, timestamp)`` key computed
+                for this same logical request. When it differs from
+                ``idempotency_key`` (a client sent an explicit header), a
+                stored approval under either key is treated as the same
+                operation (FR-23a) -- correlating a caller-supplied retry key
+                back to an earlier fallback-keyed request for the same
+                approval. Callers that already own a stable key of their own
+                (e.g. the Plane webhook relay) may omit this.
             comment: Optional human-readable comment.
 
         Returns:
@@ -230,11 +240,16 @@ class ApprovalService:
                 violations=policy_result.violations,
             )
 
-        # 2. Idempotency: return existing task state if this exact key was
-        #    already processed for this exact task, approval type, and actor.
+        # 2. Idempotency: return existing task state if this exact key -- or
+        #    the deterministic fallback key for this same logical request
+        #    (FR-23a) -- was already processed for this exact task, approval
+        #    type, and actor.
+        candidate_keys = {idempotency_key}
+        if fallback_idempotency_key is not None:
+            candidate_keys.add(fallback_idempotency_key)
         existing = await self.db.scalar(
             select(Approval).where(
-                Approval.idempotency_key == idempotency_key,  # type: ignore[arg-type]
+                Approval.idempotency_key.in_(candidate_keys),  # type: ignore[attr-defined]
                 Approval.task_id == task.id,  # type: ignore[arg-type]
                 Approval.approval_type == approval_type.value,  # type: ignore[arg-type]
                 Approval.actor == actor,  # type: ignore[arg-type]
