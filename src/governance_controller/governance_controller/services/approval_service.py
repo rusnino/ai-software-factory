@@ -249,7 +249,7 @@ class ApprovalService:
             candidate_keys.add(fallback_idempotency_key)
         existing = await self.db.scalar(
             select(Approval).where(
-                Approval.idempotency_key.in_(candidate_keys),  # type: ignore[arg-type]
+                Approval.idempotency_key.in_(candidate_keys),  # type: ignore[attr-defined]
                 Approval.task_id == task.id,  # type: ignore[arg-type]
                 Approval.approval_type == approval_type.value,  # type: ignore[arg-type]
                 Approval.actor == actor,  # type: ignore[arg-type]
