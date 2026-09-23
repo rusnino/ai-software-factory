@@ -370,6 +370,22 @@ Requests." This is a different risk category than macro-agent's bus-factor-of-on
 not a single unmonitored maintainer, but an actively-iterating team explicitly
 telling users the API isn't stable yet.
 
+**Superseding correction (2026-09-24) — the above is now stale.** A commit on
+2026-09-20 ("Restructure AX into a general-purpose orchestration layer for
+agentic tasks") removed the local and standalone-server modes described above.
+The current README documents exactly one deployment path, and it requires a
+Kubernetes cluster with no exception: *"You need a Kubernetes cluster, `ko`, a
+container registry your cluster can pull from, and a reachable Agent Substrate
+Control API."* The CLI is now deliberately `kubectl`-shaped (`ax apply/get/
+describe/watch/delete`, follows `kubectl`'s active context via `kubectx`). The
+2026-08-25 correction's conclusion — "a Phase 1/2-scale bake-off would not
+require adopting Kubernetes at all" — no longer holds. See
+`docs/research-google-ax-fit-assessment-2026-09-24.md` for the full,
+current-as-of-this-restructuring assessment, including the finding that AX's
+git handling is a plain clone into the workspace directory with no worktree,
+landing/merge, or conflict-recovery concept at all — a materially thinner
+match for macro-agent's actual scope than this section previously implied.
+
 ### 8.3 alexngai/macro-agent — verified, and this is the important finding
 
 The repository is real (an earlier research pass's web search simply failed to
