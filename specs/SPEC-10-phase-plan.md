@@ -57,27 +57,36 @@ If OpenCode/Codex cannot receive required macro-agent MCP tools without invasive
 
 ## 10.2 Phase 2 — Plane UI + Meta Orchestrator + OPA
 
-**Status (2026-09-22): round 38 — `#406`, `#409`, `#410` all confirmed genuinely fixed via independent
-live reproduction, a genuine self-correcting sequence where Multica found and fixed two residual gaps
-in their own `#406` fix before this review round started.** `#406` added real `git status` inspection;
-`#409` (self-found) closed the gap where a *committed* forbidden-path edit was invisible to `git
-status` alone, by diffing against `ProjectProfile.repository.default_branch`; `#410` (self-found)
-closed the gap where a missing execution worktree silently skipped inspection entirely instead of
-failing closed. All three independently re-verified with real git repos, not just shipped tests. But
-the same fresh-angle hunt for a 4th gap in this identical mechanism found one: `#413` (HIGH) — the
-`git status` call has no `--ignored` flag, so a new file under a forbidden path that also matches
-`.gitignore` (a very plausible overlap — `secrets/`, `.env`, `credentials/` are exactly the kind of
-path both lists name for the same reason) is completely invisible to both `#406`'s and `#409`'s
-fixes — never shown by `git status`, never committed. Live-reproduced directly. Separately, a
-spec-vs-implementation audit (cross-referencing SPEC-01 through SPEC-09's documented guarantees
-against actual code, rather than hunting bugs code-first) found `#414` (MEDIUM): FR-23a's
-fallback-idempotency-key correlation is not implemented — a retry with an explicit `Idempotency-Key`
-after a headerless request for the same logical approval gets a misleading `409`, not the stored
-result the spec promises. Live-reproduced against a real running server. Phase 1/Phase 2 is still NOT
-gate-clean. Scope: `git log d387723..origin/main` — 3 commits.
+**Status (2026-09-24): round 39 — `#413` and `#414` both confirmed genuinely fixed via independent
+live reproduction.** But a fresh-angle review found the most severe finding in this project's
+history: `#418` (CRITICAL) — `VerificationService._git_committed_touched_paths` passes
+`ProjectProfile.repository.default_branch` unsanitized into a `git diff` argv token with no `--`
+separator. That field has only length validation — no git-ref-format check — and is settable by an
+ordinary task proposer (the *lowest* trust tier, no `X-Human-Approval-Secret` needed) via
+`POST /tasks`. A value like `--output=/some/path` is parsed by git as its own flag: `git diff` writes
+its output to that attacker-chosen file (a real arbitrary-file-write on the Controller host,
+confirmed with genuine diff content) and exits `0` with empty stdout, so the function returns
+`set()`, not `None` — silently bypassing the fail-closed check and completely hiding a real committed
+forbidden-path file. Live-reproduced directly against the real, unmodified production async method.
+This reopens the entire `#406`→`#409`→`#410`→`#413` scope-enforcement saga through a structurally new
+vector — argument injection through a trusted-looking config field, not a coverage gap in git
+invocation — and independently grants a file-write primitive. A second finding, `#419` (HIGH):
+`TelegramAdapter` never sends `Idempotency-Key`, violating SPEC-03's explicit "must always" guarantee
+for that channel; a genuine Telegram redelivery of an identical `/approve` update gets an unhandled
+`500` instead of the idempotent stored result `#414` was built to provide, live-reproduced end-to-end
+through the real HTTP intake route. Other angles (`EventBridge` dedup, `macro_agent_service`'s own API
+surface, remaining FR-/NFR- spec items, `#414`'s fallback-key collision risk under concurrency) found
+nothing else new. Phase 1/Phase 2 is still NOT gate-clean. Scope: `git log 81cc7c5..origin/main` — 2
+commits.
 
-Full detail in `docs/NEXT_STEPS.md` round 38. Total open: 2 — `#413` (HIGH), `#414` (MEDIUM). Zero
-CRITICAL/LOW.
+Full detail in `docs/NEXT_STEPS.md` round 39. Total open: 2 — `#418` (CRITICAL), `#419` (HIGH). Zero
+MEDIUM/LOW.
+
+Round 38 (superseded by the above): `#406`, `#409`, `#410` all confirmed genuinely fixed, a genuine
+self-correcting sequence where Multica found and fixed two residual gaps in their own `#406` fix
+before that review round started. Found `#413` (HIGH, a `.gitignore` blind spot in the same
+mechanism) and `#414` (MEDIUM, FR-23a's fallback-idempotency-key correlation unimplemented) — both
+fixed this round.
 
 Round 37 (superseded by the above): `#403` confirmed genuinely fixed via an explicit `_SAFE_ENV_KEYS`
 allow-list. Found `#406` (HIGH, `CompletionContract`'s scope enforcement never inspected real
