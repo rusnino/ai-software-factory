@@ -48,6 +48,7 @@ from governance_controller.services.policy_engine import (
     _forbidden_path_conflicts,
 )
 from governance_controller.services.state_machine import StateMachine
+from governance_controller.utils.git_ref import is_valid_git_branch_name
 from governance_controller.utils.paths import normalize_path
 
 _MACRO_AGENT_TERMINAL_STATUSES = {"done", "failed", "cancelled"}
@@ -399,7 +400,18 @@ class VerificationService:
         `_git_worktree_touched_paths` treats renames. Returns ``None`` when
         the diff could not be computed (ref unresolvable, git missing, the
         call timed out, etc.) so the caller can fail closed.
+
+        Defense in depth: *base_ref* is validated as a safe git ref-name argv
+        token before it is ever interpolated into the ``git diff`` argv list,
+        independent of ``RepositoryConfig.default_branch``'s own schema-level
+        validation. A value starting with ``-`` would otherwise be parsed by
+        git as a command-line flag instead of a revision, letting an attacker
+        inject arbitrary git options and, e.g., write to an arbitrary file
+        path as a side effect (NEXT-37 / GH #418).
         """
+        if not is_valid_git_branch_name(base_ref):
+            return None
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",

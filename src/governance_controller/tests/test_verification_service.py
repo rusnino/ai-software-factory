@@ -1087,6 +1087,37 @@ async def test_git_committed_diff_inspection_failure_fails_closed(tmp_path) -> N
     assert inspection["status"] == "failed"
 
 
+async def test_git_committed_touched_paths_rejects_flag_like_base_ref(
+    tmp_path,
+) -> None:
+    """NEXT-37 / GH #418: a leading-`-` `base_ref` must never reach `git diff`.
+
+    `base_ref` is interpolated as a bare argv token (`f"{base_ref}...HEAD"`)
+    with no `--` separator. A value like `--output=<path>` would otherwise be
+    parsed by git as its own `--output=<file>` flag instead of a revision,
+    letting an attacker inject arbitrary git options and, as a direct side
+    effect, write to a file of their choosing on the Controller host. This
+    reproduces the live exploit from the issue report: before the fix,
+    `_git_committed_touched_paths` returned `set()` (not `None`) and created
+    the attacker-chosen file; after the fix it must fail closed (`None`)
+    without ever invoking git with the malicious token.
+    """
+    repo = tmp_path / "repo"
+    (repo / "secrets").mkdir(parents=True)
+    (repo / "secrets" / "leak.txt").write_text("top secret\n")
+    _init_git_repo(repo)
+
+    target = tmp_path / "pwn"
+    assert not target.exists()
+
+    result = await VerificationService._git_committed_touched_paths(
+        str(repo), f"--output={target}"
+    )
+
+    assert result is None
+    assert not target.exists()
+
+
 async def test_verify_and_advance_passes_default_branch_as_base_ref(
     db_session: AsyncSession,
 ) -> None:
