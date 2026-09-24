@@ -80,6 +80,56 @@ def test_project_profile_defaults() -> None:
     assert profile.execution.max_parallel_agents == 3
 
 
+@pytest.mark.parametrize(
+    "default_branch",
+    [
+        "--output=/tmp/pwn",
+        "-x",
+        "--",
+        "main~1",
+        "main^",
+        "main:file",
+        "main?",
+        "main*",
+        "main[",
+        "main\\x",
+        "..",
+        "feature/../main",
+        "feature@{upstream}",
+        "@",
+        "/main",
+        "main/",
+        "feature//main",
+        "main.",
+        "main.lock",
+        ".hidden",
+        "main branch",
+        "main\tbranch",
+    ],
+)
+def test_default_branch_rejects_unsafe_ref_names(default_branch: str) -> None:
+    """NEXT-37 / GH #418: `default_branch` is interpolated as a bare argv
+    token into `git diff` with no `--` separator. A value starting with `-`
+    is parsed by git as a command-line flag instead of a revision, letting an
+    ordinary task proposer inject arbitrary git options (and, as a direct
+    side effect, write to an arbitrary file on the Controller host). This
+    must be rejected at profile-validation time, before any git subprocess
+    is ever invoked with it -- fails pre-fix (any string was accepted),
+    passes post-fix.
+    """
+    with pytest.raises(ValidationError):
+        RepositoryConfig(path="/repo", default_branch=default_branch)
+
+
+@pytest.mark.parametrize(
+    "default_branch",
+    ["main", "master", "release/1.0", "feature-x", "dev_branch", "v1.2.3"],
+)
+def test_default_branch_accepts_normal_branch_names(default_branch: str) -> None:
+    config = RepositoryConfig(path="/repo", default_branch=default_branch)
+    assert config.default_branch == default_branch
+
+
 def test_completion_contract_scope_check() -> None:
     contract = CompletionContract(
         task_id="task-1",

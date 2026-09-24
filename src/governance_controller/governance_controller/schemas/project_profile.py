@@ -1,8 +1,9 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from governance_controller.utils.bounded_dict import bounded_dict_field
+from governance_controller.utils.git_ref import is_valid_git_branch_name
 from governance_controller.utils.paths import reject_root_prefixes
 
 SandboxMode = Literal["worktree", "docker", "firecracker", "kata"]
@@ -25,6 +26,23 @@ class ProjectExecutionConfig(BaseModel):
 class RepositoryConfig(BaseModel):
     path: str = Field(..., min_length=1, max_length=1024)
     default_branch: str = Field(default="main", min_length=1, max_length=256)
+
+    @field_validator("default_branch")
+    @classmethod
+    def _validate_default_branch(cls, value: str) -> str:
+        """Reject anything that isn't a safe git ref-name argv token.
+
+        ``default_branch`` is interpolated directly into a `git diff` argv
+        position (``VerificationService._git_committed_touched_paths``). A
+        value starting with `-` would be parsed by git as a command-line
+        flag rather than a revision, letting an ordinary task proposer
+        inject arbitrary git options (NEXT-37 / GH #418).
+        """
+        if not is_valid_git_branch_name(value):
+            raise ValueError(
+                f"default_branch is not a valid git branch name: {value!r}"
+            )
+        return value
 
 
 class SecurityConfig(BaseModel):
