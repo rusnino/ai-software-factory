@@ -3,6 +3,7 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -120,6 +121,28 @@ async def _pool_timeout_exception_handler(
         content={"detail": "Database pool exhausted, retry later"},
         headers={"Retry-After": "2"},
     )
+
+
+@app.exception_handler(httpx.HTTPStatusError)
+async def _upstream_http_status_exception_handler(
+    _request: Request,
+    exc: httpx.HTTPStatusError,
+) -> JSONResponse:
+    """Relay an internal adapter's upstream call status instead of a 500.
+
+    Adapters (e.g. ``TelegramAdapter.process_update``) call back into this
+    Controller's own ``/approvals`` API over HTTP and raise
+    ``httpx.HTTPStatusError`` via ``raise_for_status()``. Left uncaught, a
+    meaningful upstream response -- a clean ``409`` for a genuine conflict --
+    turned into an opaque ``500`` at the adapter's own endpoint boundary
+    (#419).
+    """
+    response = exc.response
+    try:
+        content = response.json()
+    except ValueError:
+        content = {"detail": response.text}
+    return JSONResponse(status_code=response.status_code, content=content)
 
 
 @app.exception_handler(ValidationError)
