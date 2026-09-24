@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -503,6 +504,56 @@ async def test_intake_telegram_media_without_caption(
         },
     )
     assert response.status_code == 200
+
+
+async def test_telegram_approve_conflict_surfaces_as_409_not_500(
+    async_client: AsyncClient,
+    fake_ingestion: _FakeIngestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#419 defense-in-depth: a genuine conflict from the internal
+    ``process_update`` -> ``/approvals`` call must surface as the upstream's
+    own status code, not crash into an unhandled 500 at the
+    ``/intake/telegram`` boundary.
+    """
+    monkeypatch.setattr("governance_controller.config.settings.intake_secret", "secret")
+    monkeypatch.setattr(
+        "governance_controller.config.settings.telegram_webhook_secret_token",
+        "secret",
+    )
+    conflict_request = httpx.Request("POST", "http://localhost:8000/approvals")
+    conflict_response = httpx.Response(
+        409,
+        json={"detail": "Invalid transition"},
+        request=conflict_request,
+    )
+
+    async def _raise_conflict(*args: Any, **kwargs: Any) -> None:
+        raise httpx.HTTPStatusError(
+            "409 Conflict", request=conflict_request, response=conflict_response
+        )
+
+    monkeypatch.setattr(
+        "governance_controller.adapters.telegram.TelegramAdapter.process_update",
+        _raise_conflict,
+    )
+    response = await async_client.post(
+        "/intake/telegram",
+        json={
+            "message": {
+                "message_id": 9,
+                "from": {"id": 1, "username": "alice"},
+                "text": "/approve TASK-9",
+            }
+        },
+        headers={
+            "X-Telegram-Bot-Api-Secret-Token": "secret",
+            "X-Intake-Secret": "secret",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Invalid transition"}
 
 
 async def test_intake_telegram_rejects_oversized_body(

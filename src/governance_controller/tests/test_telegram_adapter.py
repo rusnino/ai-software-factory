@@ -114,7 +114,10 @@ class TestTelegramAdapter:
                 "timestamp": mock_client.post.call_args.kwargs["json"]["timestamp"],
                 "comment": None,
             },
-            headers={"X-Controller-Secret": "controller-secret"},
+            headers={
+                "X-Controller-Secret": "controller-secret",
+                "Idempotency-Key": "telegram-message:12345:None-TASK-1-execution",
+            },
         )
         assert result == {"status": "ok"}
 
@@ -263,6 +266,143 @@ class TestTelegramAdapter:
                 )
 
                 assert result == {"status": "ok"}
+                task_response = await client.get(
+                    f"{base_url}/tasks/{task_id}",
+                    headers={"X-Controller-Secret": controller_secret},
+                )
+                assert task_response.status_code == 200
+                assert task_response.json()["state"] == "PLAN_APPROVED"
+        finally:
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+
+    async def test_process_update_redelivered_update_is_idempotent_not_500(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """#419: a Telegram redelivery of the same update must not crash.
+
+        Telegram redelivers an update whenever an ack is slow or a transport
+        retry occurs -- a common, documented behavior, not a contrived edge
+        case. Before this fix, ``process_update`` derived its only
+        correlation signal from a freshly-generated timestamp, so a
+        redelivery produced a *different* server-side fallback idempotency
+        key, the CAS check saw an already-advanced task state, ``/approvals``
+        returned 409, and the uncaught ``httpx.HTTPStatusError`` propagated
+        as an unhandled 500. A stable ``Idempotency-Key`` derived from the
+        Telegram update's own ``update_id`` must make the redelivery resolve
+        to the same idempotent success instead.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        db_path = tmp_path / "live_telegram_redelivery.db"
+        controller_secret = "live-telegram-controller-secret-419"
+        telegram_secret = "live-telegram-webhook-secret-419"
+        base_url = f"http://127.0.0.1:{port}"
+        server_env = {
+            **os.environ,
+            "GC_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+            "GC_CONTROLLER_API_SECRET": controller_secret,
+            "GC_PLANE_BASE_URL": "",
+            "GC_KNOWN_PROPOSERS": "agent-1",
+        }
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "governance_controller.main:app",
+                "--port",
+                str(port),
+            ],
+            env=server_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            async with httpx.AsyncClient(timeout=0.5) as client:
+                while time.monotonic() < deadline:
+                    if server.poll() is not None:
+                        output = server.stdout.read() if server.stdout else ""
+                        pytest.fail(f"Controller server exited early:\n{output}")
+                    try:
+                        response = await client.get(f"{base_url}/health")
+                        if response.status_code == 200:
+                            break
+                    except httpx.HTTPError:
+                        pass
+                    await asyncio.sleep(0.2)
+                else:
+                    pytest.fail("Controller server did not become ready in time")
+
+                task_id = "live-telegram-task-419"
+                create_response = await client.post(
+                    f"{base_url}/tasks",
+                    json={
+                        "task_contract": {
+                            "task_id": task_id,
+                            "project_id": "live-telegram-project-419",
+                            "proposed_by": "agent-1",
+                            "objective": "Live Telegram redelivery regression",
+                            "acceptance": ["Redelivered /approve is idempotent"],
+                        },
+                        "project_profile": {
+                            "project_id": "live-telegram-project-419",
+                            "project_name": "Live Telegram Project",
+                            "repository": {"path": "/tmp/repo"},
+                        },
+                    },
+                    headers={"X-Controller-Secret": controller_secret},
+                )
+                assert create_response.status_code == 201, create_response.text
+
+                monkeypatch.setattr(
+                    "governance_controller.config.settings.controller_api_secret",
+                    controller_secret,
+                )
+                adapter = TelegramAdapter(
+                    base_url=base_url,
+                    secret_token=telegram_secret,
+                )
+                # Identical update -- same `update_id` -- delivered twice,
+                # simulating Telegram's own redelivery of an unacked update.
+                update = {
+                    "update_id": 555419,
+                    "message": {
+                        "message_id": 42,
+                        "text": f"/approve {task_id} plan",
+                        "chat": {"id": 12345},
+                        "from": {"id": 111, "username": "alice"},
+                    },
+                }
+
+                first = await adapter.process_update(
+                    update, secret_token_header=telegram_secret
+                )
+                assert first == {"status": "ok"}
+
+                # A real gap crossing a second boundary, mirroring the
+                # issue's own live reproduction: pre-fix, the fallback key is
+                # rounded from a freshly-generated timestamp, so a
+                # same-second retry would coincidentally still match and mask
+                # the bug. A real Telegram redelivery is not bounded to the
+                # same second.
+                await asyncio.sleep(1.5)
+
+                second = await adapter.process_update(
+                    update, secret_token_header=telegram_secret
+                )
+                assert second == {"status": "ok"}
+
                 task_response = await client.get(
                     f"{base_url}/tasks/{task_id}",
                     headers={"X-Controller-Secret": controller_secret},

@@ -92,6 +92,30 @@ class TelegramAdapter:
         """Return the text or caption from a Telegram message object."""
         return cast(str, message.get("text") or message.get("caption") or "")
 
+    @staticmethod
+    def _derive_idempotency_key(
+        update: dict[str, Any],
+        message: dict[str, Any],
+        task_id: str,
+        approval_type: ApprovalType,
+    ) -> str:
+        """Build a stable `Idempotency-Key` for this Telegram update (#419).
+
+        Telegram redelivers updates on slow acks or transport retries; the
+        redelivered payload carries the same top-level ``update_id`` as the
+        original. Deriving the key from ``update_id`` (falling back to the
+        message's ``chat.id`` + ``message_id`` when absent) instead of a
+        freshly-generated timestamp keeps the key -- and therefore the
+        server-side idempotency match -- identical across redeliveries.
+        """
+        update_id = update.get("update_id")
+        if update_id is not None:
+            basis = f"update:{update_id}"
+        else:
+            chat = cast(dict[str, Any], message.get("chat", {}))
+            basis = f"message:{chat.get('id')}:{message.get('message_id')}"
+        return f"telegram-{basis}-{task_id}-{approval_type.value}"
+
     async def process_update(
         self,
         update: dict[str, Any],
@@ -127,7 +151,12 @@ class TelegramAdapter:
             timestamp=datetime.now(UTC).isoformat(),
         )
 
-        headers = {"X-Controller-Secret": settings.controller_api_secret}
+        headers = {
+            "X-Controller-Secret": settings.controller_api_secret,
+            "Idempotency-Key": self._derive_idempotency_key(
+                update, message, task_id, approval_type
+            ),
+        }
         if (
             approval_type in (ApprovalType.EXECUTION, ApprovalType.MERGE)
             and settings.human_approval_secret
